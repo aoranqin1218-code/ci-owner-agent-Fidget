@@ -1,0 +1,14 @@
+{
+  "name": "ci-owner-agent-ts-analyzer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "analyze-changed-functions": "node src/analyze_changed_functions.js",
+    "find-definitions": "node src/find_definitions.js",
+    "find-callers": "node src/find_callers.js"
+  },
+  "dependencies": {
+    "typescript": "^5.9.3"
+  }
+}

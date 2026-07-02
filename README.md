@@ -78,9 +78,20 @@ Jenkins analyze mode is implemented. It reads build metadata and console logs fr
 
 ## TypeScript Analyzer
 
-The TypeScript analyzer is planned for phase 3. Current Python tool functions return structured failures so the main analysis can degrade gracefully.
+The TypeScript analyzer lives under `ts-analyzer/` and is called by Python through `node` subprocesses. It provides:
 
-Future setup will live under `ts-analyzer/` and use Node.js plus the `typescript` package.
+- `ts_analyze_changed_functions`
+- `ts_find_definitions`
+- `ts_find_callers`
+
+Install its Node dependency before using the successful TypeScript paths:
+
+```bash
+cd ts-analyzer
+npm install
+```
+
+If Node.js, `typescript`, `tsconfig.json`, or Program creation is unavailable, the Python tools return structured errors and the main analysis continues.
 
 ## Output JSON
 
@@ -132,7 +143,7 @@ Tests create temporary Git repositories under `tmp_path`; they do not call Jenki
 ## Known Limits
 
 - Jenkins API tools and `JenkinsLogProvider` are implemented, but require `JENKINS_URL` and optional credentials in `.env`.
-- TypeScript Compiler API tools are phase 3 structured placeholders.
+- TypeScript Compiler API tools are implemented as subprocess-backed optional analysis helpers.
 - The current agent is rule based, not a real LangChain tool-calling LLM agent.
 - `repo_sync` errors are warnings in local analysis so temporary repos without remotes can still be analyzed; formal Jenkins mode should treat sync failure as blocking for high-confidence ownership.
 - The rule engine is intentionally conservative and prefers `无高可信责任人` when evidence is weak.

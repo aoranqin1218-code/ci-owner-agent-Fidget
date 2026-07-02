@@ -9,3 +9,4 @@ build/
 .env
 .coverage
 htmlcov/
+ts-analyzer/node_modules/

@@ -45,6 +45,18 @@ def sample_repo(repo_cache: Path) -> dict[str, str]:
         "}\n",
         encoding="utf-8",
     )
+    consumer = target / "consumer.ts"
+    consumer.write_text(
+        "import { classifyError } from './classify';\n"
+        "export function consume(size: number) {\n"
+        "  return classifyError(size);\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    (repo / "tsconfig.json").write_text(
+        '{ "compilerOptions": { "target": "ES2020", "module": "CommonJS", "strict": true }, "include": ["packages/**/*.ts"] }\n',
+        encoding="utf-8",
+    )
     readme = repo / "README.md"
     readme.write_text("# sample\n", encoding="utf-8")
     git(repo, "add", ".")
