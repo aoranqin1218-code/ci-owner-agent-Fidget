@@ -83,11 +83,16 @@ class GitClient:
         )
         if not status.ok:
             return {"ok": False, "error": "failed to inspect worktree status", "command": status.to_dict()}
-        if status.stdout.strip() and not force:
+        dirty_lines = [
+            line
+            for line in status.stdout.splitlines()
+            if line.strip() and not line[3:].replace("\\", "/").startswith(".ci-owner-agent/")
+        ]
+        if dirty_lines and not force:
             return {
                 "ok": False,
                 "error": "worktree is not clean; refusing to checkout analysis commit without force=True",
-                "status": status.stdout,
+                "status": "\n".join(dirty_lines),
                 "repoPath": str(path),
             }
         checkout_args = ["git", "-C", str(path), "checkout", "--detach"]

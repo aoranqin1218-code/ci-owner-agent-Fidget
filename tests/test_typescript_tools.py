@@ -8,6 +8,7 @@ from ci_owner_agent.orchestrator import analyze_local
 from ci_owner_agent.services.command_runner import run_command
 from ci_owner_agent.services.git_client import GitClient
 from ci_owner_agent.tools.typescript_tools import (
+    check_node_dependencies_for_analysis,
     ts_analyze_changed_functions,
     ts_find_callers,
     ts_find_definitions,
@@ -59,6 +60,51 @@ def test_typescript_tool_missing_dependency_is_structured(repo_cache: Path, samp
     assert result["ok"] is False
     assert result["definitions"] == []
     assert "typescript package is not installed" in result["error"]
+
+
+def test_check_node_dependencies_missing_node_modules(repo_cache: Path, sample_repo):
+    result = check_node_dependencies_for_analysis(sample_repo["repo"], repo_cache_dir=repo_cache)
+    assert result["ok"] is False
+    assert "node_modules" in result["missing"]
+    assert "npm install" in result["suggestion"]
+
+
+def test_check_node_dependencies_missing_extends_package(repo_cache: Path, sample_repo):
+    repo_path = Path(sample_repo["path"])
+    (repo_path / "node_modules").mkdir()
+    (repo_path / "tsconfig.json").write_text('{"extends":"nstarter-tsconfig","include":["packages/**/*.ts"]}', encoding="utf-8")
+    result = check_node_dependencies_for_analysis(sample_repo["repo"], repo_cache_dir=repo_cache)
+    assert result["ok"] is False
+    assert "node_modules/nstarter-tsconfig" in result["missing"]
+
+
+def test_check_node_dependencies_hash_marker_unchanged(repo_cache: Path, sample_repo):
+    repo_path = Path(sample_repo["path"])
+    (repo_path / "node_modules").mkdir()
+    (repo_path / "package.json").write_text('{"dependencies":{"typescript":"^5.9.3"}}', encoding="utf-8")
+    first = check_node_dependencies_for_analysis(sample_repo["repo"], repo_cache_dir=repo_cache)
+    assert first["ok"] is True
+    assert (repo_path / ".ci-owner-agent" / "deps.json").exists()
+
+    second = check_node_dependencies_for_analysis(sample_repo["repo"], repo_cache_dir=repo_cache)
+    assert second["ok"] is True
+    assert second["dependenciesCurrent"] is True
+    assert not any("changed" in warning for warning in second["warnings"])
+
+
+def test_check_node_dependencies_hash_change_warns(repo_cache: Path, sample_repo):
+    repo_path = Path(sample_repo["path"])
+    (repo_path / "node_modules").mkdir()
+    package_json = repo_path / "package.json"
+    package_json.write_text('{"dependencies":{"typescript":"^5.9.3"}}', encoding="utf-8")
+    first = check_node_dependencies_for_analysis(sample_repo["repo"], repo_cache_dir=repo_cache)
+    assert first["ok"] is True
+
+    package_json.write_text('{"dependencies":{"typescript":"^5.9.3","left-pad":"1.3.0"}}', encoding="utf-8")
+    second = check_node_dependencies_for_analysis(sample_repo["repo"], repo_cache_dir=repo_cache)
+    assert second["ok"] is True
+    assert second["dependenciesCurrent"] is False
+    assert any("dependency definition files changed" in warning for warning in second["warnings"])
 
 
 @pytest.mark.skipif(not has_typescript_dependency(), reason="typescript npm dependency is not installed")

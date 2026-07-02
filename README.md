@@ -95,6 +95,19 @@ If Node.js, `typescript`, `tsconfig.json`, or Program creation is unavailable, t
 
 `ts_find_definitions` and `ts_find_callers` analyze the requested `commit` by checking out the dedicated analysis repository to that commit in detached HEAD mode before creating the TypeScript Program. The project intentionally does not create temporary worktrees or temporary checkout directories; the repo cache is assumed to be agent-owned. Dirty worktrees are rejected unless `force_checkout=True` is passed.
 
+The analyzer always uses the real project `tsconfig` passed by the caller, defaulting to `tsconfig.json`. It does not provide a fallback tsconfig and does not generate `tsconfig.ci-agent.json`.
+
+Prepare target repo dependencies once in the agent-owned repo:
+
+```bash
+cd E:/ci-agent-cache/fx-code
+npm install
+```
+
+`git checkout --detach --force <commit>` does not delete `node_modules`, and this project never runs `git clean -fdx`, so installed dependencies are reused across later checkouts. You usually only need to reinstall when `package.json` or a lock file changes, or when `node_modules` is deleted. If `tsconfig.json` extends an npm package such as `nstarter-tsconfig`, that package must already exist under the target repo's `node_modules`.
+
+Use `check_node_dependencies_for_analysis(repo, tsconfig="tsconfig.json")` to check whether `node_modules`, `tsconfig`, extended config files, and dependency marker hashes are ready. It writes `.ci-owner-agent/deps.json` with hashes of `package.json`, `package-lock.json`, `pnpm-lock.yaml`, and `yarn.lock`. The check does not install by default. If explicitly called with `install=True`, it chooses `npm install`, `pnpm install`, or `yarn install` from the lock file and returns structured install errors instead of crashing.
+
 ## Output JSON
 
 Output is a `CiResponsibilityNotice` with:
@@ -147,6 +160,7 @@ Tests create temporary Git repositories under `tmp_path`; they do not call Jenki
 - Jenkins API tools and `JenkinsLogProvider` are implemented, but require `JENKINS_URL` and optional credentials in `.env`.
 - TypeScript Compiler API tools are implemented as subprocess-backed optional analysis helpers.
 - `ts_find_definitions` and `ts_find_callers` may detach-checkout the agent-owned analysis repository to the requested commit; do not point `CI_AGENT_REPO_CACHE_DIR` at a human developer working copy.
+- TypeScript dependency checks do not auto-install unless explicitly requested with `install=True`; real project `tsconfig` and installed npm dependencies must be available in the target repo.
 - The current agent is rule based, not a real LangChain tool-calling LLM agent.
 - `repo_sync` errors are warnings in local analysis so temporary repos without remotes can still be analyzed; formal Jenkins mode should treat sync failure as blocking for high-confidence ownership.
 - The rule engine is intentionally conservative and prefers `无高可信责任人` when evidence is weak.
