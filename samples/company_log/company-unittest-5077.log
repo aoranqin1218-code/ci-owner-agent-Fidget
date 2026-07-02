@@ -1,0 +1,2019 @@
+Started by an SCM change
+Obtained jenkins/jenkinsfile.unittest.gvy from git https://code.fineres.com/scm/fx/fx-code.git
+[Pipeline] Start of Pipeline
+[Pipeline] node
+Running on node01 in /var/lib/jenkins/workspace/services/fx-code-unittest
+[Pipeline] {
+[Pipeline] stage
+[Pipeline] { (Declarative: Checkout SCM)
+[Pipeline] checkout
+The recommended git tool is: git
+using credential fbb50c7a-c525-4053-ad75-e9bf11e1e4cf
+Fetching changes from the remote Git repository
+ > git rev-parse --resolve-git-dir /var/lib/jenkins/workspace/services/fx-code-unittest/.git # timeout=10
+ > git config remote.origin.url https://code.fineres.com/scm/fx/fx-code.git # timeout=10
+Fetching upstream changes from https://code.fineres.com/scm/fx/fx-code.git
+ > git --version # timeout=10
+ > git --version # 'git version 2.43.5'
+using GIT_ASKPASS to set credentials bitbucket build token
+ > git fetch --tags --force --progress -- https://code.fineres.com/scm/fx/fx-code.git +refs/heads/*:refs/remotes/origin/* # timeout=10
+Checking out Revision effaf658da8924b3196b1d9283c564120c4bdc58 (refs/remotes/origin/dev)
+Enabling Git LFS pull
+ > git rev-parse refs/remotes/origin/dev^{commit} # timeout=10
+ > git config core.sparsecheckout # timeout=10
+ > git checkout -f effaf658da8924b3196b1d9283c564120c4bdc58 # timeout=10
+ > git config --get remote.origin.url # timeout=10
+using GIT_ASKPASS to set credentials bitbucket build token
+ > git lfs pull origin # timeout=10
+Commit message: "Pull request #27479: update: m-6924896434 && f-7026673929 && f-7025511395 && f-7026865837 && f-7028340269"
+ > git rev-list --no-walk 7ef7e68cc8dd94ea5ba20a0286a10a8a8838036a # timeout=10
+[Pipeline] }
+[Pipeline] // stage
+[Pipeline] withEnv
+[Pipeline] {
+[Pipeline] withCredentials
+Masking supported pattern matches of $webhook_key or $MINIO_AK or $NX_CACHE_KEY or $MINIO_SK
+[Pipeline] {
+[Pipeline] withEnv
+[Pipeline] {
+[Pipeline] stage
+[Pipeline] { (ci-prepare)
+[Pipeline] sh
++ make ci-prepare
+rm -rf ci-dependencies/ ci-fonts/
+mkdir ci-dependencies ci-fonts/
+cp --parents modules/*/package.json packages/*/package.json ./ci-dependencies
+mv resources/fonts ./ci-fonts
+[Pipeline] }
+[Pipeline] // stage
+[Pipeline] stage
+[Pipeline] { (Test)
+[Pipeline] lock
+Trying to acquire lock on [Resource: fx-mongodb]
+Lock acquired on [Resource: fx-mongodb]
+[Pipeline] {
+[Pipeline] sh
++ make docker-test
+docker build --target test-report -o report --build-arg NX_CACHE_STAGE=enable-nx-cache --build-arg NX_CACHE_KEY=**** --build-arg MINIO_SK=**** --build-arg MINIO_AK=**** --build-arg PRE_STAGE=lint .
+2026/06/25 20:01:20 in: []string{}
+2026/06/25 20:01:20 Parsed entitlements: []
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile:
+#1 transferring dockerfile: 4.99kB done
+#1 DONE 0.2s
+
+#2 [internal] load metadata for harbor.dev.jdydevelop.com/devops-images/node:22.20.0-alpine
+#2 ...
+
+#3 [auth] devops-images/node:pull token for harbor.dev.jdydevelop.com
+#3 DONE 0.0s
+
+#2 [internal] load metadata for harbor.dev.jdydevelop.com/devops-images/node:22.20.0-alpine
+#2 DONE 0.4s
+
+#4 [internal] load .dockerignore
+#4 transferring context:
+#4 transferring context: 313B done
+#4 DONE 0.2s
+
+#5 [base-env 1/7] FROM harbor.dev.jdydevelop.com/devops-images/node:22.20.0-alpine@sha256:dfdd21476551600c72954f2d61c7a9b426adc8d84acf0bf042dcd1e445e5a970
+#5 DONE 0.0s
+
+#6 [internal] load build context
+#6 transferring context: 353.08MB 4.8s
+#6 transferring context: 405.48MB 6.9s done
+#6 DONE 7.4s
+
+#7 [base-env 2/7] WORKDIR /var/app
+#7 CACHED
+
+#8 [base-env 3/7] COPY ci-fonts/fonts ./resources/fonts
+#8 CACHED
+
+#9 [base-env 4/7] COPY resources/ ./resources
+#9 DONE 3.9s
+
+#10 [base-env 5/7] COPY .npmrc package.json package-lock.json ci-dependencies ./
+#10 DONE 0.3s
+
+#11 [base-env 6/7] COPY patches ./patches
+#11 DONE 0.2s
+
+#12 [base-env 7/7] RUN npm install --production
+#12 0.705 npm warn config production Use `--omit=dev` instead.
+#12 13.11 npm warn deprecated xmldom@0.2.1: Deprecated due to CVE-2021-21366 resolved in 0.5.0
+#12 13.15 npm warn deprecated whatwg-encoding@3.1.1: Use @exodus/bytes instead for a more spec-conformant and faster implementation
+#12 13.24 npm warn deprecated uuid@3.2.1: Please upgrade  to version 7 or higher.  Older versions may use Math.random() in certain circumstances, which is known to be problematic.  See https://v8.dev/blog/math-random for details.
+#12 14.60 npm warn deprecated sourcemap-codec@1.4.8: Please use @jridgewell/sourcemap-codec instead
+#12 14.88 npm warn deprecated scmp@2.1.0: Just use Node.js's crypto.timingSafeEqual()
+#12 15.30 npm warn deprecated request@2.88.2: request has been deprecated, see https://github.com/request/request/issues/3142
+#12 16.83 npm warn deprecated nomnom@1.5.2: Package no longer supported. Contact support@npmjs.com for more info.
+#12 18.57 npm warn deprecated lodash.isequal@4.5.0: This package is deprecated. Use require('node:util').isDeepStrictEqual instead.
+#12 20.55 npm warn deprecated inflight@1.0.6: This module is not supported, and leaks memory. Do not use it. Check out lru-cache if you want a good and tested way to coalesce async requests by a key value, which is much more comprehensive and powerful.
+#12 21.10 npm warn deprecated har-validator@5.1.5: this library is no longer supported
+#12 21.52 npm warn deprecated fstream@1.0.12: This package is no longer supported.
+#12 22.75 npm warn deprecated csurf@1.11.0: This package is archived and no longer maintained. For support, visit https://github.com/expressjs/express/discussions
+#12 22.98 npm warn deprecated deep-diff@1.0.1: Package no longer supported. Contact Support at https://www.npmjs.com/support for more info.
+#12 28.20 npm warn deprecated @opentelemetry/instrumentation-redis-4@0.49.0: Use "@opentelemetry/instrumentation-redis", which (as of v0.50.0) includes support for instrumenting redis v4.
+#12 32.92 npm warn deprecated glob@7.2.3: Old versions of glob are not supported, and contain widely publicized security vulnerabilities, which have been fixed in the current version. Please update. Support for old versions may be purchased (at exorbitant rates) by contacting i@izs.me
+#12 33.58 npm warn deprecated @xmldom/xmldom@0.7.13: this version has critical issues, please update to the latest version
+#12 35.05 npm warn deprecated glob@7.2.3: Old versions of glob are not supported, and contain widely publicized security vulnerabilities, which have been fixed in the current version. Please update. Support for old versions may be purchased (at exorbitant rates) by contacting i@izs.me
+#12 35.14 npm warn deprecated uuid@3.4.0: Please upgrade  to version 7 or higher.  Older versions may use Math.random() in certain circumstances, which is known to be problematic.  See https://v8.dev/blog/math-random for details.
+#12 35.89 npm warn deprecated rimraf@2.7.1: Rimraf versions prior to v4 are no longer supported
+#12 36.03 npm warn deprecated glob@7.2.3: Old versions of glob are not supported, and contain widely publicized security vulnerabilities, which have been fixed in the current version. Please update. Support for old versions may be purchased (at exorbitant rates) by contacting i@izs.me
+#12 38.88 npm warn deprecated rimraf@2.7.1: Rimraf versions prior to v4 are no longer supported
+#12 38.98 npm warn deprecated glob@7.2.3: Old versions of glob are not supported, and contain widely publicized security vulnerabilities, which have been fixed in the current version. Please update. Support for old versions may be purchased (at exorbitant rates) by contacting i@izs.me
+#12 40.69 npm warn deprecated glob@7.2.3: Old versions of glob are not supported, and contain widely publicized security vulnerabilities, which have been fixed in the current version. Please update. Support for old versions may be purchased (at exorbitant rates) by contacting i@izs.me
+#12 41.58 npm warn deprecated uuid@9.0.1: uuid@10 and below is no longer supported.  For ESM codebases, update to uuid@latest.  For CommonJS codebases, use uuid@11 (but be aware this version will likely be deprecated in 2028).
+#12 107.1 
+#12 107.1 > postinstall
+#12 107.1 > npm run patch:deps
+#12 107.1 
+#12 107.3 
+#12 107.3 > patch:deps
+#12 107.3 > patch-package
+#12 107.3 
+#12 107.6 patch-package 8.0.0
+#12 107.6 Applying patches...
+#12 107.6 @boundaryml/baml@0.206.1 ✔
+#12 107.7 
+#12 107.7 added 1953 packages in 2m
+#12 107.7 
+#12 107.7 187 packages are looking for funding
+#12 107.7   run `npm fund` for details
+#12 107.7 npm notice
+#12 107.7 npm notice New major version of npm available! 10.9.3 -> 11.17.0
+#12 107.7 npm notice Changelog: https://github.com/npm/cli/releases/tag/v11.17.0
+#12 107.7 npm notice To update run: npm install -g npm@11.17.0
+#12 107.7 npm notice
+#12 DONE 111.1s
+
+#13 [build-env 1/8] RUN apk add --no-cache tzdata     && npm install
+#13 0.508 fetch https://mirrors.aliyun.com/alpine/v3.22/main/x86_64/APKINDEX.tar.gz
+#13 1.811 fetch https://mirrors.aliyun.com/alpine/v3.22/community/x86_64/APKINDEX.tar.gz
+#13 6.716 (1/1) Installing tzdata (2026b-r0)
+#13 7.002 OK: 11 MiB in 19 packages
+#13 16.95 npm warn deprecated glob@7.2.3: Old versions of glob are not supported, and contain widely publicized security vulnerabilities, which have been fixed in the current version. Please update. Support for old versions may be purchased (at exorbitant rates) by contacting i@izs.me
+#13 16.95 npm warn deprecated glob@7.2.3: Old versions of glob are not supported, and contain widely publicized security vulnerabilities, which have been fixed in the current version. Please update. Support for old versions may be purchased (at exorbitant rates) by contacting i@izs.me
+#13 16.95 npm warn deprecated glob@7.2.3: Old versions of glob are not supported, and contain widely publicized security vulnerabilities, which have been fixed in the current version. Please update. Support for old versions may be purchased (at exorbitant rates) by contacting i@izs.me
+#13 16.95 npm warn deprecated glob@7.2.3: Old versions of glob are not supported, and contain widely publicized security vulnerabilities, which have been fixed in the current version. Please update. Support for old versions may be purchased (at exorbitant rates) by contacting i@izs.me
+#13 16.95 npm warn deprecated glob@7.2.3: Old versions of glob are not supported, and contain widely publicized security vulnerabilities, which have been fixed in the current version. Please update. Support for old versions may be purchased (at exorbitant rates) by contacting i@izs.me
+#13 16.95 npm warn deprecated glob@7.2.3: Old versions of glob are not supported, and contain widely publicized security vulnerabilities, which have been fixed in the current version. Please update. Support for old versions may be purchased (at exorbitant rates) by contacting i@izs.me
+#13 16.95 npm warn deprecated glob@7.2.3: Old versions of glob are not supported, and contain widely publicized security vulnerabilities, which have been fixed in the current version. Please update. Support for old versions may be purchased (at exorbitant rates) by contacting i@izs.me
+#13 17.66 npm warn deprecated urix@0.1.0: Please see https://github.com/lydell/urix#deprecated
+#13 17.88 npm warn deprecated supertest@7.0.0: Please upgrade to supertest v7.1.3+, see release notes at https://github.com/forwardemail/supertest/releases/tag/v7.1.3 - maintenance is supported by Forward Email @ https://forwardemail.net
+#13 17.95 npm warn deprecated source-map-url@0.4.1: See https://github.com/lydell/source-map-url#deprecated
+#13 18.00 npm warn deprecated source-map-resolve@0.5.3: See https://github.com/lydell/source-map-resolve#deprecated
+#13 18.02 npm warn deprecated resolve-url@0.2.1: https://github.com/lydell/resolve-url#deprecated
+#13 18.50 npm warn deprecated lodash.get@4.4.2: This package is deprecated. Use the optional chaining (?.) operator instead.
+#13 19.40 npm warn deprecated superagent@7.1.6: Please upgrade to superagent v10.2.2+, see release notes at https://github.com/forwardemail/superagent/releases/tag/v10.2.2 - maintenance is supported by Forward Email @ https://forwardemail.net
+#13 20.17 npm warn deprecated @types/redis@4.0.11: This is a stub types definition. redis provides its own type definitions, so you do not need this installed.
+#13 20.61 npm warn deprecated glob@11.0.0: Old versions of glob are not supported, and contain widely publicized security vulnerabilities, which have been fixed in the current version. Please update. Support for old versions may be purchased (at exorbitant rates) by contacting i@izs.me
+#13 21.24 npm warn deprecated @humanwhocodes/object-schema@2.0.3: Use @eslint/object-schema instead
+#13 21.43 npm warn deprecated @humanwhocodes/config-array@0.11.14: Use @eslint/config-array instead
+#13 21.93 npm warn deprecated @babel/polyfill@7.12.1: 🚨 This package has been deprecated in favor of separate inclusion of a polyfill and regenerator-runtime (when needed). See the @babel/polyfill docs (https://babeljs.io/docs/en/babel-polyfill) for more information.
+#13 22.34 npm warn deprecated eslint@8.56.0: This version is no longer supported. Please see https://eslint.org/version-support for other options.
+#13 22.85 npm warn deprecated supertest@3.4.2: Please upgrade to supertest v7.1.3+, see release notes at https://github.com/forwardemail/supertest/releases/tag/v7.1.3 - maintenance is supported by Forward Email @ https://forwardemail.net
+#13 22.90 npm warn deprecated formidable@1.2.6: Please upgrade to latest, formidable@v2 or formidable@v3! Check these notes: https://bit.ly/2ZEqIau
+#13 23.08 npm warn deprecated rimraf@3.0.2: Rimraf versions prior to v4 are no longer supported
+#13 23.21 npm warn deprecated superagent@3.8.3: Please upgrade to superagent v10.2.2+, see release notes at https://github.com/forwardemail/superagent/releases/tag/v10.2.2 - maintenance is supported by Forward Email @ https://forwardemail.net
+#13 23.40 npm warn deprecated rimraf@3.0.2: Rimraf versions prior to v4 are no longer supported
+#13 23.73 npm warn deprecated superagent@9.0.2: Please upgrade to superagent v10.2.2+, see release notes at https://github.com/forwardemail/superagent/releases/tag/v10.2.2 - maintenance is supported by Forward Email @ https://forwardemail.net
+#13 24.16 npm warn deprecated core-js@2.6.12: core-js@<3.23.3 is no longer maintained and not recommended for usage due to the number of issues. Because of the V8 engine whims, feature detection in old core-js versions could cause a slowdown up to 100x even if nothing is polyfilled. Some versions have web compatibility issues. Please, upgrade your dependencies to the actual version of core-js.
+#13 24.21 npm warn deprecated rimraf@3.0.2: Rimraf versions prior to v4 are no longer supported
+#13 24.31 npm warn deprecated glob@10.5.0: Old versions of glob are not supported, and contain widely publicized security vulnerabilities, which have been fixed in the current version. Please update. Support for old versions may be purchased (at exorbitant rates) by contacting i@izs.me
+#13 24.41 npm warn deprecated rimraf@3.0.2: Rimraf versions prior to v4 are no longer supported
+#13 24.70 npm warn deprecated rimraf@3.0.2: Rimraf versions prior to v4 are no longer supported
+#13 25.56 npm warn deprecated glob@9.2.1: Old versions of glob are not supported, and contain widely publicized security vulnerabilities, which have been fixed in the current version. Please update. Support for old versions may be purchased (at exorbitant rates) by contacting i@izs.me
+#13 31.86 
+#13 31.86 > postinstall
+#13 31.86 > npm run patch:deps
+#13 31.86 
+#13 32.08 
+#13 32.08 > patch:deps
+#13 32.08 > patch-package
+#13 32.08 
+#13 32.39 patch-package 8.0.0
+#13 32.39 Applying patches...
+#13 32.40 @boundaryml/baml@0.206.1 ✔
+#13 32.48 
+#13 32.48 added 1196 packages, and changed 1 package in 25s
+#13 32.48 
+#13 32.48 327 packages are looking for funding
+#13 32.48   run `npm fund` for details
+#13 DONE 42.2s
+
+#14 [build-env 2/8] COPY nx.json tsconfig.json obfuscator.json ./
+#14 DONE 0.2s
+
+#15 [build-env 3/8] COPY conf.d ./conf.d
+#15 DONE 0.2s
+
+#16 [build-env 4/8] COPY typings ./typings
+#16 DONE 0.2s
+
+#17 [build-env 5/8] COPY packages ./packages
+#17 DONE 0.9s
+
+#18 [build-env 6/8] COPY modules ./modules
+#18 DONE 1.6s
+
+#19 [build-env 7/8] COPY server/ ./server
+#19 DONE 2.1s
+
+#20 [build-env 8/8] COPY tools ./tools
+#20 DONE 0.2s
+
+#21 [schema 1/1] RUN npm run json-schema
+#21 0.612 
+#21 0.612 > json-schema
+#21 0.612 > typescript-json-schema "./server/entities/config/*.ts" "*" --out ./resources/entities.schema.json --required --excludePrivate --ignoreErrors --noExtraProps
+#21 0.612 
+#21 DONE 30.7s
+
+#22 [test 1/4] COPY test ./test
+#22 DONE 0.7s
+
+#23 [test 2/4] COPY bin ./bin
+#23 DONE 0.2s
+
+#24 [test 3/4] COPY .mocharc.yml .istanbul.yml .nycrc tsconfig.json VERSION ./
+#24 DONE 0.2s
+
+#25 [test 4/4] RUN npm run nx:build     && npm run test     && npm run test:japa
+#25 0.589 
+#25 0.589 > nx:build
+#25 0.589 > npx nx run-many -t build
+#25 0.589 
+#25 9.535 
+#25 9.535  NX   Running target build for 45 projects:
+#25 9.535 
+#25 9.535 - @bpmn/engine-connector
+#25 9.535 - @bpmn/engine-metadata
+#25 9.535 - @bpmn/engine-mongodb
+#25 9.535 - @bpmn/engine-common
+#25 9.535 - @modules/entity-localization
+#25 9.535 - @bpmn/engine-error
+#25 9.535 - @bpmn/engine-model
+#25 9.535 - @bpmn/engine-core
+#25 9.535 - @bpmn/engine-sdk
+#25 9.535 - @fx/metadata-filter
+#25 9.535 - @bpmnode/form
+#25 9.535 - @svc/queue-core
+#25 9.535 - @fx/redis-adapter
+#25 9.535 - @fx/value-factory
+#25 9.535 - @svc/queue-sdk
+#25 9.535 - @bpmnode/ai
+#25 9.535 - @fx/corp-gateway
+#25 9.535 - @fx/metadata-orm
+#25 9.535 - @modules/visualization
+#25 9.535 - @svc/job-core
+#25 9.535 - @bpmn/engine
+#25 9.535 - @fx/corp-metrics
+#25 9.535 - @svc/job-sdk
+#25 9.535 - @fx/parser
+#25 9.535 - @fx/tabcal
+#25 9.535 - @modules/corp-entity
+#25 9.535 - @modules/automation
+#25 9.535 - @svc/queue
+#25 9.535 - @fx/core
+#25 9.535 - @fx/objectql
+#25 9.535 - @fx/ecqueue
+#25 9.535 - @modules/passport
+#25 9.535 - @modules/workflow
+#25 9.535 - @svc/job
+#25 9.535 - @fx/ai
+#25 9.535 - @fx/config
+#25 9.535 - @modules/message
+#25 9.535 - @modules/sa-task
+#25 9.535 - @fx/error
+#25 9.535 - @fx/phone
+#25 9.535 - @fx/track
+#25 9.535 - @modules/form
+#25 9.535 - @modules/lock
+#25 9.535 - @modules/crm
+#25 9.535 - @modules/pay
+#25 9.535 
+#25 9.535 
+#25 10.68 
+#25 10.68 > nx run @fx/metadata-orm:build  [remote cache]
+#25 10.68 
+#25 10.68 
+#25 10.68 > @fx/metadata-orm@2.0.7 build
+#25 10.68 > rimraf dist && tsc --build tsconfig.json
+#25 10.68 
+#25 11.34 
+#25 11.34 > nx run @fx/core:build  [remote cache]
+#25 11.34 
+#25 11.34 
+#25 11.34 > @fx/core@1.25.0 prebuild
+#25 11.34 > npm run test
+#25 11.34 
+#25 11.34 
+#25 11.34 > @fx/core@1.25.0 test
+#25 11.34 > nyc mocha --config .mocharc.yml
+#25 11.34 
+#25 11.34 (node:278) [DEP0128] DeprecationWarning: Invalid 'main' field in '/var/app/node_modules/@fx/objectql/package.json' of './dist/index.js'. Please either fix that or report it to the module author
+#25 11.34 (Use `node --trace-deprecation ...` to show where the warning was created)
+#25 11.34 (node:278) [DEP0128] DeprecationWarning: Invalid 'main' field in '/var/app/node_modules/@fx/error/package.json' of './dist/index.js'. Please either fix that or report it to the module author
+#25 11.34 (node:278) [DEP0128] DeprecationWarning: Invalid 'main' field in '/var/app/node_modules/@fx/error/package.json' of './dist/index.js'. Please either fix that or report it to the module author
+#25 11.34 (node:278) [DEP0128] DeprecationWarning: Invalid 'main' field in '/var/app/node_modules/@fx/error/package.json' of './dist/index.js'. Please either fix that or report it to the module author
+#25 11.34 (node:278) [DEP0128] DeprecationWarning: Invalid 'main' field in '/var/app/node_modules/@fx/error/package.json' of './dist/index.js'. Please either fix that or report it to the module author
+#25 11.34 (node:278) [DEP0128] DeprecationWarning: Invalid 'main' field in '/var/app/node_modules/@fx/error/package.json' of './dist/index.js'. Please either fix that or report it to the module author
+#25 11.34 (node:278) [DEP0128] DeprecationWarning: Invalid 'main' field in '/var/app/node_modules/@fx/error/package.json' of './dist/index.js'. Please either fix that or report it to the module author
+#25 11.34 (node:278) [DEP0128] DeprecationWarning: Invalid 'main' field in '/var/app/node_modules/@fx/phone/package.json' of './dist/index.js'. Please either fix that or report it to the module author
+#25 11.34 (node:278) [DEP0128] DeprecationWarning: Invalid 'main' field in '/var/app/node_modules/@fx/error/package.json' of './dist/index.js'. Please either fix that or report it to the module author
+#25 11.34 (node:278) [DEP0128] DeprecationWarning: Invalid 'main' field in '/var/app/node_modules/@fx/error/package.json' of './dist/index.js'. Please either fix that or report it to the module author
+#25 11.34 (node:278) [DEP0128] DeprecationWarning: Invalid 'main' field in '/var/app/node_modules/@fx/objectql/package.json' of './dist/index.js'. Please either fix that or report it to the module author
+#25 11.34 [2J[1;3Hasync app event execute successfully
+#25 11.34 sync app event execute successfully
+#25 11.34 async form event execute successfully
+#25 11.34 sync form event execute successfully
+#25 11.34 
+#25 11.34 [92m [0m[32m 9 passing[0m[90m (10ms)[0m
+#25 11.34 
+#25 11.34 ---------------------------------|---------|----------|---------|---------|-----------------------
+#25 11.34 File                             | % Stmts | % Branch | % Funcs | % Lines | Uncovered Line #s     
+#25 11.34 ---------------------------------|---------|----------|---------|---------|-----------------------
+#25 11.34 [32;1mAll files                       [0m | [32;1m  88.81[0m | [32;1m   82.46[0m | [33;1m  50.66[0m | [32;1m  89.03[0m | [31;1m                     [0m 
+#25 11.34 [32;1m src                            [0m | [32;1m  98.27[0m | [33;1m      50[0m | [32;1m    100[0m | [32;1m  98.24[0m | [31;1m                     [0m 
+#25 11.34 [32;1m  core.ts                       [0m | [32;1m  97.95[0m | [33;1m      50[0m | [32;1m    100[0m | [32;1m  97.95[0m | [31;1m51                   [0m 
+#25 11.34 [32;1m  index.ts                      [0m | [32;1m    100[0m | [32;1m     100[0m | [32;1m    100[0m | [32;1m    100[0m | [33;1m                     [0m 
+#25 11.34 [32;1m src/auth                       [0m | [32;1m    100[0m | [32;1m     100[0m | [32;1m    100[0m | [32;1m    100[0m | [33;1m                     [0m 
+#25 11.34 [32;1m  index.ts                      [0m | [32;1m    100[0m | [32;1m     100[0m | [32;1m    100[0m | [32;1m    100[0m | [33;1m                     [0m 
+#25 11.34 [32;1m src/automation                 [0m | [32;1m    100[0m | [32;1m     100[0m | [32;1m    100[0m | [32;1m    100[0m | [33;1m                     [0m 
+#25 11.34 [32;1m  index.ts                      [0m | [32;1m    100[0m | [32;1m     100[0m | [32;1m    100[0m | [32;1m    100[0m | [33;1m                     [0m 
+#25 11.34 [32;1m  process_definition.enums.ts   [0m | [32;1m    100[0m | [32;1m     100[0m | [32;1m    100[0m | [32;1m    100[0m | [33;1m                     [0m 
+#25 11.34 [31;1m src/entities                   [0m | [31;1m  16.39[0m | [31;1m       0[0m | [31;1m      0[0m | [31;1m  16.94[0m | [31;1m                     [0m 
+#25 11.34 [31;1m  app_manage_group.permision.ts [0m | [31;1m   7.14[0m | [31;1m       0[0m | [31;1m      0[0m | [31;1m   7.69[0m | [31;1m22-97                [0m 
+#25 11.34 [31;1m  app_manage_group.scope.ts     [0m | [31;1m  15.38[0m | [31;1m       0[0m | [31;1m      0[0m | [31;1m     16[0m | [31;1m27-84,99-174         [0m 
+#25 11.34 [32;1m  index.ts                      [0m | [32;1m    100[0m | [32;1m     100[0m | [32;1m    100[0m | [32;1m    100[0m | [33;1m                     [0m 
+#25 11.34 [31;1m  jdy_manage_group.permision.ts [0m | [31;1m  11.11[0m | [32;1m     100[0m | [31;1m      0[0m | [31;1m  11.11[0m | [31;1m17-61                [0m 
+#25 11.34 [32;1m src/errors                     [0m | [32;1m   90.9[0m | [32;1m     100[0m | [33;1m  66.66[0m | [32;1m    100[0m | [33;1m                     [0m 
+#25 11.34 [32;1m  err_msgs.ts                   [0m | [32;1m    100[0m | [32;1m     100[0m | [32;1m    100[0m | [32;1m    100[0m | [33;1m                     [0m 
+#25 11.34 [32;1m  index.ts                      [0m | [32;1m   87.5[0m | [32;1m     100[0m | [33;1m     50[0m | [32;1m    100[0m | [33;1m                     [0m 
+#25 11.34 [32;1m src/event                      [0m | [32;1m  84.88[0m | [33;1m   74.07[0m | [32;1m  85.71[0m | [32;1m  84.52[0m | [31;1m                     [0m 
+#25 11.34 [32;1m  app.event.manager.ts          [0m | [32;1m  84.84[0m | [33;1m      75[0m | [32;1m  83.33[0m | [32;1m  84.84[0m | [31;1m44-51,78-91          [0m 
+#25 11.34 [32;1m  form.event.manager.ts         [0m | [32;1m  82.97[0m | [33;1m   73.33[0m | [32;1m  83.33[0m | [32;1m  82.97[0m | [31;1m27,45,52-61,88,96-110[0m 
+#25 11.34 [32;1m  index.ts                      [0m | [32;1m    100[0m | [32;1m     100[0m | [32;1m    100[0m | [32;1m    100[0m | [33;1m                     [0m 
+#25 11.34 [33;1m src/event/listener             [0m | [33;1m  60.52[0m | [31;1m       0[0m | [33;1m     50[0m | [33;1m  57.14[0m | [31;1m                     [0m 
+#25 11.34 [31;1m  abstract.listener.ts          [0m | [31;1m  33.33[0m | [31;1m       0[0m | [33;1m     50[0m | [31;1m  33.33[0m | [31;1m17-23                [0m 
+#25 11.34 [32;1m  async.listener.ts             [0m | [32;1m  83.33[0m | [31;1m       0[0m | [32;1m    100[0m | [32;1m  83.33[0m | [31;1m25                   [0m 
+#25 11.34 [32;1m  index.ts                      [0m | [32;1m    100[0m | [32;1m     100[0m | [33;1m  66.66[0m | [32;1m    100[0m | [33;1m                     [0m 
+#25 11.34 [31;1m  listener.factory.ts           [0m | [31;1m  35.71[0m | [31;1m       0[0m | [31;1m      0[0m | [31;1m  35.71[0m | [31;1m24-39                [0m 
+#25 11.34 [32;1m  sync.listener.ts              [0m | [32;1m  83.33[0m | [31;1m       0[0m | [32;1m    100[0m | [32;1m  83.33[0m | [31;1m23                   [0m 
+#25 11.34 [32;1m src/event/types                [0m | [32;1m    100[0m | [32;1m     100[0m | [32;1m    100[0m | [32;1m    100[0m | [33;1m                     [0m 
+#25 11.34 [32;1m  app.event.types.ts            [0m | [32;1m    100[0m | [32;1m     100[0m | [32;1m    100[0m | [32;1m    100[0m | [33;1m                     [0m 
+#25 11.34 [32;1m  form.event.types.ts           [0m | [32;1m    100[0m | [32;1m     100[0m | [32;1m    100[0m | [32;1m    100[0m | [33;1m                     [0m 
+#25 11.34 [32;1m  index.ts                      [0m | [32;1m    100[0m | [32;1m     100[0m | [32;1m    100[0m | [32;1m    100[0m | [33;1m                     [0m 
+#25 11.34 [32;1m src/managers                   [0m | [32;1m   82.5[0m | [31;1m       0[0m | [31;1m      0[0m | [32;1m   82.5[0m | [31;1m                     [0m 
+#25 11.34 [31;1m  decorator.manager.ts          [0m | [31;1m  36.36[0m | [31;1m       0[0m | [31;1m      0[0m | [31;1m  36.36[0m | [31;1m26-57                [0m 
+#25 11.34 [32;1m  index.ts                      [0m | [32;1m    100[0m | [32;1m     100[0m | [32;1m    100[0m | [32;1m    100[0m | [33;1m                     [0m 
+#25 11.34 [32;1m src/managers/types             [0m | [32;1m    100[0m | [32;1m     100[0m | [33;1m  68.65[0m | [32;1m    100[0m | [33;1m                     [0m 
+#25 11.34 [32;1m  corp.types.ts                 [0m | [32;1m    100[0m | [32;1m     100[0m | [31;1m   12.5[0m | [32;1m    100[0m | [33;1m                     [0m 
+#25 11.34 [32;1m  data_bus.types.ts             [0m | [32;1m    100[0m | [32;1m     100[0m | [32;1m    100[0m | [32;1m    100[0m | [33;1m                     [0m 
+#25 11.34 [32;1m  data_dictionary.types.ts      [0m | [32;1m    100[0m | [32;1m     100[0m | [32;1m    100[0m | [32;1m    100[0m | [33;1m                     [0m 
+#25 11.34 [32;1m  data_log.types.ts             [0m | [32;1m    100[0m | [32;1m     100[0m | [32;1m    100[0m | [32;1m    100[0m | [33;1m                     [0m 
+#25 11.34 [32;1m  decorator.types.ts            [0m | [32;1m    100[0m | [32;1m     100[0m | [32;1m    100[0m | [32;1m    100[0m | [33;1m                     [0m 
+#25 11.34 [32;1m  entry.types.ts                [0m | [32;1m    100[0m | [32;1m     100[0m | [32;1m    100[0m | [32;1m    100[0m | [33;1m                     [0m 
+#25 11.34 [32;1m  event.types.ts                [0m | [32;1m    100[0m | [32;1m     100[0m | [32;1m    100[0m | [32;1m    100[0m | [33;1m                     [0m 
+#25 11.34 [32;1m  flow.types.ts                 [0m | [32;1m    100[0m | [32;1m     100[0m | [32;1m    100[0m | [32;1m    100[0m | [33;1m                     [0m 
+#25 11.34 [32;1m  index.ts                      [0m | [32;1m    100[0m | [32;1m     100[0m | [32;1m    100[0m | [32;1m    100[0m | [33;1m                     [0m 
+#25 11.34 [32;1m  lock.types.ts                 [0m | [32;1m    100[0m | [32;1m     100[0m | [32;1m    100[0m | [32;1m    100[0m | [33;1m                     [0m 
+#25 11.34 [32;1m  log.types.ts                  [0m | [32;1m    100[0m | [32;1m     100[0m | [32;1m    100[0m | [32;1m    100[0m | [33;1m                     [0m 
+#25 11.34 [32;1m  metadata.types.ts             [0m | [32;1m    100[0m | [32;1m     100[0m | [32;1m    100[0m | [32;1m    100[0m | [33;1m                     [0m 
+#25 11.34 [32;1m  open_platform.types.ts        [0m | [32;1m    100[0m | [32;1m     100[0m | [32;1m    100[0m | [32;1m    100[0m | [33;1m                     [0m 
+#25 11.34 [32;1m  queue.types.ts                [0m | [32;1m    100[0m | [32;1m     100[0m | [32;1m    100[0m | [32;1m    100[0m | [33;1m                     [0m 
+#25 11.34 [32;1m  request.types.ts              [0m | [32;1m    100[0m | [32;1m     100[0m | [32;1m    100[0m | [32;1m    100[0m | [33;1m                     [0m 
+#25 11.34 [32;1m  router.types.ts               [0m | [32;1m    100[0m | [32;1m     100[0m | [32;1m    100[0m | [32;1m    100[0m | [33;1m                     [0m 
+#25 11.34 [32;1m  system.types.ts               [0m | [32;1m    100[0m | [32;1m     100[0m | [31;1m      0[0m | [32;1m    100[0m | [33;1m                     [0m 
+#25 11.34 [32;1m src/types                      [0m | [32;1m    100[0m | [32;1m     100[0m | [32;1m    100[0m | [32;1m    100[0m | [33;1m                     [0m 
+#25 11.34 [32;1m  index.ts                      [0m | [32;1m    100[0m | [32;1m     100[0m | [32;1m    100[0m | [32;1m    100[0m | [33;1m                     [0m 
+#25 11.34 [32;1m src/types/entities             [0m | [32;1m    100[0m | [32;1m     100[0m | [32;1m    100[0m | [32;1m    100[0m | [33;1m                     [0m 
+#25 11.34 [32;1m  app_manage_group.permission.ts[0m | [32;1m    100[0m | [32;1m     100[0m | [32;1m    100[0m | [32;1m    100[0m | [33;1m                     [0m 
+#25 11.34 [32;1m  jdy_manage_group.permision.ts [0m | [32;1m    100[0m | [32;1m     100[0m | [32;1m    100[0m | [32;1m    100[0m | [33;1m                     [0m 
+#25 11.34 ---------------------------------|---------|----------|---------|---------|-----------------------
+#25 11.34 
+#25 11.34 > @fx/core@1.25.0 build
+#25 11.34 > rimraf dist && tsc --build tsconfig.json
+#25 11.34 
+#25 11.40 
+#25 11.40 > nx run @svc/job-core:build  [remote cache]
+#25 11.40 
+#25 11.40 
+#25 11.40 > @svc/job-core@0.0.1 build
+#25 11.40 > rimraf dist && tsc --build tsconfig.json
+#25 11.40 
+#25 11.47 
+#25 11.47 > nx run @bpmn/engine-error:build  [remote cache]
+#25 11.47 
+#25 11.47 
+#25 11.47 > @bpmn/engine-error@0.0.1 build
+#25 11.47 > rimraf dist && tsc --build tsconfig.json
+#25 11.47 
+#25 11.58 
+#25 11.58 > nx run @svc/queue-core:build  [remote cache]
+#25 11.58 
+#25 11.58 
+#25 11.58 > @svc/queue-core@0.0.1 build
+#25 11.58 > rimraf dist && tsc --build tsconfig.json
+#25 11.58 
+#25 11.59 
+#25 11.59 > nx run @fx/config:build  [remote cache]
+#25 11.59 
+#25 11.59 
+#25 11.59 > @fx/config@0.1.0 build
+#25 11.59 > rimraf dist && tsc --build tsconfig.json
+#25 11.59 
+#25 11.68 
+#25 11.68 > nx run @fx/track:build  [remote cache]
+#25 11.68 
+#25 11.68 
+#25 11.68 > @fx/track@0.1.0 build
+#25 11.68 > rimraf dist && tsc --build tsconfig.json
+#25 11.68 
+#25 11.90 
+#25 11.90 > nx run @fx/value-factory:build  [remote cache]
+#25 11.90 
+#25 11.90 
+#25 11.90 > @fx/value-factory@0.0.1 build
+#25 11.90 > rimraf dist && tsc --build tsconfig.json
+#25 11.90 
+#25 12.06 
+#25 12.06 > nx run @svc/queue:build  [remote cache]
+#25 12.06 
+#25 12.06 
+#25 12.06 > @svc/queue@0.0.1 build
+#25 12.06 > rimraf dist && tsc --build tsconfig.json
+#25 12.06 
+#25 12.10 
+#25 12.10 > nx run @fx/error:build  [remote cache]
+#25 12.10 
+#25 12.10 
+#25 12.10 > @fx/error@0.1.0 build
+#25 12.10 > rimraf dist && tsc --build tsconfig.json
+#25 12.10 
+#25 12.16 
+#25 12.16 > nx run @svc/job-sdk:build  [remote cache]
+#25 12.16 
+#25 12.16 
+#25 12.16 > @svc/job-sdk@0.0.1 build
+#25 12.16 > rimraf dist && tsc --build tsconfig.json
+#25 12.16 
+#25 12.31 
+#25 12.31 > nx run @svc/queue-sdk:build  [remote cache]
+#25 12.31 
+#25 12.31 
+#25 12.31 > @svc/queue-sdk@0.0.1 build
+#25 12.31 > rimraf dist && tsc --build tsconfig.json
+#25 12.31 
+#25 12.43 
+#25 12.43 > nx run @modules/lock:build  [remote cache]
+#25 12.43 
+#25 12.43 
+#25 12.43 > @modules/lock@0.1.0 build
+#25 12.43 > rimraf dist && tsc --build tsconfig.json
+#25 12.43 
+#25 12.63 
+#25 12.63 > nx run @fx/corp-gateway:build  [remote cache]
+#25 12.63 
+#25 12.63 
+#25 12.63 > @fx/corp-gateway@0.1.0 build
+#25 12.63 > rimraf dist && tsc --build tsconfig.json
+#25 12.63 
+#25 12.95 
+#25 12.95 > nx run @fx/ai:build  [remote cache]
+#25 12.95 
+#25 12.95 
+#25 12.95 > @fx/ai@2.0.0 prebuild
+#25 12.95 > npm run build:baml
+#25 12.95 
+#25 12.95 
+#25 12.95 > @fx/ai@2.0.0 build:baml
+#25 12.95 > npx baml-cli generate --from ./src/baml/baml_src
+#25 12.95 
+#25 12.95 2026-06-25T09:07:07.752 [BAML INFO] Generating clients with CLI version: 0.206.1
+#25 12.95 2026-06-25T09:07:07.979 [BAML INFO] Wrote 13 files to src/baml/baml_client
+#25 12.95 2026-06-25T09:07:07.980 [BAML INFO] Generated 1 baml_client: ../baml_client
+#25 12.95 
+#25 12.95 > @fx/ai@2.0.0 build
+#25 12.95 > rimraf dist && tsc --build tsconfig.json
+#25 12.95 
+#25 12.99 
+#25 12.99 > nx run @fx/phone:build  [remote cache]
+#25 12.99 
+#25 12.99 
+#25 12.99 > @fx/phone@0.0.1 build
+#25 12.99 > rimraf dist && tsc --build tsconfig.json
+#25 12.99 
+#25 15.02 
+#25 15.02 > nx run @fx/objectql:build  [remote cache]
+#25 15.02 
+#25 15.02 
+#25 15.02 > @fx/objectql@1.29.8 build
+#25 15.02 > rimraf dist && tsc --build tsconfig.json
+#25 15.02 
+#25 15.62 
+#25 15.62 > nx run @fx/tabcal:build  [remote cache]
+#25 15.62 
+#25 15.62 
+#25 15.62 > @fx/tabcal@0.0.1 build
+#25 15.62 > rimraf dist && tsc --build tsconfig.json
+#25 15.62 
+#25 15.74 
+#25 15.74 > nx run @bpmn/engine-common:build  [remote cache]
+#25 15.74 
+#25 15.74 
+#25 15.74 > @bpmn/engine-common@0.0.1 build
+#25 15.74 > rimraf dist && tsc --build tsconfig.json
+#25 15.74 
+#25 15.79 
+#25 15.79 > nx run @fx/ecqueue:build  [remote cache]
+#25 15.79 
+#25 15.79 
+#25 15.79 > @fx/ecqueue@2.0.4 build
+#25 15.79 > rimraf dist && tsc --build tsconfig.json
+#25 15.79 
+#25 16.05 
+#25 16.05 > nx run @bpmn/engine-model:build  [remote cache]
+#25 16.05 
+#25 16.05 
+#25 16.05 > @bpmn/engine-model@0.0.1 build
+#25 16.05 > rimraf dist && tsc --build tsconfig.json
+#25 16.05 
+#25 16.36 
+#25 16.36 > nx run @bpmn/engine-metadata:build  [remote cache]
+#25 16.36 
+#25 16.36 
+#25 16.36 > @bpmn/engine-metadata@0.0.1 build
+#25 16.36 > rimraf dist && tsc --build tsconfig.json
+#25 16.36 
+#25 16.98 
+#25 16.98 > nx run @fx/metadata-filter:build  [remote cache]
+#25 16.98 
+#25 16.98 
+#25 16.98 > @fx/metadata-filter@1.1.3 build
+#25 16.98 > rimraf dist && tsc --build tsconfig.json
+#25 16.98 
+#25 17.02 
+#25 17.02 > nx run @fx/redis-adapter:build  [remote cache]
+#25 17.02 
+#25 17.02 
+#25 17.02 > @fx/redis-adapter@0.1.0 build
+#25 17.02 > rimraf dist && tsc --build tsconfig.json
+#25 17.02 
+#25 17.08 
+#25 17.08 > nx run @svc/job:build  [remote cache]
+#25 17.08 
+#25 17.08 
+#25 17.08 > @svc/job@0.0.1 build
+#25 17.08 > rimraf dist && tsc --build tsconfig.json
+#25 17.08 
+#25 18.13 
+#25 18.13 > nx run @bpmn/engine-core:build  [remote cache]
+#25 18.13 
+#25 18.13 
+#25 18.13 > @bpmn/engine-core@0.0.1 build
+#25 18.13 > rimraf dist && tsc --build tsconfig.json
+#25 18.13 
+#25 18.29 
+#25 18.29 > nx run @bpmn/engine-connector:build  [remote cache]
+#25 18.29 
+#25 18.29 
+#25 18.29 > @bpmn/engine-connector@0.0.1 build
+#25 18.29 > rimraf dist && tsc --build tsconfig.json
+#25 18.29 
+#25 18.84 
+#25 18.84 > nx run @modules/pay:build  [remote cache]
+#25 18.84 
+#25 18.84 
+#25 18.84 > @modules/pay@0.0.1 build
+#25 18.84 > rimraf dist && tsc --build tsconfig.json
+#25 18.84 
+#25 19.63 
+#25 19.63 > nx run @modules/message:build  [remote cache]
+#25 19.63 
+#25 19.63 
+#25 19.63 > @modules/message@0.0.1 build
+#25 19.63 > rimraf dist && tsc --build tsconfig.json
+#25 19.63 
+#25 20.56 
+#25 20.56 > nx run @bpmn/engine:build  [remote cache]
+#25 20.56 
+#25 20.56 
+#25 20.56 > @bpmn/engine@0.0.1 build
+#25 20.56 > rimraf dist && tsc --build tsconfig.json
+#25 20.56 
+#25 21.05 
+#25 21.05 > nx run @bpmn/engine-mongodb:build  [remote cache]
+#25 21.05 
+#25 21.05 
+#25 21.05 > @bpmn/engine-mongodb@0.0.1 build
+#25 21.05 > rimraf dist && tsc --build tsconfig.json
+#25 21.05 
+#25 22.26 
+#25 22.26 > nx run @modules/passport:build  [remote cache]
+#25 22.26 
+#25 22.26 
+#25 22.26 > @modules/passport@0.1.0 build
+#25 22.26 > rimraf dist && tsc --build tsconfig.json
+#25 22.26 
+#25 22.41 
+#25 22.41 > nx run @bpmn/engine-sdk:build  [remote cache]
+#25 22.41 
+#25 22.41 
+#25 22.41 > @bpmn/engine-sdk@0.0.1 build
+#25 22.41 > rimraf dist && tsc --build tsconfig.json
+#25 22.41 
+#25 27.29 
+#25 27.29 > nx run @modules/form:build  [remote cache]
+#25 27.29 
+#25 27.29 
+#25 27.29 > @modules/form@0.0.1 build
+#25 27.29 > rimraf dist && tsc --build tsconfig.json
+#25 27.29 
+#25 28.30 
+#25 28.30 > nx run @modules/entity-localization:build  [remote cache]
+#25 28.30 
+#25 28.30 
+#25 28.30 > @modules/entity-localization@0.0.1 build
+#25 28.30 > rimraf dist && tsc --build tsconfig.json
+#25 28.30 
+#25 29.63 
+#25 29.63 > nx run @bpmnode/form:build  [remote cache]
+#25 29.63 
+#25 29.63 
+#25 29.63 > @bpmnode/form@0.0.1 build
+#25 29.63 > rimraf dist && tsc --build tsconfig.json
+#25 29.63 
+#25 29.87 
+#25 29.87 > nx run @modules/sa-task:build  [remote cache]
+#25 29.87 
+#25 29.87 
+#25 29.87 > @modules/sa-task@0.0.1 build
+#25 29.87 > rimraf dist && tsc --build tsconfig.json
+#25 29.87 
+#25 30.25 
+#25 30.25 > nx run @bpmnode/ai:build  [remote cache]
+#25 30.25 
+#25 30.25 
+#25 30.25 > @bpmnode/ai@0.0.1 build
+#25 30.25 > rimraf dist && tsc --build tsconfig.json
+#25 30.25 
+#25 31.24 
+#25 31.24 > nx run @modules/workflow:build  [remote cache]
+#25 31.24 
+#25 31.24 
+#25 31.24 > @modules/workflow@0.0.1 build
+#25 31.24 > rimraf dist && tsc --build tsconfig.json
+#25 31.24 
+#25 32.05 
+#25 32.05 > nx run @modules/visualization:build  [remote cache]
+#25 32.05 
+#25 32.05 
+#25 32.05 > @modules/visualization@0.0.1 build
+#25 32.05 > rimraf dist && tsc --build tsconfig.json
+#25 32.05 
+#25 32.84 
+#25 32.84 > nx run @fx/corp-metrics:build  [remote cache]
+#25 32.84 
+#25 32.84 
+#25 32.84 > @fx/corp-metrics@0.1.0 build
+#25 32.84 > rimraf dist && tsc --build tsconfig.json
+#25 32.84 
+#25 33.27 
+#25 33.27 > nx run @fx/parser:build  [remote cache]
+#25 33.27 
+#25 33.27 
+#25 33.27 > @fx/parser@0.23.4 build
+#25 33.27 > tsc --build tsconfig.json
+#25 33.27 
+#25 37.72 
+#25 37.72 > nx run @modules/crm:build  [remote cache]
+#25 37.72 
+#25 37.72 
+#25 37.72 > @modules/crm@1.24.3 build
+#25 37.72 > rimraf dist && tsc --build tsconfig.json
+#25 37.72 
+#25 38.11 
+#25 38.11 > nx run @modules/corp-entity:build  [remote cache]
+#25 38.11 
+#25 38.11 
+#25 38.11 > @modules/corp-entity@0.0.1 build
+#25 38.11 > rimraf dist && tsc --build tsconfig.json
+#25 38.11 
+#25 41.46 
+#25 41.46 > nx run @modules/automation:build  [remote cache]
+#25 41.46 
+#25 41.46 
+#25 41.46 > @modules/automation@0.0.1 build
+#25 41.46 > rimraf dist && tsc --build tsconfig.json
+#25 41.46 
+#25 41.47 
+#25 41.47 
+#25 41.47 
+#25 41.47  NX   Successfully ran target build for 45 projects
+#25 41.47 
+#25 41.47 Nx read the output from the cache instead of running the command for 45 out of 45 tasks.
+#25 41.47 
+#25 41.47 Licensed to jdy.
+#25 41.78 
+#25 41.78 > test
+#25 41.78 > nyc mocha --config .mocharc.yml
+#25 41.78 
+#25 72.78 Loading config: "./conf.d/build.yml"
+#25 72.93 ----------------------------------------
+#25 75.12 2026-06-25T12:05:59.411Z - [[32mINFO[39m] init license ... ok
+#25 75.12 2026-06-25T12:05:59.412Z - [[32mINFO[39m] [LICENSE] 非独享版环境，跳过 license 组件加载.
+#25 75.24 2026-06-25T12:05:59.537Z - [[32mINFO[39m] init entryVector ... ok
+#25 117.4 2026-06-25T12:06:41.687Z - [[32mINFO[39m] init grpcClient ... ok
+#25 136.4 2026-06-25T12:07:00.702Z - [[32mINFO[39m] Starting to preload all language resources...
+#25 136.7 2026-06-25T12:07:00.974Z - [[32mINFO[39m] Goods loaded
+#25 137.1 2026-06-25T12:07:01.382Z - [[32mINFO[39m] init corp ... ok
+#25 137.2 2026-06-25T12:07:01.473Z - [[32mINFO[39m] init coin ... ok
+#25 137.3 2026-06-25T12:07:01.556Z - [[32mINFO[39m] init log_sdk ... ok
+#25 329.2 2026-06-25T12:10:13.511Z - [[32mINFO[39m] init corpMetrics ... ok
+#25 330.7 2026-06-25T12:10:15.043Z - [[32mINFO[39m] init corpEntity ... ok
+#25 335.3 2026-06-25T12:10:19.644Z - [[32mINFO[39m] init passport ... ok
+#25 340.1 2026-06-25T12:10:24.429Z - [[32mINFO[39m] init wsEmitter ... ok
+#25 340.2 2026-06-25T12:10:24.478Z - [[32mINFO[39m] init lock ... ok
+#25 340.9 2026-06-25T12:10:25.226Z - [[32mINFO[39m] init message ... ok
+#25 344.1 2026-06-25T12:10:28.382Z - [[32mINFO[39m] init pay ... ok
+#25 345.0 2026-06-25T12:10:29.262Z - [[32mINFO[39m] init saTask ... ok
+#25 392.5 2026-06-25T12:11:16.774Z - [[32mINFO[39m] init form ... ok
+#25 396.5 2026-06-25T12:11:20.754Z - [[32mINFO[39m] init entity_i10n ... ok
+#25 397.1 2026-06-25T12:11:21.383Z - [[32mINFO[39m] Preloading completed, loaded 14 languages
+#25 397.9 2026-06-25T12:11:22.215Z - [[32mINFO[39m] init localization ... ok
+#25 399.4 2026-06-25T12:11:23.665Z - [[32mINFO[39m] init i18n ... ok
+#25 491.8 2026-06-25T12:12:56.078Z - [[32mINFO[39m] init httpServer ... ok
+#25 491.8 2026-06-25T12:12:56.090Z - [[31mERROR[39m] Mongodb:bpm mongodb connection failed, retrying...
+#25 491.8 2026-06-25T12:12:56.091Z - [[31mERROR[39m] Mongodb mongodb connection failed, retrying...
+#25 491.8 2026-06-25T12:12:56.093Z - [[31mERROR[39m] Mongodb:bpaDb mongodb connection failed, retrying...
+#25 491.8 2026-06-25T12:12:56.093Z - [[31mERROR[39m] Mongodb:mongodb mongodb server disconnected
+#25 491.8 2026-06-25T12:12:56.094Z - [[31mERROR[39m] Mongodb:mongodb mongodb connection failed, retrying...
+#25 491.8 2026-06-25T12:12:56.095Z - [[31mERROR[39m] Mongodb:dataDb mongodb connection failed, retrying...
+#25 491.9 2026-06-25T12:12:56.190Z - [[32mINFO[39m] init redis ... ok
+#25 491.9 2026-06-25T12:12:56.191Z - [[32mINFO[39m] init cache ... ok
+#25 491.9 2026-06-25T12:12:56.192Z - [[32mINFO[39m] init lockRedis ... ok
+#25 491.9 2026-06-25T12:12:56.192Z - [[32mINFO[39m] init walRedis ... ok
+#25 491.9 [ERROR] Load file storage config failed. HttpError: timeout of 10000ms exceeded
+#25 491.9     at UndiciAdapter.sendRequest (/var/app/node_modules/nstarter-http-request/src/adapter/undici.adapter.ts:88:23)
+#25 491.9     at async UndiciAdapter.request (/var/app/node_modules/nstarter-http-request/src/adapter/base.ts:68:34)
+#25 491.9     at async NsHttpClient.request (/var/app/node_modules/nstarter-http-request/src/client.ts:251:30)
+#25 491.9     at async JSONHttpRequest.post (/var/app/node_modules/@fx/file-sdk/src/http.ts:49:24)
+#25 491.9     at async ServiceConnector._sendRequest (/var/app/node_modules/@fx/file-sdk/src/service.ts:111:16)
+#25 491.9     at async FileConnectorTool._configAdapterManager (/var/app/node_modules/@fx/file-sdk/src/tool.ts:104:28) {
+#25 491.9   code: 'ECONNABORTED',
+#25 491.9   status: undefined,
+#25 491.9   response: undefined,
+#25 491.9   request: {
+#25 491.9     headers: { 'content-type': 'application/json' },
+#25 491.9     timeout: 10000,
+#25 491.9     responseType: 'json',
+#25 491.9     method: 'POST',
+#25 491.9     url: 'http://file-server.idc-wx.jdy-internal.com/manage/get_storage_conf',
+#25 491.9     body: { buckets: [Array] }
+#25 491.9   }
+#25 491.9 }
+#25 491.9 2026-06-25T12:12:56.245Z - [[32mINFO[39m] init semaphoreRedis ... ok
+#25 492.2 2026-06-25T12:12:56.523Z - [[32mINFO[39m] init rabbitMq ... ok
+#25 496.9 2026-06-25T12:13:01.170Z - [[32mINFO[39m] init etlOutputDb ... ok
+#25 496.9 2026-06-25T12:13:01.217Z - [[32mINFO[39m] init dataDb ... ok
+#25 496.9 2026-06-25T12:13:01.225Z - [[32mINFO[39m] init bpaDb ... ok
+#25 497.0 2026-06-25T12:13:01.255Z - [[32mINFO[39m] init bpm ... ok
+#25 497.0 2026-06-25T12:13:01.255Z - [[32mINFO[39m] init mongodb ... ok
+#25 497.1 2026-06-25T12:13:01.401Z - [[32mINFO[39m] init metadata ... ok
+#25 497.7 [2J[1;3H2026-06-25T12:13:02.634Z - [[32mINFO[39m] write domain soft event failed
+#25 498.3 2026-06-25T12:13:02.634Z - [[32mINFO[39m] data batch create duration
+#25 501.7 OpenApiAuth:stress exceedingLimitCount: 0
+#25 501.7 OpenApiAuth:stress exceedingCorpLimitCount: 170
+#25 505.3 开始 AppUserAuth 性能基准测试 ...
+#25 505.3 
+#25 505.3 开始测试角色: OWNER_USER
+#25 505.3 开始预热阶段 (1 次迭代)
+#25 505.3 开始正式测试阶段 (100 次迭代)
+#25 514.9 开始并发压测角色: OWNER_USER (并发数: 100, 迭代数: 20)
+#25 531.3 
+#25 531.3 开始测试角色: SYS_ADMIN
+#25 531.3 开始预热阶段 (1 次迭代)
+#25 531.3 开始正式测试阶段 (100 次迭代)
+#25 535.2 开始并发压测角色: SYS_ADMIN (并发数: 100, 迭代数: 20)
+#25 548.1 
+#25 548.1 开始测试角色: APP_BUILDER_MANAGER
+#25 548.1 开始预热阶段 (1 次迭代)
+#25 548.1 开始正式测试阶段 (100 次迭代)
+#25 552.1 开始并发压测角色: APP_BUILDER_MANAGER (并发数: 100, 迭代数: 20)
+#25 565.2 
+#25 565.2 开始测试角色: APP_MANAGER
+#25 565.2 开始预热阶段 (1 次迭代)
+#25 565.2 开始正式测试阶段 (100 次迭代)
+#25 570.4 开始并发压测角色: APP_MANAGER (并发数: 100, 迭代数: 20)
+#25 582.7 
+#25 582.7 === AppUserAuth 性能基准测试报告 ===
+#25 582.7 
+#25 582.7 角色: OWNER_USER
+#25 582.7   样本数: 100
+#25 582.7   平均执行时间: 96.33ms
+#25 582.7   执行时间范围: 71.00ms - 403.00ms
+#25 582.7   执行时间标准差: 45.57ms
+#25 582.7   P50执行时间: 87.50ms
+#25 582.7   P90执行时间: 104.30ms
+#25 582.7   P95执行时间: 116.55ms
+#25 582.7   成功率: 100.00%
+#25 582.7   错误率: 0.00%
+#25 582.7 
+#25 582.7 角色: OWNER_USER_concurrent
+#25 582.7   样本数: 2000
+#25 582.7   平均执行时间: 698.05ms
+#25 582.7   执行时间范围: 385.00ms - 1716.00ms
+#25 582.7   执行时间标准差: 282.85ms
+#25 582.7   P50执行时间: 620.00ms
+#25 582.7   P90执行时间: 916.00ms
+#25 582.7   P95执行时间: 1316.30ms
+#25 582.7   成功率: 100.00%
+#25 582.7   错误率: 0.00%
+#25 582.7 
+#25 582.7 角色: SYS_ADMIN
+#25 582.7   样本数: 100
+#25 582.7   平均执行时间: 38.82ms
+#25 582.7   执行时间范围: 28.00ms - 279.00ms
+#25 582.7   执行时间标准差: 28.05ms
+#25 582.7   P50执行时间: 34.00ms
+#25 582.7   P90执行时间: 45.10ms
+#25 582.7   P95执行时间: 48.00ms
+#25 582.7   成功率: 100.00%
+#25 582.7   错误率: 0.00%
+#25 582.7 
+#25 582.7 角色: SYS_ADMIN_concurrent
+#25 582.7   样本数: 2000
+#25 582.7   平均执行时间: 539.58ms
+#25 582.7   执行时间范围: 359.00ms - 980.00ms
+#25 582.7   执行时间标准差: 89.68ms
+#25 582.7   P50执行时间: 537.00ms
+#25 582.7   P90执行时间: 646.00ms
+#25 582.7   P95执行时间: 650.00ms
+#25 582.7   成功率: 100.00%
+#25 582.7   错误率: 0.00%
+#25 582.7 
+#25 582.7 角色: APP_BUILDER_MANAGER
+#25 582.7   样本数: 100
+#25 582.7   平均执行时间: 40.23ms
+#25 582.7   执行时间范围: 30.00ms - 228.00ms
+#25 582.7   执行时间标准差: 19.78ms
+#25 582.7   P50执行时间: 37.00ms
+#25 582.7   P90执行时间: 48.00ms
+#25 582.7   P95执行时间: 50.05ms
+#25 582.7   成功率: 100.00%
+#25 582.7   错误率: 0.00%
+#25 582.7 
+#25 582.7 角色: APP_BUILDER_MANAGER_concurrent
+#25 582.7   样本数: 2000
+#25 582.7   平均执行时间: 548.48ms
+#25 582.7   执行时间范围: 368.00ms - 1272.00ms
+#25 582.7   执行时间标准差: 135.62ms
+#25 582.7   P50执行时间: 531.00ms
+#25 582.7   P90执行时间: 631.00ms
+#25 582.7   P95执行时间: 724.00ms
+#25 582.7   成功率: 100.00%
+#25 582.7   错误率: 0.00%
+#25 582.7 
+#25 582.7 角色: APP_MANAGER
+#25 582.7   样本数: 100
+#25 582.7   平均执行时间: 51.63ms
+#25 582.7   执行时间范围: 35.00ms - 393.00ms
+#25 582.7   执行时间标准差: 41.31ms
+#25 582.7   P50执行时间: 43.00ms
+#25 582.7   P90执行时间: 59.00ms
+#25 582.7   P95执行时间: 67.55ms
+#25 582.7   成功率: 100.00%
+#25 582.7   错误率: 0.00%
+#25 582.7 
+#25 582.7 角色: APP_MANAGER_concurrent
+#25 582.7   样本数: 2000
+#25 582.7   平均执行时间: 525.62ms
+#25 582.7   执行时间范围: 348.00ms - 727.00ms
+#25 582.7   执行时间标准差: 75.22ms
+#25 582.7   P50执行时间: 523.00ms
+#25 582.7   P90执行时间: 611.10ms
+#25 582.7   P95执行时间: 665.00ms
+#25 582.7   成功率: 100.00%
+#25 582.7   错误率: 0.00%
+#25 582.7 
+#25 582.7 完整压测套件执行完成
+#25 583.6 开始 JdyUserAuth 性能基准测试 ...
+#25 583.6 
+#25 583.6 开始测试角色: LOGIN_USER
+#25 583.6 开始预热阶段 (1 次迭代)
+#25 583.6 开始正式测试阶段 (100 次迭代)
+#25 591.1 开始并发压测角色: LOGIN_USER (并发数: 100, 迭代数: 20)
+#25 597.3 
+#25 597.3 开始测试角色: OWNER_USER
+#25 597.3 开始预热阶段 (1 次迭代)
+#25 597.3 开始正式测试阶段 (100 次迭代)
+#25 600.4 开始并发压测角色: OWNER_USER (并发数: 100, 迭代数: 20)
+#25 607.5 
+#25 607.5 开始测试角色: SYS_ADMIN
+#25 607.5 开始预热阶段 (1 次迭代)
+#25 607.5 开始正式测试阶段 (100 次迭代)
+#25 610.1 开始并发压测角色: SYS_ADMIN (并发数: 100, 迭代数: 20)
+#25 615.8 
+#25 615.8 开始测试角色: APP_BUILDER_MANAGER
+#25 615.8 开始预热阶段 (1 次迭代)
+#25 615.8 开始正式测试阶段 (100 次迭代)
+#25 619.1 开始并发压测角色: APP_BUILDER_MANAGER (并发数: 100, 迭代数: 20)
+#25 624.8 
+#25 624.8 === JdyUserAuth 性能基准测试报告 ===
+#25 624.8 
+#25 624.8 角色: LOGIN_USER
+#25 624.8   样本数: 100
+#25 624.8   平均执行时间: 74.83ms
+#25 624.8   执行时间范围: 13.00ms - 278.00ms
+#25 624.8   执行时间标准差: 25.12ms
+#25 624.8   P50执行时间: 70.00ms
+#25 624.8   P90执行时间: 84.10ms
+#25 624.8   P95执行时间: 91.15ms
+#25 624.8   成功率: 100.00%
+#25 624.8   错误率: 0.00%
+#25 624.8 
+#25 624.8 角色: LOGIN_USER_concurrent
+#25 624.8   样本数: 2000
+#25 624.8   平均执行时间: 235.13ms
+#25 624.8   执行时间范围: 127.00ms - 340.00ms
+#25 624.8   执行时间标准差: 57.07ms
+#25 624.8   P50执行时间: 236.00ms
+#25 624.8   P90执行时间: 309.00ms
+#25 624.8   P95执行时间: 320.00ms
+#25 624.8   成功率: 100.00%
+#25 624.8   错误率: 0.00%
+#25 624.8 
+#25 624.8 角色: OWNER_USER
+#25 624.8   样本数: 100
+#25 624.8   平均执行时间: 30.83ms
+#25 624.8   执行时间范围: 11.00ms - 104.00ms
+#25 624.8   执行时间标准差: 10.22ms
+#25 624.8   P50执行时间: 29.00ms
+#25 624.8   P90执行时间: 38.00ms
+#25 624.8   P95执行时间: 43.05ms
+#25 624.8   成功率: 100.00%
+#25 624.8   错误率: 0.00%
+#25 624.8 
+#25 624.8 角色: OWNER_USER_concurrent
+#25 624.8   样本数: 2000
+#25 624.8   平均执行时间: 284.09ms
+#25 624.8   执行时间范围: 129.00ms - 1064.00ms
+#25 624.8   执行时间标准差: 178.39ms
+#25 624.8   P50执行时间: 253.00ms
+#25 624.8   P90执行时间: 349.20ms
+#25 624.8   P95执行时间: 472.05ms
+#25 624.8   成功率: 100.00%
+#25 624.8   错误率: 0.00%
+#25 624.8 
+#25 624.8 角色: SYS_ADMIN
+#25 624.8   样本数: 100
+#25 624.8   平均执行时间: 26.66ms
+#25 624.8   执行时间范围: 11.00ms - 125.00ms
+#25 624.8   执行时间标准差: 12.51ms
+#25 624.8   P50执行时间: 24.00ms
+#25 624.8   P90执行时间: 33.00ms
+#25 624.8   P95执行时间: 38.00ms
+#25 624.8   成功率: 100.00%
+#25 624.8   错误率: 0.00%
+#25 624.8 
+#25 624.8 角色: SYS_ADMIN_concurrent
+#25 624.8   样本数: 2000
+#25 624.8   平均执行时间: 216.17ms
+#25 624.8   执行时间范围: 121.00ms - 342.00ms
+#25 624.8   执行时间标准差: 51.71ms
+#25 624.8   P50执行时间: 219.00ms
+#25 624.8   P90执行时间: 282.00ms
+#25 624.8   P95执行时间: 292.00ms
+#25 624.8   成功率: 100.00%
+#25 624.8   错误率: 0.00%
+#25 624.8 
+#25 624.8 角色: APP_BUILDER_MANAGER
+#25 624.8   样本数: 100
+#25 624.8   平均执行时间: 32.13ms
+#25 624.8   执行时间范围: 12.00ms - 76.00ms
+#25 624.8   执行时间标准差: 7.21ms
+#25 624.8   P50执行时间: 30.00ms
+#25 624.8   P90执行时间: 39.00ms
+#25 624.8   P95执行时间: 45.00ms
+#25 624.8   成功率: 100.00%
+#25 624.8   错误率: 0.00%
+#25 624.8 
+#25 624.8 角色: APP_BUILDER_MANAGER_concurrent
+#25 624.8   样本数: 2000
+#25 624.8   平均执行时间: 222.72ms
+#25 624.8   执行时间范围: 126.00ms - 347.00ms
+#25 624.8   执行时间标准差: 53.78ms
+#25 624.8   P50执行时间: 228.00ms
+#25 624.8   P90执行时间: 292.00ms
+#25 624.8   P95执行时间: 307.00ms
+#25 624.8   成功率: 100.00%
+#25 624.8   错误率: 0.00%
+#25 624.8 
+#25 624.8 完整压测套件执行完成
+#25 625.8 开始 PlatformAuth 性能基准测试 ...
+#25 625.8 
+#25 625.8 开始测试角色: LOGIN_USER
+#25 625.8 开始预热阶段 (1 次迭代)
+#25 625.9 开始正式测试阶段 (100 次迭代)
+#25 632.6 开始并发压测角色: LOGIN_USER (并发数: 100, 迭代数: 20)
+#25 638.9 
+#25 638.9 开始测试角色: OWNER_USER
+#25 638.9 开始预热阶段 (1 次迭代)
+#25 638.9 开始正式测试阶段 (100 次迭代)
+#25 641.7 开始并发压测角色: OWNER_USER (并发数: 100, 迭代数: 20)
+#25 647.7 
+#25 647.7 开始测试角色: SYS_ADMIN
+#25 647.7 开始预热阶段 (1 次迭代)
+#25 647.7 开始正式测试阶段 (100 次迭代)
+#25 650.4 开始并发压测角色: SYS_ADMIN (并发数: 100, 迭代数: 20)
+#25 656.0 
+#25 656.0 开始测试角色: PLATFORM_MANAGER
+#25 656.0 开始预热阶段 (1 次迭代)
+#25 656.0 开始正式测试阶段 (100 次迭代)
+#25 658.6 开始并发压测角色: PLATFORM_MANAGER (并发数: 100, 迭代数: 20)
+#25 664.5 
+#25 664.5 === PlatformAuth 性能基准测试报告 ===
+#25 664.5 
+#25 664.5 角色: LOGIN_USER
+#25 664.5   样本数: 100
+#25 664.5   平均执行时间: 67.20ms
+#25 664.5   执行时间范围: 26.00ms - 151.00ms
+#25 664.5   执行时间标准差: 13.03ms
+#25 664.5   P50执行时间: 64.00ms
+#25 664.5   P90执行时间: 76.10ms
+#25 664.5   P95执行时间: 80.20ms
+#25 664.5   成功率: 100.00%
+#25 664.5   错误率: 0.00%
+#25 664.5 
+#25 664.5 角色: LOGIN_USER_concurrent
+#25 664.5   样本数: 2000
+#25 664.5   平均执行时间: 243.09ms
+#25 664.5   执行时间范围: 127.00ms - 379.00ms
+#25 664.5   执行时间标准差: 59.63ms
+#25 664.5   P50执行时间: 247.00ms
+#25 664.5   P90执行时间: 321.00ms
+#25 664.5   P95执行时间: 336.00ms
+#25 664.5   成功率: 100.00%
+#25 664.5   错误率: 0.00%
+#25 664.5 
+#25 664.5 角色: OWNER_USER
+#25 664.5   样本数: 100
+#25 664.5   平均执行时间: 27.23ms
+#25 664.5   执行时间范围: 17.00ms - 100.00ms
+#25 664.5   执行时间标准差: 9.19ms
+#25 664.5   P50执行时间: 25.00ms
+#25 664.5   P90执行时间: 34.10ms
+#25 664.5   P95执行时间: 39.05ms
+#25 664.5   成功率: 100.00%
+#25 664.5   错误率: 0.00%
+#25 664.5 
+#25 664.5 角色: OWNER_USER_concurrent
+#25 664.5   样本数: 2000
+#25 664.5   平均执行时间: 232.75ms
+#25 664.5   执行时间范围: 127.00ms - 340.00ms
+#25 664.5   执行时间标准差: 52.57ms
+#25 664.5   P50执行时间: 238.00ms
+#25 664.5   P90执行时间: 296.00ms
+#25 664.5   P95执行时间: 309.00ms
+#25 664.5   成功率: 100.00%
+#25 664.5   错误率: 0.00%
+#25 664.5 
+#25 664.5 角色: SYS_ADMIN
+#25 664.5   样本数: 100
+#25 664.5   平均执行时间: 26.53ms
+#25 664.5   执行时间范围: 11.00ms - 57.00ms
+#25 664.5   执行时间标准差: 5.41ms
+#25 664.5   P50执行时间: 26.00ms
+#25 664.5   P90执行时间: 32.00ms
+#25 664.5   P95执行时间: 37.10ms
+#25 664.5   成功率: 100.00%
+#25 664.5   错误率: 0.00%
+#25 664.5 
+#25 664.5 角色: SYS_ADMIN_concurrent
+#25 664.5   样本数: 2000
+#25 664.5   平均执行时间: 212.70ms
+#25 664.5   执行时间范围: 106.00ms - 337.00ms
+#25 664.5   执行时间标准差: 49.59ms
+#25 664.5   P50执行时间: 222.00ms
+#25 664.5   P90执行时间: 270.00ms
+#25 664.5   P95执行时间: 290.00ms
+#25 664.5   成功率: 100.00%
+#25 664.5   错误率: 0.00%
+#25 664.5 
+#25 664.5 角色: PLATFORM_MANAGER
+#25 664.5   样本数: 100
+#25 664.5   平均执行时间: 26.08ms
+#25 664.5   执行时间范围: 11.00ms - 93.00ms
+#25 664.5   执行时间标准差: 8.25ms
+#25 664.5   P50执行时间: 24.00ms
+#25 664.5   P90执行时间: 31.10ms
+#25 664.5   P95执行时间: 36.05ms
+#25 664.5   成功率: 100.00%
+#25 664.5   错误率: 0.00%
+#25 664.5 
+#25 664.5 角色: PLATFORM_MANAGER_concurrent
+#25 664.5   样本数: 2000
+#25 664.5   平均执行时间: 243.51ms
+#25 664.5   执行时间范围: 115.00ms - 1118.00ms
+#25 664.5   执行时间标准差: 188.33ms
+#25 664.5   P50执行时间: 214.00ms
+#25 664.5   P90执行时间: 259.00ms
+#25 664.5   P95执行时间: 310.45ms
+#25 664.5   成功率: 100.00%
+#25 664.5   错误率: 0.00%
+#25 664.5 
+#25 664.5 完整压测套件执行完成
+#25 667.4 2026-06-25T12:15:51.689Z - [[33mWARN[39m] db shadow form change notify exception
+#25 667.4 2026-06-25T12:15:51.692Z - [[33mWARN[39m] Retry upload file failed
+#25 667.6 2026-06-25T12:15:51.911Z - [[33mWARN[39m] hasNext function error
+#25 667.6 2026-06-25T12:15:51.931Z - [[33mWARN[39m] hasNext function error
+#25 667.6 2026-06-25T12:15:51.933Z - [[33mWARN[39m] next function error
+#25 668.1 Thu, 25 Jun 2026 12:15:52 GMT express deprecated res.clearCookie: Passing "options.maxAge" is deprecated. In v5.0.0 of Express, this option will be ignored, as res.clearCookie will automatically set cookies to expire immediately. Please update your code to omit this option. at packages/corp-gateway/dist/classes/cookie_manager.js:66:91
+#25 668.5 2026-06-25T12:15:52.814Z - [[32mINFO[39m] outgoing http request
+#25 668.5 2026-06-25T12:15:52.826Z - [[32mINFO[39m] outgoing http request
+#25 668.5 2026-06-25T12:15:52.834Z - [[32mINFO[39m] outgoing http request
+#25 668.7 2026-06-25T12:15:53.022Z - [[32mINFO[39m] app builder tenant consent compatible
+#25 668.8 2026-06-25T12:15:53.132Z - [[32mINFO[39m] get member access suite list
+#25 669.2 2026-06-25T12:15:53.494Z - [[32mINFO[39m] workflow_update_record
+#25 669.3 2026-06-25T12:15:53.645Z - [[32mINFO[39m] workflow_update_record
+#25 669.7 2026-06-25T12:15:53.966Z - [[32mINFO[39m] get member access suite list
+#25 669.8 2026-06-25T12:15:54.099Z - [[32mINFO[39m] write domain soft event failed
+#25 670.1 2026-06-25T12:15:54.353Z - [[32mINFO[39m] trigger_automation_failed
+#25 670.1 2026-06-25T12:15:54.356Z - [[33mWARN[39m] Missing Connection: @modules/automation
+#25 670.1 2026-06-25T12:15:54.356Z - [[33mWARN[39m] Missing Connection: @modules/automation
+#25 670.2 2026-06-25T12:15:54.516Z - [ACCESS] Do not have the viewing permission. Contact admins to grant you the permission.
+#25 670.3 2026-06-25T12:15:54.553Z - [ACCESS] Do not have the viewing permission. Contact admins to grant you the permission.
+#25 670.3 2026-06-25T12:15:54.587Z - [[32mINFO[39m] The member has left the company/team or the account not been activated.
+#25 670.3 2026-06-25T12:15:54.625Z - [[32mINFO[39m] 
+#25 670.4 2026-06-25T12:15:54.717Z - [ACCESS] Do not have the viewing permission. Contact admins to grant you the permission.
+#25 670.5 2026-06-25T12:15:54.812Z - [[32mINFO[39m] Do not have sufficient permissions to complete the operation.
+#25 670.6 2026-06-25T12:15:54.857Z - [[32mINFO[39m] Do not have sufficient permissions to complete the operation.
+#25 670.8 2026-06-25T12:15:55.066Z - [[32mINFO[39m] Do not have sufficient permissions to complete the operation.
+#25 670.8 2026-06-25T12:15:55.134Z - [[32mINFO[39m] 
+#25 670.9 2026-06-25T12:15:55.185Z - [ACCESS] Do not have permission to process data.
+#25 670.9 2026-06-25T12:15:55.230Z - [ACCESS] Do not have permission to process data.
+#25 671.0 2026-06-25T12:15:55.273Z - [ACCESS] This feature is only available after the authentication request is approved.
+#25 671.3 2026-06-25T12:15:55.578Z - [[33mWARN[39m] Missing Connection: @modules/automation
+#25 671.4 2026-06-25T12:15:55.656Z - [[32mINFO[39m] Cannot read properties of undefined (reading 'getCorpConnectorService')
+#25 671.4 2026-06-25T12:15:55.680Z - [[33mWARN[39m] Missing Connection: @modules/automation
+#25 671.5 2026-06-25T12:15:55.764Z - [[33mWARN[39m] Missing Connection: @modules/automation
+#25 671.6 2026-06-25T12:15:55.854Z - [[33mWARN[39m] Missing Connection: @modules/automation
+#25 671.6 2026-06-25T12:15:55.866Z - [ACCESS] This feature is only available after the authentication request is approved.
+#25 671.6 2026-06-25T12:15:55.876Z - [[32mINFO[39m] 
+#25 671.7 2026-06-25T12:15:56.034Z - [ACCESS] This feature is only available after the authentication request is approved.
+#25 671.8 2026-06-25T12:15:56.068Z - [ACCESS] Total data volume limit exceeded in the current plan. Go to "Management > Plan Details" to view the usage details and upgrade the plan.
+#25 671.9 2026-06-25T12:15:56.199Z - [[33mWARN[39m] Missing Connection: @modules/automation
+#25 671.9 2026-06-25T12:15:56.203Z - [[33mWARN[39m] Missing Connection: @modules/automation
+#25 672.0 2026-06-25T12:15:56.343Z - [[32mINFO[39m] Hard remove ETL by appId
+#25 672.1 2026-06-25T12:15:56.395Z - [[33mWARN[39m] Missing Connection: @modules/automation
+#25 672.1 2026-06-25T12:15:56.440Z - [[32mINFO[39m] Hard remove ETL by appId
+#25 672.2 2026-06-25T12:15:56.478Z - [[33mWARN[39m] Missing Connection: @modules/automation
+#25 672.2 2026-06-25T12:15:56.524Z - [[32mINFO[39m] Hard remove ETL by appId
+#25 672.3 2026-06-25T12:15:56.549Z - [[33mWARN[39m] Missing Connection: @modules/automation
+#25 672.7 11010519491231002x
+#25 675.0 2026-06-25T12:15:59.275Z - [[32mINFO[39m] outgoing http request
+#25 675.2 2026-06-25T12:15:59.513Z - [[32mINFO[39m] ETL PushDownFilter Statistics
+#25 675.2 2026-06-25T12:15:59.516Z - [[32mINFO[39m] ETL PushDownFilter Statistics
+#25 675.3 2026-06-25T12:15:59.551Z - [[32mINFO[39m] ETL PushDownFilter Statistics
+#25 675.3 2026-06-25T12:15:59.598Z - [[32mINFO[39m] ETL PushDownFilter Statistics
+#25 675.3 2026-06-25T12:15:59.602Z - [[32mINFO[39m] ETL PushDownFilter Statistics
+#25 675.3 2026-06-25T12:15:59.605Z - [[32mINFO[39m] ETL PushDownFilter Statistics
+#25 675.3 2026-06-25T12:15:59.608Z - [[32mINFO[39m] ETL PushDownFilter Statistics
+#25 675.3 2026-06-25T12:15:59.611Z - [[32mINFO[39m] ETL PushDownFilter Statistics
+#25 675.3 2026-06-25T12:15:59.615Z - [[32mINFO[39m] ETL PushDownFilter Statistics
+#25 675.4 2026-06-25T12:15:59.651Z - [[32mINFO[39m] ETL PushDownFilter Statistics
+#25 675.4 2026-06-25T12:15:59.658Z - [[32mINFO[39m] ETL PushDownFilter Statistics
+#25 675.4 2026-06-25T12:15:59.666Z - [[32mINFO[39m] ETL PushDownFilter Statistics
+#25 675.4 2026-06-25T12:15:59.692Z - [[32mINFO[39m] ETL PushDownFilter Statistics
+#25 675.4 2026-06-25T12:15:59.705Z - [[32mINFO[39m] ETL PushDownFilter Statistics
+#25 675.4 2026-06-25T12:15:59.710Z - [[32mINFO[39m] ETL PushDownFilter Statistics
+#25 675.4 2026-06-25T12:15:59.712Z - [[32mINFO[39m] ETL PushDownFilter Statistics
+#25 675.4 2026-06-25T12:15:59.714Z - [[32mINFO[39m] ETL PushDownFilter Statistics
+#25 675.4 2026-06-25T12:15:59.715Z - [[32mINFO[39m] ETL PushDownFilter Statistics
+#25 675.4 2026-06-25T12:15:59.717Z - [[32mINFO[39m] ETL PushDownFilter Statistics
+#25 675.4 2026-06-25T12:15:59.719Z - [[32mINFO[39m] ETL PushDownFilter Statistics
+#25 675.4 2026-06-25T12:15:59.723Z - [[32mINFO[39m] ETL PushDownFilter Statistics
+#25 675.4 2026-06-25T12:15:59.727Z - [[32mINFO[39m] ETL PushDownFilter Statistics
+#25 675.4 2026-06-25T12:15:59.732Z - [[32mINFO[39m] ETL PushDownFilter Statistics
+#25 675.4 2026-06-25T12:15:59.734Z - [[32mINFO[39m] ETL PushDownFilter Statistics
+#25 675.4 2026-06-25T12:15:59.736Z - [[32mINFO[39m] ETL PushDownFilter Statistics
+#25 675.4 2026-06-25T12:15:59.737Z - [[32mINFO[39m] ETL PushDownFilter Statistics
+#25 675.4 2026-06-25T12:15:59.739Z - [[32mINFO[39m] ETL PushDownFilter Statistics
+#25 675.4 2026-06-25T12:15:59.741Z - [[32mINFO[39m] ETL PushDownFilter Statistics
+#25 675.4 2026-06-25T12:15:59.742Z - [[32mINFO[39m] ETL PushDownFilter Statistics
+#25 675.9 2026-06-25T12:16:00.160Z - [[32mINFO[39m] 
+#25 676.4 2026-06-25T12:16:00.663Z - [[32mINFO[39m] 
+#25 677.4 2026-06-25T12:16:01.729Z - [[32mINFO[39m] outgoing http request
+#25 677.4 2026-06-25T12:16:01.741Z - [[32mINFO[39m] translate EFactory
+#25 677.4 2026-06-25T12:16:01.741Z - [[33mWARN[39m] Failed to retrieve the Contacts service.
+#25 677.7 2026-06-25T12:16:02.018Z - [[32mINFO[39m] outgoing http request
+#25 677.7 2026-06-25T12:16:02.018Z - [[32mINFO[39m] translate EFactory
+#25 677.7 2026-06-25T12:16:02.019Z - [[33mWARN[39m] Failed to retrieve the Contacts service.
+#25 680.5 2026-06-25T12:16:04.791Z - [[33mWARN[39m] tenant.getCorpId is not a function
+#25 680.6 2026-06-25T12:16:04.855Z - [[33mWARN[39m] tenant.getCorpId is not a function
+#25 680.6 2026-06-25T12:16:04.923Z - [[33mWARN[39m] tenant.getCorpId is not a function
+#25 680.7 2026-06-25T12:16:05.001Z - [[33mWARN[39m] tenant.getCorpId is not a function
+#25 680.9 2026-06-25T12:16:05.146Z - [[33mWARN[39m] tenant.getCorpId is not a function
+#25 680.9 2026-06-25T12:16:05.242Z - [[33mWARN[39m] tenant.getCorpId is not a function
+#25 681.0 2026-06-25T12:16:05.328Z - [[33mWARN[39m] tenant.getCorpId is not a function
+#25 681.2 2026-06-25T12:16:05.457Z - [[33mWARN[39m] tenant.getCorpId is not a function
+#25 681.2 2026-06-25T12:16:05.533Z - [[33mWARN[39m] tenant.getCorpId is not a function
+#25 681.3 2026-06-25T12:16:05.613Z - [[33mWARN[39m] tenant.getCorpId is not a function
+#25 681.4 2026-06-25T12:16:05.646Z - [[33mWARN[39m] tenant.getCorpId is not a function
+#25 681.4 2026-06-25T12:16:05.718Z - [[33mWARN[39m] tenant.getCorpId is not a function
+#25 681.5 2026-06-25T12:16:05.814Z - [[33mWARN[39m] tenant.getCorpId is not a function
+#25 681.5 2026-06-25T12:16:05.841Z - [[33mWARN[39m] tenant.getCorpId is not a function
+#25 681.6 2026-06-25T12:16:05.910Z - [[33mWARN[39m] tenant.getCorpId is not a function
+#25 681.7 2026-06-25T12:16:05.980Z - [[33mWARN[39m] tenant.getCorpId is not a function
+#25 681.8 2026-06-25T12:16:06.054Z - [[33mWARN[39m] tenant.getCorpId is not a function
+#25 681.8 2026-06-25T12:16:06.131Z - [[33mWARN[39m] tenant.getCorpId is not a function
+#25 682.0 2026-06-25T12:16:06.267Z - [[33mWARN[39m] tenant.getCorpId is not a function
+#25 682.1 2026-06-25T12:16:06.347Z - [[33mWARN[39m] tenant.getCorpId is not a function
+#25 682.1 2026-06-25T12:16:06.433Z - [[33mWARN[39m] tenant.getCorpId is not a function
+#25 682.2 2026-06-25T12:16:06.480Z - [[33mWARN[39m] tenant.getCorpId is not a function
+#25 682.3 2026-06-25T12:16:06.567Z - [[33mWARN[39m] tenant.getCorpId is not a function
+#25 682.3 2026-06-25T12:16:06.616Z - [[33mWARN[39m] tenant.getCorpId is not a function
+#25 682.4 2026-06-25T12:16:06.707Z - [[33mWARN[39m] tenant.getCorpId is not a function
+#25 682.5 2026-06-25T12:16:06.756Z - [[33mWARN[39m] tenant.getCorpId is not a function
+#25 682.5 2026-06-25T12:16:06.836Z - [[33mWARN[39m] tenant.getCorpId is not a function
+#25 682.6 2026-06-25T12:16:06.918Z - [[33mWARN[39m] tenant.getCorpId is not a function
+#25 682.7 2026-06-25T12:16:06.997Z - [[33mWARN[39m] tenant.getCorpId is not a function
+#25 682.7 2026-06-25T12:16:07.034Z - [[33mWARN[39m] tenant.getCorpId is not a function
+#25 682.8 2026-06-25T12:16:07.069Z - [[33mWARN[39m] tenant.getCorpId is not a function
+#25 682.9 2026-06-25T12:16:07.148Z - [[33mWARN[39m] tenant.getCorpId is not a function
+#25 682.9 2026-06-25T12:16:07.175Z - [[33mWARN[39m] tenant.getCorpId is not a function
+#25 682.9 2026-06-25T12:16:07.204Z - [[33mWARN[39m] tenant.getCorpId is not a function
+#25 683.0 2026-06-25T12:16:07.280Z - [[33mWARN[39m] tenant.getCorpId is not a function
+#25 683.0 2026-06-25T12:16:07.307Z - [[33mWARN[39m] tenant.getCorpId is not a function
+#25 683.0 2026-06-25T12:16:07.343Z - [[33mWARN[39m] tenant.getCorpId is not a function
+#25 683.1 2026-06-25T12:16:07.371Z - [[33mWARN[39m] tenant.getCorpId is not a function
+#25 683.2 2026-06-25T12:16:07.448Z - [[33mWARN[39m] tenant.getCorpId is not a function
+#25 683.2 2026-06-25T12:16:07.479Z - [[33mWARN[39m] tenant.getCorpId is not a function
+#25 683.2 2026-06-25T12:16:07.513Z - [[33mWARN[39m] tenant.getCorpId is not a function
+#25 683.3 2026-06-25T12:16:07.583Z - [[33mWARN[39m] tenant.getCorpId is not a function
+#25 683.4 2026-06-25T12:16:07.657Z - [[33mWARN[39m] tenant.getCorpId is not a function
+#25 683.4 2026-06-25T12:16:07.733Z - [[33mWARN[39m] tenant.getCorpId is not a function
+#25 683.5 2026-06-25T12:16:07.817Z - [[33mWARN[39m] tenant.getCorpId is not a function
+#25 683.6 2026-06-25T12:16:07.856Z - [[33mWARN[39m] tenant.getCorpId is not a function
+#25 683.6 2026-06-25T12:16:07.907Z - [[33mWARN[39m] tenant.getCorpId is not a function
+#25 683.7 2026-06-25T12:16:07.996Z - [[33mWARN[39m] tenant.getCorpId is not a function
+#25 683.8 2026-06-25T12:16:08.081Z - [[33mWARN[39m] tenant.getCorpId is not a function
+#25 683.9 2026-06-25T12:16:08.162Z - [[33mWARN[39m] tenant.getCorpId is not a function
+#25 684.0 2026-06-25T12:16:08.249Z - [[33mWARN[39m] tenant.getCorpId is not a function
+#25 684.0 2026-06-25T12:16:08.274Z - [[33mWARN[39m] tenant.getCorpId is not a function
+#25 684.1 2026-06-25T12:16:08.364Z - [[33mWARN[39m] tenant.getCorpId is not a function
+#25 684.1 2026-06-25T12:16:08.386Z - [[33mWARN[39m] tenant.getCorpId is not a function
+#25 684.2 2026-06-25T12:16:08.462Z - [[33mWARN[39m] tenant.getCorpId is not a function
+#25 684.2 2026-06-25T12:16:08.490Z - [[33mWARN[39m] tenant.getCorpId is not a function
+#25 684.2 2026-06-25T12:16:08.518Z - [[33mWARN[39m] tenant.getCorpId is not a function
+#25 684.3 2026-06-25T12:16:08.629Z - [[33mWARN[39m] tenant.getCorpId is not a function
+#25 684.4 2026-06-25T12:16:08.663Z - [[33mWARN[39m] tenant.getCorpId is not a function
+#25 684.5 2026-06-25T12:16:08.782Z - [[33mWARN[39m] tenant.getCorpId is not a function
+#25 684.5 2026-06-25T12:16:08.842Z - [[33mWARN[39m] tenant.getCorpId is not a function
+#25 684.6 2026-06-25T12:16:08.939Z - [[33mWARN[39m] tenant.getCorpId is not a function
+#25 684.7 2026-06-25T12:16:08.967Z - [[33mWARN[39m] tenant.getCorpId is not a function
+#25 684.8 2026-06-25T12:16:09.047Z - [[33mWARN[39m] tenant.getCorpId is not a function
+#25 684.8 2026-06-25T12:16:09.069Z - [[33mWARN[39m] tenant.getCorpId is not a function
+#25 685.3 2026-06-25T12:16:09.612Z - [[33mWARN[39m] Missing Connection: @modules/automation
+#25 685.7 2026-06-25T12:16:09.969Z - [[33mWARN[39m] Missing Connection: @modules/automation
+#25 686.1 2026-06-25T12:16:10.354Z - [[33mWARN[39m] Missing Connection: @modules/automation
+#25 686.5 2026-06-25T12:16:10.751Z - [[33mWARN[39m] Missing Connection: @modules/automation
+#25 686.8 2026-06-25T12:16:11.138Z - [[33mWARN[39m] Missing Connection: @modules/automation
+#25 687.1 2026-06-25T12:16:11.445Z - [[33mWARN[39m] Missing Connection: @modules/automation
+#25 687.5 2026-06-25T12:16:11.765Z - [[33mWARN[39m] Missing Connection: @modules/automation
+#25 687.8 2026-06-25T12:16:12.130Z - [[33mWARN[39m] Missing Connection: @modules/automation
+#25 688.1 2026-06-25T12:16:12.444Z - [[33mWARN[39m] Missing Connection: @modules/automation
+#25 695.0 2026-06-25T12:16:19.250Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 695.0 2026-06-25T12:16:19.251Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 695.0 2026-06-25T12:16:19.252Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 695.0 2026-06-25T12:16:19.252Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 695.0 2026-06-25T12:16:19.253Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 695.0 2026-06-25T12:16:19.254Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 695.0 2026-06-25T12:16:19.255Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 695.0 2026-06-25T12:16:19.255Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 695.0 2026-06-25T12:16:19.256Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 695.0 2026-06-25T12:16:19.257Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 695.6 2026-06-25T12:16:19.937Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 695.6 2026-06-25T12:16:19.938Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 695.6 2026-06-25T12:16:19.938Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 695.6 2026-06-25T12:16:19.939Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 695.6 2026-06-25T12:16:19.939Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 695.6 2026-06-25T12:16:19.940Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 695.6 2026-06-25T12:16:19.940Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 695.6 2026-06-25T12:16:19.941Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 695.6 2026-06-25T12:16:19.941Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 695.6 2026-06-25T12:16:19.942Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 695.6 2026-06-25T12:16:19.943Z - [[32mINFO[39m] data trigger flowstate filter has empty value
+#25 695.7 2026-06-25T12:16:19.953Z - [[32mINFO[39m] data trigger flowstate filter has empty value
+#25 695.7 2026-06-25T12:16:19.956Z - [[32mINFO[39m] data trigger flowstate filter has empty value
+#25 695.7 2026-06-25T12:16:19.958Z - [[32mINFO[39m] data trigger flowstate filter has empty value
+#25 695.7 2026-06-25T12:16:19.962Z - [[32mINFO[39m] data trigger flowstate filter has empty value
+#25 695.7 2026-06-25T12:16:19.964Z - [[32mINFO[39m] data trigger flowstate filter has empty value
+#25 695.7 2026-06-25T12:16:19.966Z - [[32mINFO[39m] data trigger flowstate filter has empty value
+#25 695.7 2026-06-25T12:16:19.968Z - [[32mINFO[39m] data trigger flowstate filter has empty value
+#25 695.7 2026-06-25T12:16:19.970Z - [[32mINFO[39m] data trigger flowstate filter has empty value
+#25 695.7 2026-06-25T12:16:19.972Z - [[32mINFO[39m] data trigger flowstate filter has empty value
+#25 695.7 2026-06-25T12:16:19.974Z - [[32mINFO[39m] data trigger flowstate filter has empty value
+#25 695.7 2026-06-25T12:16:19.976Z - [[32mINFO[39m] data trigger flowstate filter has empty value
+#25 695.7 2026-06-25T12:16:19.978Z - [[32mINFO[39m] data trigger flowstate filter has empty value
+#25 695.7 2026-06-25T12:16:19.979Z - [[32mINFO[39m] data trigger flowstate filter has empty value
+#25 695.7 2026-06-25T12:16:19.981Z - [[32mINFO[39m] data trigger flowstate filter has empty value
+#25 695.7 2026-06-25T12:16:19.983Z - [[32mINFO[39m] data trigger flowstate filter has empty value
+#25 695.7 2026-06-25T12:16:19.985Z - [[32mINFO[39m] data trigger flowstate filter has empty value
+#25 695.7 2026-06-25T12:16:19.987Z - [[32mINFO[39m] data trigger flowstate filter has empty value
+#25 695.7 2026-06-25T12:16:19.989Z - [[32mINFO[39m] data trigger flowstate filter has empty value
+#25 695.7 2026-06-25T12:16:19.990Z - [[32mINFO[39m] data trigger flowstate filter has empty value
+#25 695.7 2026-06-25T12:16:19.992Z - [[32mINFO[39m] data trigger flowstate filter has empty value
+#25 695.7 2026-06-25T12:16:19.994Z - [[32mINFO[39m] data trigger flowstate filter has empty value
+#25 695.7 2026-06-25T12:16:19.995Z - [[32mINFO[39m] data trigger flowstate filter has empty value
+#25 695.7 2026-06-25T12:16:19.997Z - [[32mINFO[39m] data trigger flowstate filter has empty value
+#25 695.7 2026-06-25T12:16:19.999Z - [[32mINFO[39m] data trigger flowstate filter has empty value
+#25 695.7 2026-06-25T12:16:20.001Z - [[32mINFO[39m] data trigger flowstate filter has empty value
+#25 695.7 2026-06-25T12:16:20.002Z - [[32mINFO[39m] data trigger flowstate filter has empty value
+#25 695.7 2026-06-25T12:16:20.004Z - [[32mINFO[39m] data trigger flowstate filter has empty value
+#25 695.7 2026-06-25T12:16:20.021Z - [[32mINFO[39m] data trigger flowstate filter has empty value
+#25 695.7 2026-06-25T12:16:20.024Z - [[32mINFO[39m] data trigger flowstate filter has empty value
+#25 695.7 2026-06-25T12:16:20.025Z - [[32mINFO[39m] data trigger flowstate filter has empty value
+#25 695.7 2026-06-25T12:16:20.027Z - [[32mINFO[39m] data trigger flowstate filter has empty value
+#25 695.7 2026-06-25T12:16:20.029Z - [[32mINFO[39m] data trigger flowstate filter has empty value
+#25 695.7 2026-06-25T12:16:20.031Z - [[32mINFO[39m] data trigger flowstate filter has empty value
+#25 695.7 2026-06-25T12:16:20.033Z - [[32mINFO[39m] data trigger flowstate filter has empty value
+#25 695.7 2026-06-25T12:16:20.034Z - [[32mINFO[39m] data trigger flowstate filter has empty value
+#25 695.7 2026-06-25T12:16:20.036Z - [[32mINFO[39m] data trigger flowstate filter has empty value
+#25 695.7 2026-06-25T12:16:20.038Z - [[32mINFO[39m] data trigger flowstate filter has empty value
+#25 695.7 2026-06-25T12:16:20.039Z - [[32mINFO[39m] data trigger flowstate filter has empty value
+#25 695.7 2026-06-25T12:16:20.041Z - [[32mINFO[39m] data trigger flowstate filter has empty value
+#25 695.7 2026-06-25T12:16:20.043Z - [[32mINFO[39m] data trigger flowstate filter has empty value
+#25 695.7 2026-06-25T12:16:20.045Z - [[32mINFO[39m] data trigger flowstate filter has empty value
+#25 695.9 2026-06-25T12:16:20.158Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 695.9 2026-06-25T12:16:20.159Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 695.9 2026-06-25T12:16:20.160Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 695.9 2026-06-25T12:16:20.161Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 695.9 2026-06-25T12:16:20.161Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 695.9 2026-06-25T12:16:20.162Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 695.9 2026-06-25T12:16:20.163Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 695.9 2026-06-25T12:16:20.164Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 695.9 2026-06-25T12:16:20.164Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 695.9 2026-06-25T12:16:20.165Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 695.9 2026-06-25T12:16:20.166Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 695.9 2026-06-25T12:16:20.167Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 695.9 2026-06-25T12:16:20.167Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 695.9 2026-06-25T12:16:20.168Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 695.9 2026-06-25T12:16:20.169Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 695.9 2026-06-25T12:16:20.170Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 695.9 2026-06-25T12:16:20.171Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 695.9 2026-06-25T12:16:20.171Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 695.9 2026-06-25T12:16:20.172Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 695.9 2026-06-25T12:16:20.173Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 695.9 2026-06-25T12:16:20.174Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 695.9 2026-06-25T12:16:20.175Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 695.9 2026-06-25T12:16:20.176Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 695.9 2026-06-25T12:16:20.177Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 695.9 2026-06-25T12:16:20.178Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 695.9 2026-06-25T12:16:20.179Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 695.9 2026-06-25T12:16:20.180Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 695.9 2026-06-25T12:16:20.181Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 695.9 2026-06-25T12:16:20.182Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 695.9 2026-06-25T12:16:20.183Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 695.9 2026-06-25T12:16:20.184Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 695.9 2026-06-25T12:16:20.185Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 695.9 2026-06-25T12:16:20.185Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 695.9 2026-06-25T12:16:20.186Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 695.9 2026-06-25T12:16:20.197Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 695.9 2026-06-25T12:16:20.198Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 695.9 2026-06-25T12:16:20.198Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 695.9 2026-06-25T12:16:20.199Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 695.9 2026-06-25T12:16:20.199Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 695.9 2026-06-25T12:16:20.200Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 695.9 2026-06-25T12:16:20.201Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 695.9 2026-06-25T12:16:20.201Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 695.9 总共测试用例:1700个,成功:1700个
+#25 695.9 总执行时长:1986 ms
+#25 697.0 Deprecation warning: value provided is not in a recognized RFC2822 or ISO format. moment construction falls back to js Date(), which is not reliable across all browsers and versions. Non RFC2822/ISO date formats are discouraged. Please refer to http://momentjs.com/guides/#/warnings/js-date/ for more info.
+#25 697.0 Arguments: 
+#25 697.0 [0] _isAMomentObject: true, _isUTC: false, _useUTC: false, _l: undefined, _i: sn-18238, _f: undefined, _strict: undefined, _locale: [object Object]
+#25 697.0 Error
+#25 697.0     at Function.createFromInputFallback (/var/app/node_modules/moment/moment.js:324:25)
+#25 697.0     at configFromString (/var/app/node_modules/moment/moment.js:2613:19)
+#25 697.0     at configFromInput (/var/app/node_modules/moment/moment.js:3056:13)
+#25 697.0     at prepareConfig (/var/app/node_modules/moment/moment.js:3039:13)
+#25 697.0     at createFromConfig (/var/app/node_modules/moment/moment.js:3006:44)
+#25 697.0     at createLocalOrUTC (/var/app/node_modules/moment/moment.js:3100:16)
+#25 697.0     at createLocal (/var/app/node_modules/moment/moment.js:3104:16)
+#25 697.0     at hooks (/var/app/node_modules/moment/moment.js:16:29)
+#25 697.0     at DatetimeValue.isValid (/var/app/packages/objectql/dist/value/value.datetime.js:22:295)
+#25 697.0     at DatetimeValue.getValue (/var/app/packages/objectql/dist/value/value.base.js:40:245)
+#25 697.0     at DatetimeValue.getTriggerValue (/var/app/packages/objectql/dist/value/value.base.js:96:108)
+#25 697.0     at Function.getWidgetTriggerValue (/var/app/packages/objectql/dist/value/index.js:105:513)
+#25 697.0     at /var/app/server/processors/data_trigger/action.update_data.ts:94:38
+#25 697.0     at arrayEach (/var/app/node_modules/lodash/lodash.js:530:11)
+#25 697.0     at Function.forEach (/var/app/node_modules/lodash/lodash.js:9410:14)
+#25 697.0     at /var/app/server/processors/data_trigger/action.update_data.ts:86:12
+#25 697.0     at arrayEach (/var/app/node_modules/lodash/lodash.js:530:11)
+#25 697.0     at Function.forEach (/var/app/node_modules/lodash/lodash.js:9410:14)
+#25 697.0     at TestUpdateDataActionProcessor._genUpdateOperationMap (/var/app/server/processors/data_trigger/action.update_data.ts:85:25)
+#25 697.0     at /var/app/server/processors/data_trigger/action.update_data.ts:105:8
+#25 697.0     at /var/app/node_modules/async/dist/async.js:159:31
+#25 697.0     at /var/app/node_modules/async/dist/async.js:59:23
+#25 697.0     at TestUpdateDataActionProcessor.genUpdateOperationMap (/var/app/server/processors/data_trigger/action.update_data.ts:105:8)
+#25 697.0     at TestUpdateDataActionProcessor.genUpdateOperationMap (/var/app/test/server/processors/data-trigger/test.action.update.ts:5:4)
+#25 697.0     at node:internal/util:475:21
+#25 697.0     at new Promise (<anonymous>)
+#25 697.0     at TestUpdateDataActionProcessor.genUpdateOperationMap (node:internal/util:461:12)
+#25 697.0     at UpdateProcessorTest.doOneTest (/var/app/test/server/processors/data-trigger/test.action.update.ts:12:54)
+#25 697.0     at UpdateProcessorTest.start (/var/app/test/server/processors/data-trigger/inputs/test.action.common.resource.ts:126:18)
+#25 697.0     at Context.<anonymous> (/var/app/test/server/processors/data-trigger/test.action.update.ts:6:1507)
+#25 698.9 总共测试用例:2040个,成功:2040个
+#25 698.9 总执行时长:2955 ms
+#25 700.7 总共测试用例:2086个,成功:2086个
+#25 700.7 总执行时长:1878 ms
+#25 701.6 2026-06-25T12:16:25.874Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 701.6 2026-06-25T12:16:25.876Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 701.6 2026-06-25T12:16:25.887Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 701.6 2026-06-25T12:16:25.888Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 701.6 2026-06-25T12:16:25.892Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 701.6 2026-06-25T12:16:25.919Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 701.6 2026-06-25T12:16:25.921Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 701.6 2026-06-25T12:16:25.934Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 701.6 2026-06-25T12:16:25.936Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 701.6 2026-06-25T12:16:25.943Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 702.3 2026-06-25T12:16:26.572Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 702.3 2026-06-25T12:16:26.573Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 702.3 2026-06-25T12:16:26.584Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 702.3 2026-06-25T12:16:26.586Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 702.3 2026-06-25T12:16:26.590Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 702.3 2026-06-25T12:16:26.613Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 702.3 2026-06-25T12:16:26.614Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 702.3 2026-06-25T12:16:26.638Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 702.3 2026-06-25T12:16:26.640Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 702.3 2026-06-25T12:16:26.645Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 702.4 2026-06-25T12:16:26.716Z - [[32mINFO[39m] data trigger flowstate filter has empty value
+#25 702.4 2026-06-25T12:16:26.717Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 702.4 2026-06-25T12:16:26.718Z - [[32mINFO[39m] data trigger flowstate filter has empty value
+#25 702.4 2026-06-25T12:16:26.718Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 702.4 2026-06-25T12:16:26.719Z - [[32mINFO[39m] data trigger flowstate filter has empty value
+#25 702.4 2026-06-25T12:16:26.719Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 702.4 2026-06-25T12:16:26.720Z - [[32mINFO[39m] data trigger flowstate filter has empty value
+#25 702.4 2026-06-25T12:16:26.720Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 702.4 2026-06-25T12:16:26.723Z - [[32mINFO[39m] data trigger flowstate filter has empty value
+#25 702.4 2026-06-25T12:16:26.723Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 702.4 2026-06-25T12:16:26.724Z - [[32mINFO[39m] data trigger flowstate filter has empty value
+#25 702.4 2026-06-25T12:16:26.724Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 702.4 2026-06-25T12:16:26.725Z - [[32mINFO[39m] data trigger flowstate filter has empty value
+#25 702.4 2026-06-25T12:16:26.725Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 702.4 2026-06-25T12:16:26.726Z - [[32mINFO[39m] data trigger flowstate filter has empty value
+#25 702.4 2026-06-25T12:16:26.727Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 702.4 2026-06-25T12:16:26.728Z - [[32mINFO[39m] data trigger flowstate filter has empty value
+#25 702.4 2026-06-25T12:16:26.728Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 702.4 2026-06-25T12:16:26.729Z - [[32mINFO[39m] data trigger flowstate filter has empty value
+#25 702.4 2026-06-25T12:16:26.729Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 702.4 2026-06-25T12:16:26.730Z - [[32mINFO[39m] data trigger flowstate filter has empty value
+#25 702.4 2026-06-25T12:16:26.730Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 702.4 2026-06-25T12:16:26.731Z - [[32mINFO[39m] data trigger flowstate filter has empty value
+#25 702.4 2026-06-25T12:16:26.731Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 702.4 2026-06-25T12:16:26.732Z - [[32mINFO[39m] data trigger flowstate filter has empty value
+#25 702.4 2026-06-25T12:16:26.732Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 702.4 2026-06-25T12:16:26.733Z - [[32mINFO[39m] data trigger flowstate filter has empty value
+#25 702.4 2026-06-25T12:16:26.733Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 702.4 2026-06-25T12:16:26.734Z - [[32mINFO[39m] data trigger flowstate filter has empty value
+#25 702.4 2026-06-25T12:16:26.734Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 702.4 2026-06-25T12:16:26.735Z - [[32mINFO[39m] data trigger flowstate filter has empty value
+#25 702.4 2026-06-25T12:16:26.736Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 702.4 2026-06-25T12:16:26.736Z - [[32mINFO[39m] data trigger flowstate filter has empty value
+#25 702.4 2026-06-25T12:16:26.737Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 702.4 2026-06-25T12:16:26.738Z - [[32mINFO[39m] data trigger flowstate filter has empty value
+#25 702.4 2026-06-25T12:16:26.738Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 702.4 2026-06-25T12:16:26.739Z - [[32mINFO[39m] data trigger flowstate filter has empty value
+#25 702.4 2026-06-25T12:16:26.739Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 702.4 2026-06-25T12:16:26.740Z - [[32mINFO[39m] data trigger flowstate filter has empty value
+#25 702.4 2026-06-25T12:16:26.740Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 702.4 2026-06-25T12:16:26.741Z - [[32mINFO[39m] data trigger flowstate filter has empty value
+#25 702.4 2026-06-25T12:16:26.741Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 702.4 2026-06-25T12:16:26.742Z - [[32mINFO[39m] data trigger flowstate filter has empty value
+#25 702.4 2026-06-25T12:16:26.742Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 702.4 2026-06-25T12:16:26.743Z - [[32mINFO[39m] data trigger flowstate filter has empty value
+#25 702.4 2026-06-25T12:16:26.744Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 702.4 2026-06-25T12:16:26.744Z - [[32mINFO[39m] data trigger flowstate filter has empty value
+#25 702.4 2026-06-25T12:16:26.745Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 702.4 2026-06-25T12:16:26.746Z - [[32mINFO[39m] data trigger flowstate filter has empty value
+#25 702.5 2026-06-25T12:16:26.746Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 702.5 2026-06-25T12:16:26.747Z - [[32mINFO[39m] data trigger flowstate filter has empty value
+#25 702.5 2026-06-25T12:16:26.747Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 702.5 2026-06-25T12:16:26.748Z - [[32mINFO[39m] data trigger flowstate filter has empty value
+#25 702.5 2026-06-25T12:16:26.748Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 702.5 2026-06-25T12:16:26.749Z - [[32mINFO[39m] data trigger flowstate filter has empty value
+#25 702.5 2026-06-25T12:16:26.749Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 702.5 2026-06-25T12:16:26.750Z - [[32mINFO[39m] data trigger flowstate filter has empty value
+#25 702.5 2026-06-25T12:16:26.750Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 702.5 2026-06-25T12:16:26.751Z - [[32mINFO[39m] data trigger flowstate filter has empty value
+#25 702.5 2026-06-25T12:16:26.751Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 702.5 2026-06-25T12:16:26.766Z - [[32mINFO[39m] data trigger flowstate filter has empty value
+#25 702.5 2026-06-25T12:16:26.766Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 702.5 2026-06-25T12:16:26.768Z - [[32mINFO[39m] data trigger flowstate filter has empty value
+#25 702.5 2026-06-25T12:16:26.768Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 702.5 2026-06-25T12:16:26.769Z - [[32mINFO[39m] data trigger flowstate filter has empty value
+#25 702.5 2026-06-25T12:16:26.770Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 702.5 2026-06-25T12:16:26.771Z - [[32mINFO[39m] data trigger flowstate filter has empty value
+#25 702.5 2026-06-25T12:16:26.771Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 702.5 2026-06-25T12:16:26.772Z - [[32mINFO[39m] data trigger flowstate filter has empty value
+#25 702.5 2026-06-25T12:16:26.772Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 702.5 2026-06-25T12:16:26.773Z - [[32mINFO[39m] data trigger flowstate filter has empty value
+#25 702.5 2026-06-25T12:16:26.773Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 702.5 2026-06-25T12:16:26.774Z - [[32mINFO[39m] data trigger flowstate filter has empty value
+#25 702.5 2026-06-25T12:16:26.774Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 702.5 2026-06-25T12:16:26.775Z - [[32mINFO[39m] data trigger flowstate filter has empty value
+#25 702.5 2026-06-25T12:16:26.776Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 702.5 2026-06-25T12:16:26.777Z - [[32mINFO[39m] data trigger flowstate filter has empty value
+#25 702.5 2026-06-25T12:16:26.777Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 702.5 2026-06-25T12:16:26.778Z - [[32mINFO[39m] data trigger flowstate filter has empty value
+#25 702.5 2026-06-25T12:16:26.778Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 702.5 2026-06-25T12:16:26.780Z - [[32mINFO[39m] data trigger flowstate filter has empty value
+#25 702.5 2026-06-25T12:16:26.780Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 702.5 2026-06-25T12:16:26.781Z - [[32mINFO[39m] data trigger flowstate filter has empty value
+#25 702.5 2026-06-25T12:16:26.782Z - [[32mINFO[39m] data_trigger filter is wrong
+#25 702.5 总共测试用例:1693个,成功:1693个
+#25 702.5 总执行时长:1753 ms
+#25 725.9 总共测试用例:2025个,成功情况:2025个
+#25 725.9 总执行时长:23448 ms
+#25 726.1 2026-06-25T12:16:50.439Z - [[32mINFO[39m] increment operate success
+#25 726.2 2026-06-25T12:16:50.464Z - [[32mINFO[39m] aggregate_table_stats
+#25 726.2 2026-06-25T12:16:50.513Z - [[32mINFO[39m] increment operate success
+#25 726.2 2026-06-25T12:16:50.545Z - [[32mINFO[39m] aggregate_table_stats
+#25 726.3 2026-06-25T12:16:50.623Z - [[32mINFO[39m] increment operate success
+#25 726.4 2026-06-25T12:16:50.655Z - [[32mINFO[39m] aggregate_table_stats
+#25 726.4 2026-06-25T12:16:50.734Z - [[32mINFO[39m] increment operate success
+#25 726.5 2026-06-25T12:16:50.759Z - [[32mINFO[39m] aggregate_table_stats
+#25 726.5 2026-06-25T12:16:50.824Z - [[32mINFO[39m] increment operate success
+#25 726.6 2026-06-25T12:16:50.855Z - [[32mINFO[39m] aggregate_table_stats
+#25 726.7 2026-06-25T12:16:50.983Z - [[32mINFO[39m] increment operate success
+#25 726.7 2026-06-25T12:16:51.011Z - [[32mINFO[39m] aggregate_table_stats
+#25 726.8 2026-06-25T12:16:51.063Z - [[32mINFO[39m] increment operate success
+#25 726.8 2026-06-25T12:16:51.084Z - [[32mINFO[39m] aggregate_table_stats
+#25 726.9 2026-06-25T12:16:51.164Z - [[32mINFO[39m] increment operate success
+#25 726.9 2026-06-25T12:16:51.200Z - [[32mINFO[39m] aggregate_table_stats
+#25 727.0 2026-06-25T12:16:51.277Z - [[32mINFO[39m] increment operate success
+#25 727.0 2026-06-25T12:16:51.302Z - [[32mINFO[39m] aggregate_table_stats
+#25 727.1 2026-06-25T12:16:51.378Z - [[32mINFO[39m] increment operate success
+#25 727.1 2026-06-25T12:16:51.409Z - [[32mINFO[39m] aggregate_table_stats
+#25 727.3 2026-06-25T12:16:51.625Z - [[32mINFO[39m] dash_aggregate_data
+#25 727.4 2026-06-25T12:16:51.686Z - [[32mINFO[39m] dash_aggregate_data
+#25 727.4 2026-06-25T12:16:51.745Z - [[32mINFO[39m] dash_aggregate_data
+#25 727.5 2026-06-25T12:16:51.807Z - [[32mINFO[39m] dash_aggregate_data
+#25 727.6 2026-06-25T12:16:51.867Z - [[32mINFO[39m] dash_aggregate_data
+#25 727.6 2026-06-25T12:16:51.906Z - [[32mINFO[39m] dash_aggregate_data
+#25 727.7 2026-06-25T12:16:51.961Z - [[32mINFO[39m] dash_aggregate_data
+#25 727.7 2026-06-25T12:16:52.020Z - [[32mINFO[39m] dash_aggregate_data
+#25 727.8 2026-06-25T12:16:52.066Z - [[32mINFO[39m] dash_aggregate_data
+#25 727.8 2026-06-25T12:16:52.123Z - [[32mINFO[39m] dash_aggregate_data
+#25 727.9 2026-06-25T12:16:52.189Z - [[32mINFO[39m] dash_aggregate_data
+#25 727.9 2026-06-25T12:16:52.230Z - [[32mINFO[39m] dash_aggregate_data
+#25 728.0 2026-06-25T12:16:52.286Z - [[32mINFO[39m] dash_aggregate_data
+#25 728.0 2026-06-25T12:16:52.333Z - [[32mINFO[39m] dash_aggregate_data
+#25 728.1 2026-06-25T12:16:52.372Z - [[32mINFO[39m] dash_aggregate_data
+#25 728.1 2026-06-25T12:16:52.423Z - [[32mINFO[39m] dash_aggregate_data
+#25 728.2 2026-06-25T12:16:52.478Z - [[32mINFO[39m] dash_aggregate_data
+#25 728.2 2026-06-25T12:16:52.515Z - [[32mINFO[39m] dash_aggregate_data
+#25 728.3 2026-06-25T12:16:52.569Z - [[32mINFO[39m] dash_aggregate_data
+#25 728.3 2026-06-25T12:16:52.625Z - [[32mINFO[39m] dash_aggregate_data
+#25 728.4 2026-06-25T12:16:52.673Z - [[32mINFO[39m] dash_aggregate_data
+#25 728.4 2026-06-25T12:16:52.726Z - [[32mINFO[39m] dash_aggregate_data
+#25 728.6 2026-06-25T12:16:52.864Z - [[32mINFO[39m] dash_aggregate_data
+#25 729.0 2026-06-25T12:16:53.263Z - [[32mINFO[39m] select subform, but all subform fields was deleted
+#25 729.3 2026-06-25T12:16:53.634Z - [[32mINFO[39m] etl_formula_error
+#25 738.0 2026-06-25T12:17:02.260Z - [[31mERROR[39m] The BPA feature has not been enabled.
+#25 741.2 2026-06-25T12:17:05.475Z - [[33mWARN[39m] Data count statistics have been corrected.
+#25 744.9 [{"_id":"6a3d1c4450fa6a736f2c680f","entryId":"54fbbc70da825bb12c245de1","name":"_test_folder","type":"group","appId":"54fbbc70da825bb12c245de9","parent":"1","seq":3072},{"_id":"6a3d1c4450fa6a736f2c680b","entryId":"6a3d1c4450fa6a736f2c680a","appId":"54fbbc70da825bb12c245de9","name":"_test_form","type":"form","parent":"1","hasCoop":false,"hasFlow":false,"seq":1024}]
+#25 744.9 [{"_id":"6a3d1c4450fa6a736f2c680b","entryId":"6a3d1c4450fa6a736f2c680a","appId":"54fbbc70da825bb12c245de9","name":"_test_form","type":"form","parent":"1","hasCoop":false,"hasFlow":false,"seq":1024}]
+#25 749.3 2026-06-25T12:17:13.607Z - [[32mINFO[39m] Batch insert etls
+#25 749.5 2026-06-25T12:17:13.764Z - [[32mINFO[39m] Hard remove ETL by appId
+#25 749.5 2026-06-25T12:17:13.777Z - [[32mINFO[39m] Batch insert etls
+#25 749.5 2026-06-25T12:17:13.795Z - [[32mINFO[39m] Hard remove ETL by appId
+#25 749.5 2026-06-25T12:17:13.805Z - [[32mINFO[39m] Hard remove ETL by appId
+#25 749.5 2026-06-25T12:17:13.824Z - [[32mINFO[39m] Hard remove ETL by appId
+#25 749.5 2026-06-25T12:17:13.839Z - [[32mINFO[39m] Hard remove ETL by appId
+#25 749.5 2026-06-25T12:17:13.844Z - [[32mINFO[39m] Hard remove ETL by appId
+#25 749.6 2026-06-25T12:17:13.849Z - [[32mINFO[39m] Batch insert etls
+#25 749.6 2026-06-25T12:17:13.900Z - [[32mINFO[39m] Hard remove ETL by appId
+#25 749.6 2026-06-25T12:17:13.901Z - [[32mINFO[39m] Hard remove ETL by appId
+#25 762.4 3
+#25 783.1 2026-06-25T12:17:47.439Z - [[32mINFO[39m] semaphore acquire failed, fallback to using cache
+#25 787.8 /integrate/tenant123/11/custom_scenario/member/v1/auth
+#25 789.5 MD5 salt = fv3llx
+#25 789.5 MD5 testMsg = Fr123456fr1231111111111111111111zed
+#25 789.5 MD5 encryptMsg = tBrcvnai/16rLJSDbmPizg==
+#25 789.5 MD5 encryptMsg length = 24
+#25 789.5 MD5 test times = 100000
+#25 789.5 MD5 duration = 263ms
+#25 789.5 MD5 avg = 0.00263ms
+#25 790.1 SHA256 salt = yOYoJc
+#25 790.1 SHA256 testMsg = Fr123456fr1231111111111111111111zed
+#25 790.1 SHA256 encryptMsg = GV0Pwsu9ifyBB/DQwNo++hWfjSOar18OpHUr07csckU=
+#25 790.1 SHA256 encryptMsg length = 44
+#25 790.1 SHA256 test times = 100000
+#25 790.1 SHA256 duration = 585ms
+#25 790.1 SHA256 avg = 0.00585ms
+#25 790.3 2026-06-25T12:17:54.582Z - [[32mINFO[39m] aggregate_table_stats
+#25 790.5 2026-06-25T12:17:54.798Z - [[32mINFO[39m] aggregate_table_upgrade_debug
+#25 791.8 2026-06-25T12:17:56.104Z - [[32mINFO[39m] aggregate_view_stats
+#25 791.8 2026-06-25T12:17:56.115Z - [[32mINFO[39m] aggregate_view_stats
+#25 791.8 2026-06-25T12:17:56.123Z - [[32mINFO[39m] aggregate view inc error
+#25 791.8 Parser Errors: [
+#25 791.8   [NoViableAltException: Expecting: one of these possible Token sequences:
+#25 791.8     1. [LSquare]
+#25 791.8     2. [Func]
+#25 791.8     3. [LParen]
+#25 791.8     4. [String]
+#25 791.8     5. [Date]
+#25 791.8     6. [Number]
+#25 791.8     7. [Boolean]
+#25 791.8     8. [Empty]
+#25 791.8     9. [NaN]
+#25 791.8     10. [Variable]
+#25 791.8   but found: ''] {
+#25 791.8     token: {
+#25 791.8       image: '',
+#25 791.8       startOffset: NaN,
+#25 791.8       endOffset: NaN,
+#25 791.8       startLine: NaN,
+#25 791.8       endLine: NaN,
+#25 791.8       startColumn: NaN,
+#25 791.8       endColumn: NaN,
+#25 791.8       tokenTypeIdx: 1,
+#25 791.8       tokenType: [Object]
+#25 791.8     },
+#25 791.8     previousToken: {
+#25 791.8       image: '>',
+#25 791.8       startOffset: 24,
+#25 791.8       endOffset: 24,
+#25 791.8       startLine: 1,
+#25 791.8       endLine: 1,
+#25 791.8       startColumn: 25,
+#25 791.8       endColumn: 25,
+#25 791.8       tokenTypeIdx: 29,
+#25 791.8       tokenType: [Object]
+#25 791.8     },
+#25 791.8     resyncedTokens: [],
+#25 791.8     context: { ruleStack: [Array], ruleOccurrenceStack: [Array] }
+#25 791.8   }
+#25 791.8 ]
+#25 791.8 Parser Errors: [
+#25 791.8   [NoViableAltException: Expecting: one of these possible Token sequences:
+#25 791.8     1. [LSquare]
+#25 791.8     2. [Func]
+#25 791.8     3. [LParen]
+#25 791.8     4. [String]
+#25 791.8     5. [Date]
+#25 791.8     6. [Number]
+#25 791.8     7. [Boolean]
+#25 791.8     8. [Empty]
+#25 791.8     9. [NaN]
+#25 791.8     10. [Variable]
+#25 791.8   but found: ''] {
+#25 791.8     token: {
+#25 791.8       image: '',
+#25 791.8       startOffset: NaN,
+#25 791.8       endOffset: NaN,
+#25 791.8       startLine: NaN,
+#25 791.8       endLine: NaN,
+#25 791.8       startColumn: NaN,
+#25 791.8       endColumn: NaN,
+#25 791.8       tokenTypeIdx: 1,
+#25 791.8       tokenType: [Object]
+#25 791.8     },
+#25 791.8     previousToken: {
+#25 791.8       image: '>',
+#25 791.8       startOffset: 24,
+#25 791.8       endOffset: 24,
+#25 791.8       startLine: 1,
+#25 791.8       endLine: 1,
+#25 791.8       startColumn: 25,
+#25 791.8       endColumn: 25,
+#25 791.8       tokenTypeIdx: 29,
+#25 791.8       tokenType: [Object]
+#25 791.8     },
+#25 791.8     resyncedTokens: [],
+#25 791.8     context: { ruleStack: [Array], ruleOccurrenceStack: [Array] }
+#25 791.8   }
+#25 791.8 ]
+#25 792.1 2026-06-25T12:17:56.408Z - [[33mWARN[39m] Failed to log the track event.
+#25 792.3 2024-05-06T03:00:00.000Z - [[33mWARN[39m] Failed to log the track event.
+#25 792.3 2024-05-06T03:00:00.000Z - [[33mWARN[39m] Failed to log the track event.
+#25 792.4 2024-05-06T03:00:00.000Z - [[33mWARN[39m] Failed to log the track event.
+#25 792.4 2024-05-06T03:00:00.000Z - [[33mWARN[39m] Failed to log the track event.
+#25 792.4 FakeTimers: clearTimeout was invoked to clear a native timer instead of one created by this library.
+#25 792.4 To automatically clean-up native timers, use `shouldClearNativeTimers`.
+#25 792.4 2024-05-06T03:00:00.000Z - [[33mWARN[39m] Failed to log the track event.
+#25 792.5 2024-05-06T03:00:00.000Z - [[33mWARN[39m] Failed to log the track event.
+#25 792.5 2024-05-06T03:00:00.000Z - [[33mWARN[39m] Failed to log the track event.
+#25 792.5 2024-05-06T03:00:00.000Z - [[33mWARN[39m] Failed to log the track event.
+#25 792.6 2024-05-06T03:00:00.000Z - [[33mWARN[39m] Failed to log the track event.
+#25 792.6 2026-06-25T12:17:56.918Z - [[33mWARN[39m] Failed to log the track event.
+#25 792.6 2024-05-06T03:00:00.000Z - [[33mWARN[39m] Failed to log the track event.
+#25 792.7 2024-05-06T03:00:00.000Z - [[33mWARN[39m] Failed to log the track event.
+#25 792.8 2026-06-25T12:17:57.111Z - [[33mWARN[39m] Failed to log the track event.
+#25 792.9 2026-06-25T12:17:57.185Z - [[33mWARN[39m] Failed to log the track event.
+#25 792.9 2026-06-25T12:17:57.199Z - [[33mWARN[39m] Failed to log the track event.
+#25 796.3 2026-06-25T12:18:00.576Z - [[32mINFO[39m] [zip-test] zip stream closed, bucket=apk, key=app.zip, size=290Byte
+#25 796.3 2026-06-25T12:18:00.623Z - [[33mWARN[39m] [processor-test] skip zero-size attachment, bucket=bucket-a, key=zero.txt
+#25 796.3 2026-06-25T12:18:00.624Z - [[32mINFO[39m] [processor-test] export plan built, attachmentCount=3, attachmentTotalSize=16Byte, attachmentLimit=16Byte
+#25 796.3 2026-06-25T12:18:00.625Z - [[32mINFO[39m] [processor-test] init stream, sizeLimit=0MB
+#25 796.3 2026-06-25T12:18:00.625Z - [[32mINFO[39m] [processor-test] pipe connected, upload task started
+#25 796.3 2026-06-25T12:18:00.644Z - [[32mINFO[39m] [processor-test] writing app resources
+#25 796.3 2026-06-25T12:18:00.644Z - [[32mINFO[39m] [processor-test] writing app item, item=entry, attachmentCount=2
+#25 796.3 2026-06-25T12:18:00.645Z - [[32mINFO[39m] [processor-test] attachment start, progress=1/3, path=attachments/bucket-a/a.txt, size=5Byte
+#25 796.4 2026-06-25T12:18:00.647Z - [[32mINFO[39m] [processor-test] attachment done, progress=1/3, path=attachments/bucket-a/a.txt, size=5Byte
+#25 796.4 2026-06-25T12:18:00.647Z - [[32mINFO[39m] [processor-test] attachment start, progress=2/3, path=attachments/bucket-a/dup.txt, size=7Byte
+#25 796.4 2026-06-25T12:18:00.648Z - [[32mINFO[39m] [processor-test] attachment done, progress=2/3, path=attachments/bucket-a/dup.txt, size=7Byte
+#25 796.4 2026-06-25T12:18:00.648Z - [[32mINFO[39m] [processor-test] writing app item, item=flow, attachmentCount=1
+#25 796.4 2026-06-25T12:18:00.649Z - [[32mINFO[39m] [processor-test] attachment start, progress=3/3, path=attachments/bucket-b/b.txt, size=4Byte
+#25 796.4 2026-06-25T12:18:00.650Z - [[32mINFO[39m] [processor-test] attachment done, progress=3/3, path=attachments/bucket-b/b.txt, size=4Byte
+#25 796.4 2026-06-25T12:18:00.650Z - [[32mINFO[39m] [processor-test] resources written, currentSize=646Byte, finalizing
+#25 796.4 2026-06-25T12:18:00.651Z - [[32mINFO[39m] [processor-test] finalize completed, finalSize=1056Byte
+#25 796.4 2026-06-25T12:18:00.651Z - [[32mINFO[39m] [processor-test] waiting for upload
+#25 796.4 2026-06-25T12:18:00.652Z - [[32mINFO[39m] [processor-test] zip stream closed, bucket=apk, key=app.zip, size=1056Byte
+#25 796.4 2026-06-25T12:18:00.652Z - [[32mINFO[39m] [processor-test] upload completed, fileKey=app.zip
+#25 796.4 2026-06-25T12:18:00.704Z - [[33mWARN[39m] [AppExportPlan] attachment size exceeded, item=entry, currentTotalSize=13Byte, sizeLimit=10Byte
+#25 796.5 2026-06-25T12:18:00.746Z - [[32mINFO[39m] [processor-404-skip-test] export plan built, attachmentCount=2, attachmentTotalSize=14Byte, attachmentLimit=20Byte
+#25 796.5 2026-06-25T12:18:00.747Z - [[32mINFO[39m] [processor-404-skip-test] init stream, sizeLimit=0MB
+#25 796.5 2026-06-25T12:18:00.747Z - [[32mINFO[39m] [processor-404-skip-test] pipe connected, upload task started
+#25 796.5 2026-06-25T12:18:00.749Z - [[32mINFO[39m] [processor-404-skip-test] writing app resources
+#25 796.5 2026-06-25T12:18:00.750Z - [[32mINFO[39m] [processor-404-skip-test] writing app item, item=print_template, attachmentCount=2
+#25 796.5 2026-06-25T12:18:00.751Z - [[32mINFO[39m] [processor-404-skip-test] attachment start, progress=1/2, path=attachments/bucket-a/failed.txt, size=8Byte
+#25 796.5 2026-06-25T12:18:00.751Z - [[33mWARN[39m] [processor-404-skip-test] attachment export failed, skip file, progress=1/2, bucket=bucket-a, key=failed.txt, path=attachments/bucket-a/failed.txt
+#25 796.5 2026-06-25T12:18:00.751Z - [[32mINFO[39m] [processor-404-skip-test] attachment start, progress=2/2, path=attachments/bucket-a/exists.txt, size=6Byte
+#25 796.5 2026-06-25T12:18:00.753Z - [[32mINFO[39m] [processor-404-skip-test] attachment done, progress=2/2, path=attachments/bucket-a/exists.txt, size=6Byte
+#25 796.5 2026-06-25T12:18:00.753Z - [[32mINFO[39m] [processor-404-skip-test] resources written, currentSize=326Byte, finalizing
+#25 796.5 2026-06-25T12:18:00.755Z - [[32mINFO[39m] [processor-404-skip-test] finalize completed, finalSize=549Byte
+#25 796.5 2026-06-25T12:18:00.756Z - [[32mINFO[39m] [processor-404-skip-test] waiting for upload
+#25 796.5 2026-06-25T12:18:00.756Z - [[32mINFO[39m] [processor-404-skip-test] zip stream closed, bucket=apk, key=app.zip, size=549Byte
+#25 796.5 2026-06-25T12:18:00.756Z - [[32mINFO[39m] [processor-404-skip-test] upload completed, fileKey=app.zip
+#25 796.5 2026-06-25T12:18:00.819Z - [[32mINFO[39m] [processor-upload-fail-test] export plan built, attachmentCount=1, attachmentTotalSize=5Byte, attachmentLimit=10Byte
+#25 796.5 2026-06-25T12:18:00.820Z - [[32mINFO[39m] [processor-upload-fail-test] init stream, sizeLimit=0MB
+#25 796.5 2026-06-25T12:18:00.820Z - [[32mINFO[39m] [processor-upload-fail-test] pipe connected, upload task started
+#25 796.5 2026-06-25T12:18:00.822Z - [[33mWARN[39m] [processor-upload-fail-test] upload failed before await
+#25 796.5 2026-06-25T12:18:00.823Z - [[33mWARN[39m] [processor-upload-fail-test] zip stream failed
+#25 796.5 2026-06-25T12:18:00.823Z - [[32mINFO[39m] [processor-upload-fail-test] zip stream closed, bucket=apk, key=app.zip, size=69Byte
+#25 796.9 2026-06-25T12:18:01.218Z - [[32mINFO[39m] form schema validate error
+#25 797.7 2026-06-25T12:18:01.974Z - [[32mINFO[39m] Cannot read properties of undefined (reading 'getCorpConnectorService')
+#25 798.9 2026-06-25T12:18:03.181Z - [[32mINFO[39m] Cannot read properties of undefined (reading 'getCorpConnectorService')
+#25 801.7 2026-06-25T12:18:05.994Z - [[32mINFO[39m] dash_aggregate_data
+#25 805.3 2026-06-25T12:18:09.590Z - [[32mINFO[39m] form schema validate error
+#25 805.3 2026-06-25T12:18:09.591Z - [[32mINFO[39m] form schema validate error
+#25 805.5 2026-06-25T12:18:09.805Z - [[32mINFO[39m] data resource cascade delete
+#25 805.7 2026-06-25T12:18:09.975Z - [[32mINFO[39m] data resource cascade delete
+#25 805.8 undefined
+#25 806.5 2026-06-25T12:18:10.842Z - [[32mINFO[39m] trigger_exec
+#25 806.5 2026-06-25T12:18:10.845Z - [[33mWARN[39m] Missing Connection: @modules/automation
+#25 806.7 2026-06-25T12:18:11.006Z - [[32mINFO[39m] trigger_exec
+#25 806.7 2026-06-25T12:18:11.009Z - [[33mWARN[39m] Missing Connection: @modules/automation
+#25 806.8 2026-06-25T12:18:11.128Z - [[32mINFO[39m] trigger_exec
+#25 807.2 2026-06-25T12:18:11.490Z - [[32mINFO[39m] outgoing http request
+#25 807.2 2026-06-25T12:18:11.491Z - [[32mINFO[39m] Lake server api/v1/archive/batch_delete_by_app request failed
+#25 807.3 2026-06-25T12:18:11.564Z - [[32mINFO[39m] Hard remove ETL by appId
+#25 807.7 a
+#25 807.7 s
+#25 807.7 d
+#25 807.7 a
+#25 807.7 s
+#25 807.7 d
+#25 807.8 2026-06-25T12:18:12.136Z - [[32mINFO[39m] outgoing http request
+#25 807.8 2026-06-25T12:18:12.136Z - [[33mWARN[39m] getaddrinfo ENOTFOUND fx-data.default.svc.cluster.local
+#25 808.2 2026-06-25T12:18:12.493Z - [[32mINFO[39m] outgoing http request
+#25 808.2 2026-06-25T12:18:12.494Z - [[32mINFO[39m] translate EFactory
+#25 808.2 2026-06-25T12:18:12.495Z - [[33mWARN[39m] Failed to retrieve the Contacts service.
+#25 808.3 2026-06-25T12:18:12.584Z - [[32mINFO[39m] Hard remove ETL by appId
+#25 810.5 2026-06-25T12:18:14.837Z - [[32mINFO[39m] data_query_fallback_trashed
+#25 810.6 2026-06-25T12:18:14.854Z - [[32mINFO[39m] data_query_fallback_trashed
+#25 811.0 2026-06-25T12:18:15.318Z - [[32mINFO[39m] data_remove_link_concurrency_limit
+#25 811.0 2026-06-25T12:18:15.323Z - [[32mINFO[39m] data_cascade_soft_remove_concurrency_limit
+#25 811.0 2026-06-25T12:18:15.326Z - [[32mINFO[39m] data_cascade_hard_remove_concurrency_limit
+#25 811.0 2026-06-25T12:18:15.329Z - [[31mERROR[39m] Failed to delete the data.
+#25 811.1 2026-06-25T12:18:15.350Z - [[31mERROR[39m] Failed to delete the data.
+#25 811.1 2026-06-25T12:18:15.375Z - [[31mERROR[39m] Failed to delete the data.
+#25 811.1 2026-06-25T12:18:15.386Z - [[32mINFO[39m] WriteDomain subData over limit blocked
+#25 815.5 2026-06-25T12:18:19.788Z - [[32mINFO[39m] data_post_event_trigger_error
+#25 816.0 2026-06-25T12:18:20.260Z - [[32mINFO[39m] illegal loaded field data list
+#25 816.0 2026-06-25T12:18:20.262Z - [[32mINFO[39m] illegal loaded field data list
+#25 816.0 2026-06-25T12:18:20.264Z - [[32mINFO[39m] illegal loaded field data list
+#25 816.0 2026-06-25T12:18:20.266Z - [[32mINFO[39m] illegal loaded field data list
+#25 816.0 2026-06-25T12:18:20.268Z - [[32mINFO[39m] illegal loaded field data list
+#25 816.0 2026-06-25T12:18:20.270Z - [[32mINFO[39m] illegal loaded field data list
+#25 816.0 2026-06-25T12:18:20.271Z - [[32mINFO[39m] illegal loaded field data list
+#25 816.0 2026-06-25T12:18:20.273Z - [[32mINFO[39m] illegal loaded field data list
+#25 816.0 2026-06-25T12:18:20.275Z - [[32mINFO[39m] illegal loaded field data list
+#25 816.0 2026-06-25T12:18:20.276Z - [[32mINFO[39m] illegal loaded field data list
+#25 822.3 2026-06-25T12:18:26.633Z - [[32mINFO[39m] Abnormal associated data, possibly forming a loop
+#25 822.4 2026-06-25T12:18:26.649Z - [[32mINFO[39m] hierarchy_view_query_scene
+#25 822.4 2026-06-25T12:18:26.650Z - [[32mINFO[39m] hierarchy_view_query_scene
+#25 822.4 2026-06-25T12:18:26.652Z - [[32mINFO[39m] hierarchy_view_query_scene
+#25 822.4 2026-06-25T12:18:26.664Z - [[32mINFO[39m] hierarchy_view_query_scene
+#25 822.4 2026-06-25T12:18:26.665Z - [[32mINFO[39m] hierarchy_view_query_scene
+#25 822.4 2026-06-25T12:18:26.703Z - [[32mINFO[39m] hierarchy_view_query_scene
+#25 822.5 2026-06-25T12:18:26.749Z - [[32mINFO[39m] Abnormal associated data, possibly forming a loop
+#25 822.8 2026-06-25T12:18:27.086Z - [[32mINFO[39m] getSupportContextByUser
+#25 822.9 2026-06-25T12:18:27.238Z - [[32mINFO[39m] getSupportContextByUser
+#25 823.1 2026-06-25T12:18:27.391Z - [[32mINFO[39m] getSupportContextByUser
+#25 823.2 2026-06-25T12:18:27.501Z - [[32mINFO[39m] getSupportContextByUser
+#25 823.4 2026-06-25T12:18:27.660Z - [[32mINFO[39m] getSupportContextByUser
+#25 823.5 2026-06-25T12:18:27.755Z - [[32mINFO[39m] getSupportContextByUser
+#25 823.9 2026-06-25T12:18:28.186Z - [[32mINFO[39m] outgoing http request
+#25 824.1 2026-06-25T12:18:28.372Z - [[32mINFO[39m] outgoing http request
+#25 824.5 2026-06-25T12:18:28.788Z - [[32mINFO[39m] outgoing http request
+#25 825.7 2026-06-25T12:18:29.961Z - [[32mINFO[39m] outgoing http request
+#25 825.9 2026-06-25T12:18:30.146Z - [[32mINFO[39m] outgoing http request
+#25 826.2 2026-06-25T12:18:30.481Z - [[32mINFO[39m] outgoing http request
+#25 827.3 2026-06-25T12:18:31.600Z - [[32mINFO[39m] outgoing http request
+#25 827.7 2026-06-25T12:18:31.959Z - [[32mINFO[39m] outgoing http request
+#25 828.0 2026-06-25T12:18:32.271Z - [[32mINFO[39m] outgoing http request
+#25 829.0 2026-06-25T12:18:33.337Z - [[32mINFO[39m] outgoing http request
+#25 829.1 2026-06-25T12:18:33.346Z - [[32mINFO[39m] wechat legacy jssdk
+#25 829.1 2026-06-25T12:18:33.367Z - [[32mINFO[39m] wechat legacy jssdk
+#25 829.2 2026-06-25T12:18:33.499Z - [[32mINFO[39m] wechat legacy jssdk
+#25 829.2 2026-06-25T12:18:33.513Z - [[32mINFO[39m] wechat legacy jssdk
+#25 829.3 2026-06-25T12:18:33.582Z - [[32mINFO[39m] wechat legacy jssdk
+#25 829.3 2026-06-25T12:18:33.598Z - [[32mINFO[39m] wechat legacy jssdk
+#25 829.4 测试数据不存在，需要先创建 TenantAuthDeploy 记录
+#25 829.6 2026-06-25T12:18:33.903Z - [[32mINFO[39m] wxwork get corp api error
+#25 829.6 2026-06-25T12:18:33.903Z - [[32mINFO[39m] wxwork non agent admin
+#25 830.5 2026-06-25T12:18:34.819Z - [[33mWARN[39m] tenant.getCorpId is not a function
+#25 830.6 2026-06-25T12:18:34.942Z - [[33mWARN[39m] tenant.getCorpId is not a function
+#25 830.7 2026-06-25T12:18:35.036Z - [[33mWARN[39m] tenant.getCorpId is not a function
+#25 830.8 2026-06-25T12:18:35.122Z - [[33mWARN[39m] tenant.getCorpId is not a function
+#25 830.9 2026-06-25T12:18:35.239Z - [[33mWARN[39m] tenant.getCorpId is not a function
+#25 831.1 2026-06-25T12:18:35.348Z - [[33mWARN[39m] tenant.getCorpId is not a function
+#25 831.2 2026-06-25T12:18:35.466Z - [[33mWARN[39m] tenant.getCorpId is not a function
+#25 831.3 2026-06-25T12:18:35.561Z - [[33mWARN[39m] tenant.getCorpId is not a function
+#25 831.6 2026-06-25T12:18:35.867Z - [[33mWARN[39m] tenant.getCorpId is not a function
+#25 831.7 2026-06-25T12:18:36.029Z - [[32mINFO[39m] outgoing http request
+#25 831.8 2026-06-25T12:18:36.045Z - [[32mINFO[39m] outgoing http request
+#25 832.3 2026-06-25T12:18:36.623Z - [[32mINFO[39m] outgoing http request
+#25 832.4 2026-06-25T12:18:36.646Z - [[32mINFO[39m] outgoing http request
+#25 832.4 2026-06-25T12:18:36.648Z - [[32mINFO[39m] outgoing http request
+#25 834.5 2026-06-25T12:18:38.792Z - [[32mINFO[39m] outgoing http request
+#25 834.7 2026-06-25T12:18:38.995Z - [[32mINFO[39m] batchUpdateTriggerMigratingByTenantIdList
+#25 834.7 2026-06-25T12:18:39.044Z - [[32mINFO[39m] batchRollbackTriggerNotMigratingByTenantIdList
+#25 834.8 fake server listening: 3300
+#25 834.8 2026-06-25T12:18:39.136Z - [[32mINFO[39m] outgoing http request
+#25 834.8 2026-06-25T12:18:39.136Z - [[32mINFO[39m] webhook
+#25 834.8 2026-06-25T12:18:39.141Z - [[32mINFO[39m] outgoing http request
+#25 834.8 2026-06-25T12:18:39.142Z - [[32mINFO[39m] webhook
+#25 834.8 2026-06-25T12:18:39.145Z - [[32mINFO[39m] outgoing http request
+#25 834.8 2026-06-25T12:18:39.145Z - [[32mINFO[39m] webhook
+#25 834.9 2026-06-25T12:18:39.150Z - [[32mINFO[39m] outgoing http request
+#25 834.9 2026-06-25T12:18:39.150Z - [[32mINFO[39m] webhook
+#25 835.5 {
+#25 835.5   appDoc: {
+#25 835.5     attachment_control: { entry_range_type: 1, entry_range: [] },
+#25 835.5     _id: new ObjectId('6a3d1b4450fa6a736f2a1d0e'),
+#25 835.5     name: 'test app',
+#25 835.5     owner: new ObjectId('6a3d1b4450fa6a736f2a1d0f'),
+#25 835.5     creator: new ObjectId('6a3d1b4450fa6a736f2a1d0f'),
+#25 835.5     color: 1,
+#25 835.5     icon: 1,
+#25 835.5     icon_file: {
+#25 835.5       name: 'app_icon.png',
+#25 835.5       size: 1024,
+#25 835.5       mime: 'image/png',
+#25 835.5       key: 'icon_file',
+#25 835.5       bucket: 'jdy-media'
+#25 835.5     },
+#25 835.5     seq: 1712906325,
+#25 835.5     updateTime: 2024-04-12T07:18:45.655Z,
+#25 835.5     createTime: 2024-04-12T07:18:45.655Z,
+#25 835.5     state: 0,
+#25 835.5     forks: 0,
+#25 835.5     category: [],
+#25 835.5     version: 0,
+#25 835.5     isBlock: false,
+#25 835.5     is_share_restricted: false,
+#25 835.5     installChannel: 'self',
+#25 835.5     isOfficial: false,
+#25 835.5     group_no: 0,
+#25 835.5     manage_group_base_id: 2,
+#25 835.5     is_app_init: false,
+#25 835.5     homeList: [],
+#25 835.5     locales: [],
+#25 835.5     pendings: [],
+#25 835.5     __v: 0
+#25 835.5   },
+#25 835.5   appId: new ObjectId('6a3d1b4450fa6a736f2a1d0e'),
+#25 835.5   timezone: 'Asia/Shanghai'
+#25 835.5 }
+#25 835.5 Url {
+#25 835.5   protocol: 'http:',
+#25 835.5   slashes: true,
+#25 835.5   auth: 'zed:123',
+#25 835.5   host: '172.168.1.2:3000',
+#25 835.5   port: '3000',
+#25 835.5   hostname: '172.168.1.2',
+#25 835.5   hash: null,
+#25 835.5   search: null,
+#25 835.5   query: null,
+#25 835.5   pathname: '/',
+#25 835.5   path: '/',
+#25 835.5   href: 'http://zed:123@172.168.1.2:3000/'
+#25 835.5 }
+#25 840.6 hasMutexAcquireTimeout: false
+#25 840.7 {
+#25 840.7   keyEncoding: 'base64',
+#25 840.7   digest: 'base64',
+#25 840.7   algorithm: 'aes-256-cbc',
+#25 840.7   key: 'SOwovyMqJp++e939+QkrqsA7xJQQs2ozPcypte9HJNo=',
+#25 840.7   iv: 'm6SZ+A1f7wORDv3hIVA+PA=='
+#25 840.7 }
+#25 840.7 T/OZRSuRSw8TJnRqnS8a5A==
+#25 840.7 123456
+#25 840.7 5hO5vpkPyWtiJOO1IUJ6Bw==
+#25 840.7 
+#25 840.7 [92m [0m[32m 5421 passing[0m[90m (6m)[0m
+#25 840.7 [36m [0m[36m 142 pending[0m
+#25 840.7 [31m  1 failing[0m
+#25 840.7 
+#25 840.7 [0m  1) getJsSdkConfig dingtalk ua
+#25 840.7        dingtalk ua dingtalk corpId:
+#25 840.7 [0m[31m     Error: UNKNOWN[0m[90m
+#25 840.7       at Object.Corp (node_modules/@fx/corp-core/src/errors/Factory.ts:260:36)
+#25 840.7       at DingTalkService.getSuiteApiByIntegrateSuiteId (node_modules/@fx/corp-core/src/services/integrate/DingTalkService.ts:76:28)
+#25 840.7       at processTicksAndRejections (node:internal/process/task_queues:105:5)
+#25 840.7       at async DingTalkService.loadCorpApiByIsvAuth (node_modules/@fx/corp-core/src/services/integrate/DingTalkService.ts:118:26)
+#25 840.7       at async DingTalkService.getCorpApiAndTenantAuthId (node_modules/@fx/corp-core/src/services/integrate/DingTalkService.ts:227:23)
+#25 840.7       at async DingtalkApiService.getCorpApiByTenant (server/services/integrate/abstract/abstract.integrate.ts:120:5)
+#25 840.7       at async DingtalkApiService.getJsSdkConfig (server/services/integrate/dingtalk.integrate.ts:146:12)
+#25 840.7       at async IntegrateService.getJsSdkConfig (server/services/integrate/integrate.ts:62:237)
+#25 840.7       at async testFunc (test/server/services/integrate/integrate.service.test.ts:5:4)
+#25 840.7       at async Context.<anonymous> (test/server/services/integrate/integrate.service.test.ts:5:4)
+#25 840.7 [0m
+#25 840.7 
+#25 840.7 
+#25 ERROR: process "/bin/sh -c npm run nx:build     && npm run test     && npm run test:japa" did not complete successfully: exit code: 1
+------
+ > [test 4/4] RUN npm run nx:build     && npm run test     && npm run test:japa:
+840.7       at async DingTalkService.loadCorpApiByIsvAuth (node_modules/@fx/corp-core/src/services/integrate/DingTalkService.ts:118:26)
+840.7       at async DingTalkService.getCorpApiAndTenantAuthId (node_modules/@fx/corp-core/src/services/integrate/DingTalkService.ts:227:23)
+840.7       at async DingtalkApiService.getCorpApiByTenant (server/services/integrate/abstract/abstract.integrate.ts:120:5)
+840.7       at async DingtalkApiService.getJsSdkConfig (server/services/integrate/dingtalk.integrate.ts:146:12)
+840.7       at async IntegrateService.getJsSdkConfig (server/services/integrate/integrate.ts:62:237)
+840.7       at async testFunc (test/server/services/integrate/integrate.service.test.ts:5:4)
+840.7       at async Context.<anonymous> (test/server/services/integrate/integrate.service.test.ts:5:4)
+840.7 [0m
+840.7 
+840.7 
+------
+Dockerfile:92
+--------------------
+  91 |     COPY .mocharc.yml .istanbul.yml .nycrc tsconfig.json VERSION ./
+  92 | >>> RUN npm run nx:build \
+  93 | >>>     && npm run test \
+  94 | >>>     && npm run test:japa
+  95 |     
+--------------------
+ERROR: failed to solve: process "/bin/sh -c npm run nx:build     && npm run test     && npm run test:japa" did not complete successfully: exit code: 1
+exit status 1
+make: *** [makefile:68: docker-test] Error 1
+[Pipeline] }
+Lock released on resource [Resource: fx-mongodb]
+[Pipeline] // lock
+[Pipeline] }
+[Pipeline] // stage
+[Pipeline] stage
+[Pipeline] { (Declarative: Post Actions)
+[Pipeline] sh
++ make ci-restore
+mv ./ci-fonts/fonts ./resources
+rm -rf ci-dependencies/ ci-fonts/
+[Pipeline] sh
++ make clean
+rm -rf tmp/ public/app/ public/platform/ public/static/ views/ digest.txt report/ geojsonVersion arm_node.txt
+[Pipeline] sh
++ source jenkins/scripts/post-unittest.sh failure
+++ '[' failure == fixed ']'
+++ '[' failure == failure ']'
+++ status=失败
+++ mentioned_list='["James.Long","Lizijun","vista","dust"]'
+++ curl 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=****' -H 'Content-Type: application/json' -s -d '
+    {
+        "msgtype": "text",
+        "text": {
+            "content": "[services/fx-code-unittest] 单元测试构建 失败: https://jenkins.jdydevelop.com/job/services/job/fx-code-unittest/5077/",
+            "mentioned_list": ["James.Long","Lizijun","vista","dust"]
+        }
+    }'
+{"errcode":0,"errmsg":"ok"}
+[Pipeline] }
+[Pipeline] // stage
+[Pipeline] }
+[Pipeline] // withEnv
+[Pipeline] }
+[Pipeline] // withCredentials
+[Pipeline] }
+[Pipeline] // withEnv
+[Pipeline] }
+[Pipeline] // node
+[Pipeline] End of Pipeline
+ERROR: script returned exit code 2
+Finished: FAILURE
