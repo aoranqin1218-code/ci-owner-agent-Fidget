@@ -74,7 +74,7 @@ python -m ci_owner_agent analyze ^
   --log-tail-lines 500
 ```
 
-Jenkins mode is a phase 2 placeholder in this implementation. The CLI exists and returns structured JSON explaining that Jenkins integration is not yet connected.
+Jenkins analyze mode is implemented. It reads build metadata and console logs from Jenkins, short-circuits `SUCCESS` and `ABORTED`, and for failed builds compares the failed commit against `lastSuccessfulBuild` before running the existing responsibility analysis.
 
 ## TypeScript Analyzer
 
@@ -131,7 +131,7 @@ Tests create temporary Git repositories under `tmp_path`; they do not call Jenki
 
 ## Known Limits
 
-- Jenkins API tools and `JenkinsLogProvider` are phase 2.
+- Jenkins API tools and `JenkinsLogProvider` are implemented, but require `JENKINS_URL` and optional credentials in `.env`.
 - TypeScript Compiler API tools are phase 3 structured placeholders.
 - The current agent is rule based, not a real LangChain tool-calling LLM agent.
 - `repo_sync` errors are warnings in local analysis so temporary repos without remotes can still be analyzed; formal Jenkins mode should treat sync failure as blocking for high-confidence ownership.

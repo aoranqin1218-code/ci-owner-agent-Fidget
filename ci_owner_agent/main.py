@@ -19,7 +19,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="ci-owner-agent")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    analyze = subparsers.add_parser("analyze", help="Analyze a Jenkins build (phase 2 placeholder)")
+    analyze = subparsers.add_parser("analyze", help="Analyze a Jenkins build")
     analyze.add_argument("--job", required=True)
     analyze.add_argument("--build", type=int, required=True)
     analyze.add_argument("--repo", required=True)
