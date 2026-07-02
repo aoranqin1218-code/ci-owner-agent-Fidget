@@ -8,7 +8,7 @@ from urllib.parse import quote
 import requests
 
 from ci_owner_agent.schemas import BuildInfo, LogTail, SuccessfulBuildInfo
-from ci_owner_agent.services.command_runner import truncate_text
+from ci_owner_agent.services.command_runner import truncate_tail_text, truncate_text
 from ci_owner_agent.services.log_provider import log_detect_final_status
 
 
@@ -52,7 +52,7 @@ class JenkinsClient:
         try:
             response = self.session.get(url, auth=self.auth, timeout=self.timeout)
             response.raise_for_status()
-            text, truncated = truncate_text(response.text, self.max_output_chars * 5)
+            text, truncated = truncate_tail_text(response.text, self.max_output_chars * 5)
             return {"ok": True, "content": text, "truncated": truncated}
         except Exception as exc:
             return {"ok": False, "error": str(exc), "content": ""}
@@ -112,7 +112,11 @@ class JenkinsClient:
         if not result.get("ok"):
             return {"ok": False, "error": result.get("error")}
         data = result["data"]
+        console = self.get_console_text(job, int(data.get("number") or 0))
+        console_text = console.get("content", "")
         warnings: list[str] = []
+        if console.get("truncated"):
+            warnings.append("last successful console text was truncated while reading from Jenkins")
         number = data.get("number")
         if before_build_number is not None and number is not None and int(number) >= before_build_number:
             warnings.append("lastSuccessfulBuild is not before the failed build")
@@ -121,7 +125,7 @@ class JenkinsClient:
             warnings.append(f"last successful build branch {detected_branch} differs from current branch {branch}")
         elif branch and not detected_branch:
             warnings.append("could not confirm last successful build branch")
-        commit = self._extract_commit(data, "")
+        commit = self._extract_commit(data, console_text)
         if not commit:
             warnings.append("commit not found for last successful build")
         info = SuccessfulBuildInfo(

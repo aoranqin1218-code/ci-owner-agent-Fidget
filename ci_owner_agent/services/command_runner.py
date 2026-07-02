@@ -45,6 +45,14 @@ def truncate_text(text: str, max_chars: int = DEFAULT_MAX_OUTPUT_CHARS) -> tuple
     return text[:keep] + marker, True
 
 
+def truncate_tail_text(text: str, max_chars: int = DEFAULT_MAX_OUTPUT_CHARS) -> tuple[str, bool]:
+    if max_chars <= 0 or len(text) <= max_chars:
+        return text, False
+    marker = "...[truncated head]...\n"
+    keep = max(0, max_chars - len(marker))
+    return marker + text[-keep:], True
+
+
 def run_command(
     args: Sequence[str],
     cwd: str | Path | None = None,

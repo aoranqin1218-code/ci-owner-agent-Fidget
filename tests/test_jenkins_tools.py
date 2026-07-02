@@ -120,6 +120,41 @@ def test_jenkins_log_provider_methods(sample_repo):
     assert provider.detect_final_status() == "FAILURE"
 
 
+def test_long_jenkins_console_keeps_tail_for_status_and_tail():
+    job = "services/fx-code-unittest"
+    long_head = "\n".join(f"noise line {idx}" for idx in range(2000))
+    console = f"{long_head}\nAssertionError near end\nFinished: FAILURE\n"
+    routes = {
+        jenkins_url(job, "5061/api/json"): FakeResponse(build_payload(5061, "FAILURE", None)),
+        jenkins_url(job, "5061/consoleText"): FakeResponse(text=console),
+    }
+    client = JenkinsClient(
+        "http://jenkins.test",
+        session=FakeSession(routes),
+        max_output_chars=200,
+    )
+    result = client.get_build_info(job, 5061, log_tail_lines=3)
+    assert result["ok"] is True
+    assert result["buildInfo"]["result"] == "FAILURE"
+    assert result["buildInfo"]["logTail"]["content"].endswith("Finished: FAILURE")
+
+    provider = JenkinsLogProvider(client, job, 5061, max_output_chars=200)
+    assert provider.detect_final_status() == "FAILURE"
+    assert provider.search("AssertionError", 1, 1)["matches"]
+    assert provider.find_error_chunks(5, 1)["chunks"]
+
+
+def test_last_successful_build_extracts_commit_from_console(sample_repo):
+    job = "services/fx-code-unittest"
+    routes = {
+        jenkins_url(job, "lastSuccessfulBuild/api/json"): FakeResponse(build_payload(5060, "SUCCESS", None)),
+        jenkins_url(job, "5060/consoleText"): FakeResponse(text=f"Checked out revision {sample_repo['base']}\n"),
+    }
+    result = client_for(routes).get_last_successful_build_info(job, branch="dev", before_build_number=5061)
+    assert result["ok"] is True
+    assert result["successfulBuildInfo"]["commit"] == sample_repo["base"]
+
+
 def test_analyze_jenkins_success_short_circuits(repo_cache: Path, sample_repo, monkeypatch):
     job = "services/fx-code-unittest"
     routes = {
@@ -199,3 +234,13 @@ def test_cli_analyze_uses_jenkins_mode(repo_cache: Path, sample_repo, monkeypatc
     assert code == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["result"] == "SUCCESS"
+
+
+def test_cli_analyze_without_jenkins_url_returns_json(repo_cache: Path, sample_repo, monkeypatch, capsys):
+    monkeypatch.setenv("JENKINS_URL", "")
+    monkeypatch.setenv("CI_AGENT_REPO_CACHE_DIR", str(repo_cache))
+    code = main(["analyze", "--job", "services/fx-code-unittest", "--build", "5061", "--repo", sample_repo["repo"]])
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["owner"]["type"] == "no_high_confidence_owner"
+    assert "JENKINS_URL" in payload["failureReason"]

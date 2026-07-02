@@ -5,7 +5,8 @@ import json
 import sys
 
 from ci_owner_agent.config import load_settings
-from ci_owner_agent.orchestrator import analyze_jenkins, analyze_local
+from ci_owner_agent.orchestrator import analyze_jenkins, analyze_local, failure_without_context
+from ci_owner_agent.schemas import BuildInfo
 from ci_owner_agent.services.git_client import GitClient
 from ci_owner_agent.services.jenkins_client import JenkinsClient
 
@@ -61,6 +62,23 @@ def main(argv: list[str] | None = None) -> int:
         _print_json(notice)
         return 0
     if args.command == "analyze":
+        if not settings.jenkins_url:
+            notice = failure_without_context(
+                BuildInfo(
+                    job=args.job,
+                    buildNumber=args.build,
+                    result="UNKNOWN",
+                    buildUrl=f"jenkins://{args.job}/{args.build}",
+                    branch=None,
+                    commit=None,
+                    logTail=None,
+                    warnings=["JENKINS_URL is not configured"],
+                ),
+                None,
+                "JENKINS_URL 未配置，无法访问 Jenkins 获取构建信息。",
+            )
+            _print_json(notice)
+            return 0
         git_client = GitClient(settings.repo_cache_dir, max_output_chars=settings.max_tool_output_chars)
         jenkins_client = JenkinsClient(
             base_url=settings.jenkins_url or "",
