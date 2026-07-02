@@ -67,6 +67,47 @@ class GitClient:
         )
         return {"ok": result.ok, "repoPath": str(path), "bare": bare, "command": result.to_dict()}
 
+    def checkout_commit_for_analysis(self, repo: str, commit: str, force: bool = False) -> dict:
+        error = validate_repo_name(repo) or validate_commit_ref(commit)
+        if error:
+            return {"ok": False, "error": error}
+        path, bare, repo_error = self.resolve_repo(repo)
+        if repo_error or path is None:
+            return {"ok": False, "error": repo_error}
+        if bare:
+            return {"ok": False, "error": "checkout for analysis requires a normal working-tree repo, not a bare mirror"}
+        status = run_command(
+            ["git", "-C", str(path), "status", "--porcelain"],
+            timeout=self.timeout,
+            max_output_chars=self.max_output_chars,
+        )
+        if not status.ok:
+            return {"ok": False, "error": "failed to inspect worktree status", "command": status.to_dict()}
+        if status.stdout.strip() and not force:
+            return {
+                "ok": False,
+                "error": "worktree is not clean; refusing to checkout analysis commit without force=True",
+                "status": status.stdout,
+                "repoPath": str(path),
+            }
+        checkout_args = ["git", "-C", str(path), "checkout", "--detach"]
+        if force:
+            checkout_args.append("--force")
+        checkout_args.append(commit)
+        checkout = run_command(
+            checkout_args,
+            timeout=self.timeout,
+            max_output_chars=self.max_output_chars,
+        )
+        return {
+            "ok": checkout.ok,
+            "repoPath": str(path),
+            "commit": commit,
+            "force": force,
+            "command": checkout.to_dict(),
+            "error": None if checkout.ok else checkout.error,
+        }
+
     def get_commits_between(self, repo: str, base_commit: str, head_commit: str) -> dict:
         error = validate_commit_ref(base_commit) or validate_commit_ref(head_commit)
         if error:

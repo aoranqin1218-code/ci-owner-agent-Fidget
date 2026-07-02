@@ -34,6 +34,28 @@ def _repo_path(repo: str, repo_cache_dir: Path) -> tuple[Path | None, str | None
     return path, None
 
 
+def _checkout_for_program(
+    repo: str,
+    commit: str,
+    repo_cache_dir: Path,
+    allow_checkout: bool,
+    force_checkout: bool,
+    empty_key: str,
+) -> dict | None:
+    if not allow_checkout:
+        return None
+    client = GitClient(repo_cache_dir)
+    checkout = client.checkout_commit_for_analysis(repo, commit, force=force_checkout)
+    if not checkout.get("ok"):
+        return {
+            "ok": False,
+            "error": f"failed to checkout commit for TypeScript analysis: {checkout.get('error')}",
+            "checkout": checkout,
+            empty_key: [],
+        }
+    return None
+
+
 def _validate_paths(paths: list[str]) -> str | None:
     for path in paths:
         error = validate_git_path(path)
@@ -130,6 +152,8 @@ def ts_find_definitions(
     tsconfig: str = "tsconfig.json",
     repo_cache_dir: str | Path | None = None,
     analyzer_dir: str | Path | None = None,
+    allow_checkout: bool = True,
+    force_checkout: bool = False,
     max_output_chars: int = 20000,
 ) -> dict:
     if not repo or not commit:
@@ -146,6 +170,9 @@ def ts_find_definitions(
     repo_path, repo_error = _repo_path(repo, repo_cache)
     if repo_error or repo_path is None:
         return {"ok": False, "error": repo_error, "definitions": []}
+    checkout_error = _checkout_for_program(repo, commit, repo_cache, allow_checkout, force_checkout, "definitions")
+    if checkout_error is not None:
+        return checkout_error
     return _call_node(
         "find_definitions.js",
         {
@@ -169,6 +196,8 @@ def ts_find_callers(
     maxResults: int = 50,
     repo_cache_dir: str | Path | None = None,
     analyzer_dir: str | Path | None = None,
+    allow_checkout: bool = True,
+    force_checkout: bool = False,
     max_output_chars: int = 20000,
 ) -> dict:
     if not repo or not commit or not symbol or not definitionFile:
@@ -183,6 +212,9 @@ def ts_find_callers(
     repo_path, repo_error = _repo_path(repo, repo_cache)
     if repo_error or repo_path is None:
         return {"ok": False, "error": repo_error, "callers": []}
+    checkout_error = _checkout_for_program(repo, commit, repo_cache, allow_checkout, force_checkout, "callers")
+    if checkout_error is not None:
+        return checkout_error
     return _call_node(
         "find_callers.js",
         {

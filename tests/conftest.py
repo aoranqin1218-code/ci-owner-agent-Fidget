@@ -77,6 +77,29 @@ def sample_repo(repo_cache: Path) -> dict[str, str]:
 
 
 @pytest.fixture()
+def sample_repo_with_newer_commit(sample_repo: dict[str, str]) -> dict[str, str]:
+    repo = Path(sample_repo["path"])
+    classify = repo / "packages" / "fxp-ai" / "errors" / "classify.ts"
+    consumer = repo / "packages" / "fxp-ai" / "errors" / "consumer.ts"
+    classify.write_text(
+        "export function classifyError(size: number) {\n"
+        "  return 'NEWER_ONLY';\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    consumer.write_text(
+        "export function consume(size: number) {\n"
+        "  return String(size);\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    git(repo, "add", ".")
+    git(repo, "commit", "-m", "newer incompatible change")
+    newer = git(repo, "rev-parse", "HEAD")
+    return {**sample_repo, "newer": newer}
+
+
+@pytest.fixture()
 def readme_only_repo(repo_cache: Path) -> dict[str, str]:
     repo = repo_cache / "readme-only-repo"
     repo.mkdir()

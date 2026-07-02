@@ -19,12 +19,24 @@ function main() {
   const { program, checker } = programResult;
   const maxResults = Math.max(0, input.maxResults || 50);
   const definitionFile = normalizeFile(input.definitionFile || "");
+  const declarationNamePositions = new Set();
   function resolvedSymbol(node) {
     let symbol = checker.getSymbolAtLocation(node);
     if (symbol && (symbol.flags & ts.SymbolFlags.Alias)) {
       symbol = checker.getAliasedSymbol(symbol);
     }
     return symbol;
+  }
+  function declarationNameKey(node) {
+    return `${normalizeFile(node.getSourceFile().fileName)}:${node.getStart()}:${node.end}`;
+  }
+  function isImportBinding(node) {
+    return (
+      ts.isImportSpecifier(node.parent) ||
+      ts.isImportClause(node.parent) ||
+      ts.isNamespaceImport(node.parent) ||
+      ts.isImportEqualsDeclaration(node.parent)
+    );
   }
   let targetKey = null;
   for (const sourceFile of program.getSourceFiles()) {
@@ -33,7 +45,13 @@ function main() {
     function visit(node) {
       if (targetKey) return;
       if (ts.isIdentifier(node) && node.text === input.symbol) {
-        targetKey = symbolKey(resolvedSymbol(node));
+        const symbol = resolvedSymbol(node);
+        targetKey = symbolKey(symbol);
+        for (const decl of symbol && symbol.getDeclarations ? symbol.getDeclarations() || [] : []) {
+          if (decl.name && ts.isIdentifier(decl.name)) {
+            declarationNamePositions.add(declarationNameKey(decl.name));
+          }
+        }
       }
       ts.forEachChild(node, visit);
     }
@@ -50,7 +68,11 @@ function main() {
     function visit(node) {
       if (callers.length >= maxResults) return;
       if (ts.isIdentifier(node) && node.text === input.symbol) {
-        if (symbolKey(resolvedSymbol(node)) === targetKey) {
+        if (
+          symbolKey(resolvedSymbol(node)) === targetKey &&
+          !declarationNamePositions.has(declarationNameKey(node)) &&
+          !isImportBinding(node)
+        ) {
           const file = relativeToRepo(input.repoPath, sourceFile.fileName);
           const line = lineOf(ts, sourceFile, node.getStart());
           const key = `${file}:${line}:${node.getStart()}`;

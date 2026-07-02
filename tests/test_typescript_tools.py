@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from ci_owner_agent.orchestrator import analyze_local
+from ci_owner_agent.services.command_runner import run_command
 from ci_owner_agent.services.git_client import GitClient
 from ci_owner_agent.tools.typescript_tools import (
     ts_analyze_changed_functions,
@@ -96,6 +97,68 @@ def test_ts_find_definitions_and_callers(repo_cache: Path, sample_repo):
     )
     assert callers["ok"] is True
     assert any(item["file"] == "packages/fxp-ai/errors/consumer.ts" for item in callers["callers"])
+
+
+@pytest.mark.skipif(not has_typescript_dependency(), reason="typescript npm dependency is not installed")
+def test_ts_find_definitions_checks_out_requested_commit(repo_cache: Path, sample_repo_with_newer_commit):
+    repo_path = Path(sample_repo_with_newer_commit["path"])
+    assert run_command(["git", "-C", str(repo_path), "rev-parse", "HEAD"]).stdout.strip() == sample_repo_with_newer_commit["newer"]
+    result = ts_find_definitions(
+        repo=sample_repo_with_newer_commit["repo"],
+        commit=sample_repo_with_newer_commit["head"],
+        symbols=["classifyError"],
+        repo_cache_dir=repo_cache,
+        analyzer_dir=ANALYZER_DIR,
+    )
+    assert result["ok"] is True
+    assert run_command(["git", "-C", str(repo_path), "rev-parse", "HEAD"]).stdout.strip() == sample_repo_with_newer_commit["head"]
+    assert any(item["file"] == "packages/fxp-ai/errors/classify.ts" for item in result["definitions"])
+
+
+@pytest.mark.skipif(not has_typescript_dependency(), reason="typescript npm dependency is not installed")
+def test_ts_find_callers_checks_out_commit_and_excludes_definition(repo_cache: Path, sample_repo_with_newer_commit):
+    repo_path = Path(sample_repo_with_newer_commit["path"])
+    assert run_command(["git", "-C", str(repo_path), "rev-parse", "HEAD"]).stdout.strip() == sample_repo_with_newer_commit["newer"]
+    callers = ts_find_callers(
+        repo=sample_repo_with_newer_commit["repo"],
+        commit=sample_repo_with_newer_commit["head"],
+        symbol="classifyError",
+        definitionFile="packages/fxp-ai/errors/classify.ts",
+        repo_cache_dir=repo_cache,
+        analyzer_dir=ANALYZER_DIR,
+    )
+    assert callers["ok"] is True
+    assert run_command(["git", "-C", str(repo_path), "rev-parse", "HEAD"]).stdout.strip() == sample_repo_with_newer_commit["head"]
+    assert any(item["file"] == "packages/fxp-ai/errors/consumer.ts" for item in callers["callers"])
+    assert not any(item["file"] == "packages/fxp-ai/errors/classify.ts" for item in callers["callers"])
+
+
+@pytest.mark.skipif(not has_typescript_dependency(), reason="typescript npm dependency is not installed")
+def test_ts_checkout_dirty_worktree_requires_force(repo_cache: Path, sample_repo_with_newer_commit):
+    repo_path = Path(sample_repo_with_newer_commit["path"])
+    classify = repo_path / "packages" / "fxp-ai" / "errors" / "classify.ts"
+    classify.write_text(classify.read_text(encoding="utf-8") + "\n// dirty\n", encoding="utf-8")
+    blocked = ts_find_definitions(
+        repo=sample_repo_with_newer_commit["repo"],
+        commit=sample_repo_with_newer_commit["head"],
+        symbols=["classifyError"],
+        repo_cache_dir=repo_cache,
+        analyzer_dir=ANALYZER_DIR,
+        force_checkout=False,
+    )
+    assert blocked["ok"] is False
+    assert "worktree is not clean" in blocked["error"]
+
+    forced = ts_find_definitions(
+        repo=sample_repo_with_newer_commit["repo"],
+        commit=sample_repo_with_newer_commit["head"],
+        symbols=["classifyError"],
+        repo_cache_dir=repo_cache,
+        analyzer_dir=ANALYZER_DIR,
+        force_checkout=True,
+    )
+    assert forced["ok"] is True
+    assert run_command(["git", "-C", str(repo_path), "rev-parse", "HEAD"]).stdout.strip() == sample_repo_with_newer_commit["head"]
 
 
 def test_typescript_tool_failure_does_not_break_analysis(repo_cache: Path, readme_only_repo, logs):

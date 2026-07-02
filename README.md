@@ -93,6 +93,8 @@ npm install
 
 If Node.js, `typescript`, `tsconfig.json`, or Program creation is unavailable, the Python tools return structured errors and the main analysis continues.
 
+`ts_find_definitions` and `ts_find_callers` analyze the requested `commit` by checking out the dedicated analysis repository to that commit in detached HEAD mode before creating the TypeScript Program. The project intentionally does not create temporary worktrees or temporary checkout directories; the repo cache is assumed to be agent-owned. Dirty worktrees are rejected unless `force_checkout=True` is passed.
+
 ## Output JSON
 
 Output is a `CiResponsibilityNotice` with:
@@ -144,6 +146,7 @@ Tests create temporary Git repositories under `tmp_path`; they do not call Jenki
 
 - Jenkins API tools and `JenkinsLogProvider` are implemented, but require `JENKINS_URL` and optional credentials in `.env`.
 - TypeScript Compiler API tools are implemented as subprocess-backed optional analysis helpers.
+- `ts_find_definitions` and `ts_find_callers` may detach-checkout the agent-owned analysis repository to the requested commit; do not point `CI_AGENT_REPO_CACHE_DIR` at a human developer working copy.
 - The current agent is rule based, not a real LangChain tool-calling LLM agent.
 - `repo_sync` errors are warnings in local analysis so temporary repos without remotes can still be analyzed; formal Jenkins mode should treat sync failure as blocking for high-confidence ownership.
 - The rule engine is intentionally conservative and prefers `无高可信责任人` when evidence is weak.
