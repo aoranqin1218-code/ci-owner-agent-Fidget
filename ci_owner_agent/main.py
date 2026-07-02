@@ -5,8 +5,9 @@ import json
 import sys
 
 from ci_owner_agent.config import load_settings
-from ci_owner_agent.orchestrator import analyze_jenkins_placeholder, analyze_local
+from ci_owner_agent.orchestrator import analyze_jenkins, analyze_local
 from ci_owner_agent.services.git_client import GitClient
+from ci_owner_agent.services.jenkins_client import JenkinsClient
 
 
 def _print_json(model) -> None:
@@ -60,7 +61,21 @@ def main(argv: list[str] | None = None) -> int:
         _print_json(notice)
         return 0
     if args.command == "analyze":
-        notice = analyze_jenkins_placeholder(args.job, args.build, args.repo)
+        git_client = GitClient(settings.repo_cache_dir, max_output_chars=settings.max_tool_output_chars)
+        jenkins_client = JenkinsClient(
+            base_url=settings.jenkins_url or "",
+            user=settings.jenkins_user,
+            token=settings.jenkins_token,
+            max_output_chars=settings.max_tool_output_chars,
+        )
+        notice = analyze_jenkins(
+            repo=args.repo,
+            job=args.job,
+            build=args.build,
+            jenkins_client=jenkins_client,
+            git_client=git_client,
+            log_tail_lines=args.log_tail_lines or settings.default_log_tail_lines,
+        )
         _print_json(notice)
         return 0
     parser.print_help()

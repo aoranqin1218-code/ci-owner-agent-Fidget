@@ -56,18 +56,17 @@ class LogProvider(ABC):
         raise NotImplementedError
 
 
-class LocalFileLogProvider(LogProvider):
-    def __init__(self, path: str | Path, max_output_chars: int = 20000) -> None:
-        self.path = Path(path)
+class TextLogProvider(LogProvider):
+    def __init__(self, max_output_chars: int = 20000) -> None:
         self.max_output_chars = max_output_chars
-        if not self.path.exists():
-            raise FileNotFoundError(f"log file does not exist: {self.path}")
 
+    @abstractmethod
     def _lines(self) -> list[str]:
-        return self.path.read_text(encoding="utf-8", errors="replace").splitlines()
+        raise NotImplementedError
 
+    @abstractmethod
     def _content(self) -> str:
-        return self.path.read_text(encoding="utf-8", errors="replace")
+        raise NotImplementedError
 
     def read_tail(self, lines: int) -> LogTail:
         all_lines = self._lines()
@@ -137,6 +136,33 @@ class LocalFileLogProvider(LogProvider):
         return log_detect_final_status(self._content())
 
 
-class JenkinsLogProvider(LogProvider):
-    def __init__(self, *_args, **_kwargs) -> None:
-        raise NotImplementedError("JenkinsLogProvider is planned for phase 2")
+class LocalFileLogProvider(TextLogProvider):
+    def __init__(self, path: str | Path, max_output_chars: int = 20000) -> None:
+        super().__init__(max_output_chars=max_output_chars)
+        self.path = Path(path)
+        if not self.path.exists():
+            raise FileNotFoundError(f"log file does not exist: {self.path}")
+
+    def _lines(self) -> list[str]:
+        return self.path.read_text(encoding="utf-8", errors="replace").splitlines()
+
+    def _content(self) -> str:
+        return self.path.read_text(encoding="utf-8", errors="replace")
+
+
+class JenkinsLogProvider(TextLogProvider):
+    def __init__(self, client, job: str, build_number: int, max_output_chars: int = 20000) -> None:
+        super().__init__(max_output_chars=max_output_chars)
+        self.client = client
+        self.job = job
+        self.build_number = build_number
+        self._cached_content: str | None = None
+
+    def _content(self) -> str:
+        if self._cached_content is None:
+            result = self.client.get_console_text(self.job, self.build_number)
+            self._cached_content = result.get("content", "") if result.get("ok") else ""
+        return self._cached_content
+
+    def _lines(self) -> list[str]:
+        return self._content().splitlines()

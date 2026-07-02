@@ -3,8 +3,10 @@ from __future__ import annotations
 from ci_owner_agent.agents.responsibility_agent import AgentContext, RuleBasedResponsibilityAgent
 from ci_owner_agent.schemas import BuildInfo, ChangedFile, CiResponsibilityNotice, CommitInfo, EvidenceItem
 from ci_owner_agent.services.git_client import GitClient
-from ci_owner_agent.services.log_provider import LocalFileLogProvider, LogProvider
+from ci_owner_agent.services.jenkins_client import JenkinsClient
+from ci_owner_agent.services.log_provider import JenkinsLogProvider, LocalFileLogProvider, LogProvider
 from ci_owner_agent.services.scorer import no_owner
+from ci_owner_agent.tools.jenkins_tools import jenkins_get_build_info, jenkins_get_last_successful_build_info
 
 
 def success_notice(build_info: BuildInfo, base_commit: str | None = None) -> CiResponsibilityNotice:
@@ -61,7 +63,12 @@ def aborted_notice(build_info: BuildInfo, base_commit: str | None = None) -> CiR
     )
 
 
-def failure_without_context(build_info: BuildInfo, base_commit: str | None, reason: str) -> CiResponsibilityNotice:
+def failure_without_context(
+    build_info: BuildInfo,
+    base_commit: str | None,
+    reason: str,
+    evidence: list[EvidenceItem] | None = None,
+) -> CiResponsibilityNotice:
     return CiResponsibilityNotice(
         job=build_info.job,
         buildNumber=build_info.buildNumber,
@@ -72,7 +79,7 @@ def failure_without_context(build_info: BuildInfo, base_commit: str | None, reas
         baseCommit=base_commit,
         owner=no_owner(),
         failureReason=reason,
-        evidence=[],
+        evidence=evidence or [],
         suggestions=[
             "确认本地 repo 缓存目录、repo 名称、baseCommit 和 headCommit 是否正确。",
             "人工查看完整日志中首次失败位置。",
@@ -172,15 +179,106 @@ def analyze_local(
     )
 
 
-def analyze_jenkins_placeholder(job: str, build: int, repo: str) -> CiResponsibilityNotice:
-    build_info = BuildInfo(
-        job=job,
-        buildNumber=build,
-        result="UNKNOWN",
-        buildUrl=f"jenkins://{job}/{build}",
-        branch=None,
-        commit=None,
-        logTail=None,
-        warnings=["Jenkins mode is planned for phase 2", f"repo={repo}"],
+def analyze_jenkins(
+    repo: str,
+    job: str,
+    build: int,
+    jenkins_client: JenkinsClient,
+    git_client: GitClient,
+    log_tail_lines: int = 500,
+) -> CiResponsibilityNotice:
+    build_result = jenkins_get_build_info(jenkins_client, job, build, log_tail_lines)
+    if not build_result.get("ok"):
+        build_info = BuildInfo(
+            job=job,
+            buildNumber=build,
+            result="UNKNOWN",
+            buildUrl=f"jenkins://{job}/{build}",
+            branch=None,
+            commit=None,
+            logTail=None,
+            warnings=[str(build_result.get("error"))],
+        )
+        return failure_without_context(build_info, None, f"Jenkins 构建信息获取失败：{build_result.get('error')}")
+
+    build_info = BuildInfo.model_validate(build_result["buildInfo"])
+    if build_info.result == "SUCCESS":
+        return success_notice(build_info, base_commit=None)
+    if build_info.result == "ABORTED":
+        return aborted_notice(build_info, base_commit=None)
+
+    if build_info.result not in {"FAILURE", "UNSTABLE", "UNKNOWN"}:
+        return failure_without_context(build_info, None, f"不支持的 Jenkins 构建结果：{build_info.result}")
+
+    last_success_result = jenkins_get_last_successful_build_info(
+        jenkins_client,
+        job,
+        branch=build_info.branch,
+        beforeBuildNumber=build_info.buildNumber,
     )
-    return failure_without_context(build_info, None, "正式 Jenkins analyze 模式将在第二阶段接入；第一阶段仅保证 analyze-local 闭环。")
+    if not last_success_result.get("ok"):
+        return failure_without_context(
+            build_info,
+            None,
+            f"无法获取上次成功构建，无法确定 baseCommit 做 Git diff：{last_success_result.get('error')}",
+            evidence=[
+                EvidenceItem(
+                    id="E1",
+                    type="build_info",
+                    summary="Jenkins 当前构建信息已获取",
+                    detail="上次成功构建信息获取失败",
+                    source="jenkins",
+                )
+            ],
+        )
+
+    successful = last_success_result["successfulBuildInfo"]
+    base_commit = successful.get("commit")
+    head_commit = build_info.commit
+    evidence = [
+        EvidenceItem(
+            id="E1",
+            type="build_info",
+            summary="Jenkins 构建失败，需要定责分析",
+            detail=f"current result={build_info.result}; lastSuccessfulBuild={successful.get('buildNumber')}",
+            source="jenkins",
+        )
+    ]
+    if build_info.warnings:
+        evidence.append(
+            EvidenceItem(
+                id="E2",
+                type="build_info",
+                summary="Jenkins 当前构建存在元数据 warning",
+                detail="; ".join(build_info.warnings),
+                source="jenkins",
+            )
+        )
+    if successful.get("warnings"):
+        evidence.append(
+            EvidenceItem(
+                id="E3",
+                type="build_info",
+                summary="Jenkins 上次成功构建存在元数据 warning",
+                detail="; ".join(successful.get("warnings") or []),
+                source="jenkins",
+            )
+        )
+    if not head_commit or not base_commit:
+        return failure_without_context(
+            build_info,
+            base_commit,
+            "缺少 headCommit 或 baseCommit，无法执行 Git diff，因此不能输出高可信责任人。",
+            evidence=evidence,
+        )
+
+    log_provider = JenkinsLogProvider(jenkins_client, job, build_info.buildNumber)
+    return analyze_failed_build(
+        repo,
+        build_info,
+        base_commit,
+        head_commit,
+        log_provider,
+        git_client,
+        allow_sync_failure=False,
+    )

@@ -1,13 +1,20 @@
 from __future__ import annotations
 
-
-def jenkins_get_build_info(*_args, **_kwargs) -> dict:
-    return {"ok": False, "error": "Jenkins tools are planned for phase 2"}
+from ci_owner_agent.services.jenkins_client import JenkinsClient
 
 
-def jenkins_get_latest_build_info(*_args, **_kwargs) -> dict:
-    return {"ok": False, "error": "Jenkins tools are planned for phase 2"}
+def jenkins_get_build_info(client: JenkinsClient, job: str, buildNumber: int, logTailLines: int = 500) -> dict:
+    return client.get_build_info(job, buildNumber, logTailLines)
 
 
-def jenkins_get_last_successful_build_info(*_args, **_kwargs) -> dict:
-    return {"ok": False, "error": "Jenkins tools are planned for phase 2"}
+def jenkins_get_latest_build_info(client: JenkinsClient, job: str, logTailLines: int = 500) -> dict:
+    return client.get_latest_build_info(job, logTailLines)
+
+
+def jenkins_get_last_successful_build_info(
+    client: JenkinsClient,
+    job: str,
+    branch: str | None = None,
+    beforeBuildNumber: int | None = None,
+) -> dict:
+    return client.get_last_successful_build_info(job, branch, beforeBuildNumber)

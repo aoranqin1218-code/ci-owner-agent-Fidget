@@ -11,6 +11,7 @@ requires-python = ">=3.11"
 dependencies = [
   "pydantic>=2,<3",
   "python-dotenv>=1,<2",
+  "requests>=2,<3",
 ]
 
 [project.optional-dependencies]
