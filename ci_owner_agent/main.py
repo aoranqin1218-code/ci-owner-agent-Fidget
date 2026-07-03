@@ -12,7 +12,14 @@ from ci_owner_agent.services.jenkins_client import JenkinsClient
 
 
 def _print_json(model) -> None:
-    print(json.dumps(model.model_dump(), ensure_ascii=False, indent=2))
+
+    text = json.dumps(model.model_dump(), ensure_ascii=False, indent=2)
+
+    try:
+        sys.stdout.write(text + "\n")
+    except UnicodeEncodeError:
+        sys.stdout.buffer.write((text + "\n").encode("utf-8", errors="replace"))
+        sys.stdout.buffer.flush()
 
 
 def build_parser() -> argparse.ArgumentParser:
