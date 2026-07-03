@@ -114,6 +114,15 @@ def test_langchain_agent_valid_json_high_confidence(monkeypatch, repo_cache, sam
     assert notice.owner.type == "high_confidence"
 
 
+def test_langchain_agent_parses_pure_json(monkeypatch, repo_cache, sample_repo, logs):
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    payload = json.dumps(high_confidence_payload(context), ensure_ascii=False)
+    agent = LangChainResponsibilityAgent(context.settings, context, [])
+    monkeypatch.setattr(agent, "_invoke_agent", lambda: payload)
+    notice = agent.analyze()
+    assert notice.owner.type == "high_confidence"
+
+
 def test_langchain_agent_parses_json_fenced_block(monkeypatch, repo_cache, sample_repo, logs):
     context = make_lc_context(repo_cache, sample_repo, logs)
     payload = json.dumps(high_confidence_payload(context), ensure_ascii=False)
@@ -121,6 +130,24 @@ def test_langchain_agent_parses_json_fenced_block(monkeypatch, repo_cache, sampl
     monkeypatch.setattr(agent, "_invoke_agent", lambda: f"```json\n{payload}\n```")
     notice = agent.analyze()
     assert notice.hasHighConfidenceOwner is True
+    assert notice.owner.type == "high_confidence"
+
+
+def test_langchain_agent_parses_explanation_plus_json_fenced_block(monkeypatch, repo_cache, sample_repo, logs):
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    payload = json.dumps(high_confidence_payload(context), ensure_ascii=False)
+    agent = LangChainResponsibilityAgent(context.settings, context, [])
+    monkeypatch.setattr(agent, "_invoke_agent", lambda: f"下面是分析结果：\n```json\n{payload}\n```\n请查收。")
+    notice = agent.analyze()
+    assert notice.owner.type == "high_confidence"
+
+
+def test_langchain_agent_parses_explanation_plus_json_object(monkeypatch, repo_cache, sample_repo, logs):
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    payload = json.dumps(high_confidence_payload(context), ensure_ascii=False)
+    agent = LangChainResponsibilityAgent(context.settings, context, [])
+    monkeypatch.setattr(agent, "_invoke_agent", lambda: f"分析如下：\n{payload}\n以上。")
+    notice = agent.analyze()
     assert notice.owner.type == "high_confidence"
 
 

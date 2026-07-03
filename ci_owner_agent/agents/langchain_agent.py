@@ -170,7 +170,13 @@ class LangChainResponsibilityAgent:
         }
 
     def _parse_notice(self, raw: str) -> CiResponsibilityNotice | None:
-        text = self._strip_code_fence(raw)
+        for text in self._notice_candidates(raw):
+            notice = self._parse_notice_candidate(text)
+            if notice is not None:
+                return notice
+        return None
+
+    def _parse_notice_candidate(self, text: str) -> CiResponsibilityNotice | None:
         try:
             return CiResponsibilityNotice.model_validate_json(text)
         except Exception:
@@ -179,9 +185,35 @@ class LangChainResponsibilityAgent:
             except Exception:
                 return None
 
+    def _notice_candidates(self, raw: str) -> list[str]:
+        candidates = [raw.strip()]
+        stripped = self._strip_code_fence(raw)
+        if stripped not in candidates:
+            candidates.append(stripped)
+        for match in re.finditer(r"```(?:json)?\s*(.*?)\s*```", raw, flags=re.S | re.I):
+            fenced = match.group(1).strip()
+            if fenced and fenced not in candidates:
+                candidates.append(fenced)
+        json_object = self._extract_first_json_object(raw)
+        if json_object and json_object not in candidates:
+            candidates.append(json_object)
+        return candidates
+
+    def _extract_first_json_object(self, raw: str) -> str | None:
+        decoder = json.JSONDecoder()
+        for idx, char in enumerate(raw):
+            if char != "{":
+                continue
+            try:
+                _obj, end = decoder.raw_decode(raw[idx:])
+            except json.JSONDecodeError:
+                continue
+            return raw[idx : idx + end]
+        return None
+
     def _strip_code_fence(self, raw: str) -> str:
         text = raw.strip()
-        match = re.match(r"^```(?:json)?\s*(.*?)\s*```$", text, flags=re.S)
+        match = re.match(r"^```(?:json)?\s*(.*?)\s*```$", text, flags=re.S | re.I)
         return match.group(1).strip() if match else text
 
     def _failure_notice(self, reason: str) -> CiResponsibilityNotice:
