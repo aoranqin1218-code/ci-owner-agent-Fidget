@@ -185,7 +185,10 @@ def test_cli_analyze_local_outputs_json(repo_cache: Path, sample_repo, logs, cap
         ]
     )
     assert code == 0
-    payload = json.loads(capsys.readouterr().out)
+    output = capsys.readouterr().out
+    assert "```" not in output
+    assert output.lstrip().startswith("{")
+    payload = json.loads(output)
     assert payload["owner"]["type"] == "high_confidence"
 
 

@@ -114,6 +114,16 @@ def test_langchain_agent_valid_json_high_confidence(monkeypatch, repo_cache, sam
     assert notice.owner.type == "high_confidence"
 
 
+def test_langchain_agent_parses_json_fenced_block(monkeypatch, repo_cache, sample_repo, logs):
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    payload = json.dumps(high_confidence_payload(context), ensure_ascii=False)
+    agent = LangChainResponsibilityAgent(context.settings, context, [])
+    monkeypatch.setattr(agent, "_invoke_agent", lambda: f"```json\n{payload}\n```")
+    notice = agent.analyze()
+    assert notice.hasHighConfidenceOwner is True
+    assert notice.owner.type == "high_confidence"
+
+
 def test_langchain_v1_create_agent_is_used(monkeypatch, repo_cache, sample_repo, logs):
     context = make_lc_context(repo_cache, sample_repo, logs)
     calls = {}
@@ -394,6 +404,17 @@ def test_prompt_allows_explicit_log_file_paths_before_file_content():
         "失败测试行",
         "错误输出中明确出现的文件路径",
         "test/packages/fxp-ai/errors/classify.test.ts:1:23",
+    ]:
+        assert text in LANGCHAIN_RESPONSIBILITY_AGENT_SYSTEM_PROMPT
+
+
+def test_prompt_requires_final_json_after_sufficient_evidence_or_budget_exhaustion():
+    for text in [
+        "日志失败证据 + 相关 diff 证据 + 测试断言证据 + 被测函数行为证据",
+        "必须立即输出最终 CiResponsibilityNotice JSON",
+        "不要为了补强证据而继续读取 base 版本文件",
+        "tool call budget exhausted",
+        "禁止继续调用任何工具",
     ]:
         assert text in LANGCHAIN_RESPONSIBILITY_AGENT_SYSTEM_PROMPT
 
