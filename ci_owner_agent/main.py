@@ -10,6 +10,11 @@ from ci_owner_agent.schemas import BuildInfo
 from ci_owner_agent.services.git_client import GitClient
 from ci_owner_agent.services.jenkins_client import JenkinsClient
 
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 
 def _print_json(model) -> None:
 
