@@ -11,3 +11,4 @@ build/
 htmlcov/
 ts-analyzer/node_modules/
 .idea/
+runs/
