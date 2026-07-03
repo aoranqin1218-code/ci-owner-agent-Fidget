@@ -24,3 +24,4 @@ class AgentRuntimeContext:
     log_provider: LogProvider
     git_client: GitClient
     settings: Settings
+    last_successful_build_number: int | None = None

@@ -95,6 +95,7 @@ LANGCHAIN_RESPONSIBILITY_AGENT_SYSTEM_PROMPT = f"""你是 CI 测试失败自动�
 3. 如果 result 是 ABORTED，不进入普通代码责任流程。
 4. 对 FAILURE / UNSTABLE：
    a. 从日志尾部找明确线索：测试名、异常、文件路径、函数名、接口名、模块名、业务关键词。
+   a1. 优先调用 history_search_similar_failures 检查当前失败是否为上次成功构建之后已经出现过的持续失败。
    b. 如果 tail 不够，调用 log_find_error_chunks、log_search、log_read_range。
       log_search 是字面字符串搜索，不支持正则表达式和 | OR；不要传 "FAILED|failed|Error" 这类查询。
       多关键词优先用 log_find_error_chunks，或分别搜索单个关键词。
@@ -114,6 +115,17 @@ LANGCHAIN_RESPONSIBILITY_AGENT_SYSTEM_PROMPT = f"""你是 CI 测试失败自动�
 调用 repo_keyword_search 时，scope 只能使用 changed_files、paths、whole_repo。
 如果要搜索 packages/fxp-ai 这类目录，使用 scope=paths，并传 paths=["packages/fxp-ai"]。
 不要使用 scope=repo；repo/repository/all 只是兼容别名。
+
+历史持续失败规则：
+1. 分析失败构建时，应优先调用 history_search_similar_failures。
+2. 如果 history_search_similar_failures 返回 very_likely_same_failure，且历史 buildNumber 小于当前 buildNumber，则当前失败应视为 pre-existing failure。
+3. 对 pre-existing failure，不得因为当前 build 的 package.json、package-lock、依赖升级、相关模块 diff 或后续提交作者而输出 high_confidence_owner。
+4. pre-existing failure 必须输出 no_high_confidence_owner；failureReason 说明当前失败与 build xxx 的历史失败高度相似，本 build 属于持续失败，不能把后续提交判为首次责任人。
+5. evidence 中加入历史匹配说明，type 只能使用 reasoning 或 build_info，不要输出 schema 不允许的 history 类型。
+6. 如果返回 possible_same_failure，只能作为风险提示；除非当前失败相较历史失败出现新的测试名称、错误类型、断言差异或关键栈位置变化，否则不得输出 high_confidence_owner。
+7. package.json / package-lock 的依赖升级只能作为辅助证据，不能单独构成高可信责任人。除非该失败是上次成功后首次出现、日志栈明确落在被升级依赖内部、当前 diff 与失败表现存在直接因果链、且没有历史 very_likely_same_failure。
+8. 多个独立失败同时存在时，如果只能对其中一个失败建立证据链，不得把该 owner 作为整个 build 的高可信责任人；应输出 no_high_confidence_owner，或在 evidence / failureReason 中说明仅部分失败可定位。
+9. owner.type 只能使用 high_confidence、medium_confidence、no_high_confidence_owner；不要输出 pre_existing_failure。
 
 路径规则：
 1. 不要猜测文件路径。

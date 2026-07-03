@@ -144,6 +144,7 @@ class LangChainResponsibilityAgent:
             "branch": self.context.branch,
             "baseCommit": self.context.base_commit,
             "headCommit": self.context.head_commit,
+            "lastSuccessfulBuildNumber": self.context.last_successful_build_number,
             "changedFiles": [item.model_dump() for item in self.context.changed_files[:30]],
             "changedFilesTotal": len(self.context.changed_files),
             "changedFilesTruncated": len(self.context.changed_files) > 30,

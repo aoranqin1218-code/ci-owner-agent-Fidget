@@ -7,6 +7,7 @@ from ci_owner_agent.agents.responsibility_agent import AgentContext
 from ci_owner_agent.config import Settings, load_settings
 from ci_owner_agent.schemas import BuildInfo, ChangedFile, CiResponsibilityNotice, CommitInfo, EvidenceItem
 from ci_owner_agent.services.git_client import GitClient
+from ci_owner_agent.services.history_store import get_history_store
 from ci_owner_agent.services.jenkins_client import JenkinsClient
 from ci_owner_agent.services.log_provider import JenkinsLogProvider, LocalFileLogProvider, LogProvider, detect_checkout_revision_from_console_log
 from ci_owner_agent.services.scorer import no_owner, validate_notice
@@ -101,6 +102,7 @@ def analyze_failed_build(
     git_client: GitClient,
     allow_sync_failure: bool = False,
     settings: Settings | None = None,
+    last_successful_build_number: int | None = None,
 ) -> CiResponsibilityNotice:
     settings = settings or load_settings()
     sync_result = git_client.sync(repo)
@@ -149,6 +151,7 @@ def analyze_failed_build(
         log_provider=log_provider,
         git_client=git_client,
         settings=settings,
+        last_successful_build_number=last_successful_build_number,
     )
     try:
         agent = create_responsibility_agent(settings, runtime_context)
@@ -160,7 +163,36 @@ def analyze_failed_build(
         return failure_without_context(build_info, base_commit, f"LLM 配置错误：{exc}")
     if sync_warning is not None:
         notice.evidence.append(sync_warning)
-    return validate_notice(notice)
+    notice = validate_notice(notice)
+    _save_history(settings, build_info, notice, log_provider, base_commit, head_commit, last_successful_build_number)
+    return notice
+
+
+def _save_history(
+    settings: Settings,
+    build_info: BuildInfo,
+    notice: CiResponsibilityNotice,
+    log_provider: LogProvider,
+    base_commit: str | None,
+    head_commit: str | None,
+    last_successful_build_number: int | None,
+) -> None:
+    store = get_history_store(settings)
+    if store is None:
+        return
+    try:
+        chunks = log_provider.find_error_chunks(chunk_lines=200, max_chunks=5).get("chunks", [])
+        store.save_analysis(
+            build_info=build_info,
+            notice=notice,
+            base_commit=base_commit,
+            head_commit=head_commit,
+            last_successful_build_number=last_successful_build_number,
+            last_successful_commit=base_commit,
+            error_chunks=chunks,
+        )
+    except Exception as exc:
+        build_info.warnings.append(f"history save failed: {exc}")
 
 
 def analyze_local(
@@ -178,6 +210,7 @@ def analyze_local(
     max_output_chars: int = 20000,
     settings: Settings | None = None,
     ignore_checkout_commit_mismatch: bool = False,
+    last_successful_build_number: int | None = None,
 ) -> CiResponsibilityNotice:
     settings = settings or load_settings()
     log_provider = LocalFileLogProvider(console_file, max_output_chars=max_output_chars)
@@ -209,9 +242,13 @@ def analyze_local(
         warnings=[] if result else [f"result detected from log: {detected}"],
     )
     if final_result == "SUCCESS":
-        return success_notice(build_info, base_commit=None)
+        notice = success_notice(build_info, base_commit=None)
+        _save_history(settings, build_info, notice, log_provider, None, head_commit, last_successful_build_number)
+        return notice
     if final_result == "ABORTED":
-        return aborted_notice(build_info, base_commit=None)
+        notice = aborted_notice(build_info, base_commit=None)
+        _save_history(settings, build_info, notice, log_provider, None, head_commit, last_successful_build_number)
+        return notice
     return analyze_failed_build(
         repo,
         build_info,
@@ -221,6 +258,7 @@ def analyze_local(
         git_client,
         allow_sync_failure=True,
         settings=settings,
+        last_successful_build_number=last_successful_build_number,
     )
 
 
@@ -250,9 +288,15 @@ def analyze_jenkins(
 
     build_info = BuildInfo.model_validate(build_result["buildInfo"])
     if build_info.result == "SUCCESS":
-        return success_notice(build_info, base_commit=None)
+        notice = success_notice(build_info, base_commit=None)
+        log_provider = JenkinsLogProvider(jenkins_client, job, build_info.buildNumber)
+        _save_history(settings, build_info, notice, log_provider, None, build_info.commit, None)
+        return notice
     if build_info.result == "ABORTED":
-        return aborted_notice(build_info, base_commit=None)
+        notice = aborted_notice(build_info, base_commit=None)
+        log_provider = JenkinsLogProvider(jenkins_client, job, build_info.buildNumber)
+        _save_history(settings, build_info, notice, log_provider, None, build_info.commit, None)
+        return notice
 
     if build_info.result not in {"FAILURE", "UNSTABLE", "UNKNOWN"}:
         return failure_without_context(build_info, None, f"不支持的 Jenkins 构建结果：{build_info.result}")
@@ -329,4 +373,5 @@ def analyze_jenkins(
         git_client,
         allow_sync_failure=False,
         settings=settings,
+        last_successful_build_number=successful.get("buildNumber"),
     )

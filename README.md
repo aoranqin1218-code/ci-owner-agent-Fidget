@@ -37,6 +37,10 @@ CI_AGENT_RESPONSE_FORMAT=tool
 TS_ANALYZER_DIR=./ts-analyzer
 LANGSMITH_TRACING=false
 LANGSMITH_PROJECT=ci-owner-agent-dev
+CI_AGENT_HISTORY_ENABLED=false
+CI_AGENT_HISTORY_MONGO_URI=mongodb://localhost:27017
+CI_AGENT_HISTORY_MONGO_DB=ci_owner_agent
+CI_AGENT_HISTORY_MAX_CANDIDATES=5
 ```
 
 `CI_AGENT_MODEL_PROVIDER=fake` is the default offline test mode. It uses the rule-based MVP agent only to verify the toolchain and tests; it is not the formal analysis mode.
@@ -81,6 +85,8 @@ LANGSMITH_PROJECT=ci-owner-agent-dev
 ```
 
 Tracing is enabled only when both `LANGSMITH_TRACING=true` and `LANGSMITH_API_KEY` are present. Keys are not printed.
+
+Historical failure recall is optional and disabled by default. When `CI_AGENT_HISTORY_ENABLED=true`, the agent stores build metadata, notices, and normalized error chunks in MongoDB, then exposes `history_search_similar_failures` to detect pre-existing failures. MongoDB write/search failures do not block analysis.
 
 ## Local Repo Cache
 

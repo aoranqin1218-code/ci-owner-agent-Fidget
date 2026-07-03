@@ -49,6 +49,7 @@ def build_parser() -> argparse.ArgumentParser:
     local.add_argument("--log-tail-lines", type=int, default=None)
     local.add_argument("--result", choices=["SUCCESS", "FAILURE", "UNSTABLE", "ABORTED", "UNKNOWN"], default=None)
     local.add_argument("--ignore-checkout-commit-mismatch", action="store_true")
+    local.add_argument("--last-success-build", type=int, default=None)
     return parser
 
 
@@ -74,6 +75,7 @@ def main(argv: list[str] | None = None) -> int:
                 max_output_chars=settings.max_tool_output_chars,
                 settings=settings,
                 ignore_checkout_commit_mismatch=args.ignore_checkout_commit_mismatch,
+                last_successful_build_number=args.last_success_build,
             )
         except ValueError as exc:
             print(f"ERROR: {exc}", file=sys.stderr)

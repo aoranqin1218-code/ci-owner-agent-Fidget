@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from ci_owner_agent.agents.context import AgentRuntimeContext
+from ci_owner_agent.tools.history_tools import history_search_similar_failures as search_similar_failures
 from ci_owner_agent.tools.keyword_tools import repo_keyword_search as keyword_search
 from ci_owner_agent.tools.path_tools import repo_find_paths as find_paths
 from ci_owner_agent.tools.typescript_tools import (
@@ -278,6 +279,13 @@ def build_langchain_tools(context: AgentRuntimeContext) -> list[Any]:
             return blocked
         return check_ts_deps(context.repo, repo_cache_dir=context.settings.repo_cache_dir)
 
+    def history_search_similar_failures(maxCandidates: int = 5, lookbackBuilds: int = 20) -> dict:
+        """Search MongoDB history for previous failed builds with similar normalized error chunks. Use this early to detect pre-existing failures."""
+        blocked = _guard_tool_call("history_search_similar_failures", {"maxCandidates": maxCandidates, "lookbackBuilds": lookbackBuilds})
+        if blocked:
+            return blocked
+        return _limit(search_similar_failures(context, maxCandidates=maxCandidates, lookbackBuilds=lookbackBuilds), max_chars)
+
     specs = [
         ("log_read_tail", "Read the tail of the current build log.", log_read_tail),
         (
@@ -306,6 +314,11 @@ def build_langchain_tools(context: AgentRuntimeContext) -> list[Any]:
         ("ts_find_definitions", "Find TypeScript definitions for symbols.", ts_find_definitions),
         ("ts_find_callers", "Find TypeScript callers of a symbol.", ts_find_callers),
         ("check_node_dependencies_for_analysis", "Check TS node_modules and tsconfig dependencies.", check_node_dependencies_for_analysis),
+        (
+            "history_search_similar_failures",
+            "Search MongoDB history for previous failed builds with similar normalized error chunks. Takes maxCandidates and lookbackBuilds only; job, branch, buildNumber, and lastSuccessfulBuildNumber come from context. If very_likely_same_failure is found, treat current failure as pre-existing and do not assign high confidence to later dependency/package changes.",
+            history_search_similar_failures,
+        ),
     ]
     simple_tools = [SimpleTool(name=name, description=description, func=func) for name, description, func in specs]
     try:

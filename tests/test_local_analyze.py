@@ -225,6 +225,55 @@ def test_cli_analyze_local_checkout_mismatch_outputs_clear_error(repo_cache: Pat
     assert "--head-commit" in captured.err
 
 
+def test_cli_analyze_local_accepts_last_success_build(repo_cache: Path, sample_repo, logs, monkeypatch, capsys):
+    captured = {}
+
+    def fake_analyze_local(**kwargs):
+        captured.update(kwargs)
+        from ci_owner_agent.orchestrator import success_notice
+        from ci_owner_agent.schemas import BuildInfo
+
+        return success_notice(
+            BuildInfo(
+                job=kwargs["job"],
+                buildNumber=kwargs["build"],
+                result="SUCCESS",
+                buildUrl=kwargs["build_url"],
+                branch=kwargs["branch"],
+                commit=kwargs["head_commit"],
+            )
+        )
+
+    monkeypatch.setenv("CI_AGENT_REPO_CACHE_DIR", str(repo_cache))
+    monkeypatch.setattr("ci_owner_agent.main.analyze_local", fake_analyze_local)
+    code = main(
+        [
+            "analyze-local",
+            "--repo",
+            sample_repo["repo"],
+            "--job",
+            "services/fx-code-unittest",
+            "--build",
+            "5076",
+            "--branch",
+            "dev",
+            "--base-commit",
+            sample_repo["base"],
+            "--head-commit",
+            sample_repo["head"],
+            "--console-file",
+            str(logs["auth_failed"]),
+            "--build-url",
+            "local://services/fx-code-unittest/5076",
+            "--last-success-build",
+            "5075",
+        ]
+    )
+    assert code == 0
+    assert captured["last_successful_build_number"] == 5075
+    assert "```" not in capsys.readouterr().out
+
+
 def test_explicit_result_overrides_log_detection(repo_cache: Path, sample_repo, logs):
     notice = analyze_local(
         repo=sample_repo["repo"],

@@ -36,6 +36,7 @@ class BuildLog:
     status: str | None
     head_commit: str | None
     base_commit: str | None = None
+    last_success_build_number: int | None = None
     skip_reason: str | None = None
 
 
@@ -126,11 +127,13 @@ def load_logs(log_dir: Path, log_glob: str, initial_base_commit: str | None = No
     logs.sort(key=lambda x: x.build)
 
     last_success_commit = initial_base_commit
+    last_success_build_number: int | None = None
 
     for item in logs:
         if item.status == "SUCCESS":
             if item.head_commit:
                 last_success_commit = item.head_commit
+                last_success_build_number = item.build
             else:
                 item.skip_reason = "success build missing head commit"
             continue
@@ -152,6 +155,7 @@ def load_logs(log_dir: Path, log_glob: str, initial_base_commit: str | None = No
             continue
 
         item.base_commit = last_success_commit
+        item.last_success_build_number = last_success_build_number
 
     return logs
 
@@ -212,7 +216,7 @@ def build_analyze_command(
     assert item.base_commit
     assert item.head_commit
 
-    return [
+    command = [
         sys.executable,
         "-m",
         "ci_owner_agent",
@@ -234,6 +238,9 @@ def build_analyze_command(
         "--build-url",
         f"{build_url_prefix.rstrip('/')}/{item.build}",
     ]
+    if item.last_success_build_number is not None:
+        command.extend(["--last-success-build", str(item.last_success_build_number)])
+    return command
 
 
 def run_analyze_local(
@@ -474,6 +481,7 @@ def main() -> int:
                     "status": item.status,
                     "headCommit": item.head_commit,
                     "baseCommit": item.base_commit,
+                    "lastSuccessfulBuildNumber": item.last_success_build_number,
                     "consoleFile": str(item.path),
                     "skipped": True,
                     "skipReason": item.skip_reason or f"skip status {item.status}",
@@ -508,6 +516,7 @@ def main() -> int:
                 "status": item.status,
                 "baseCommit": item.base_commit,
                 "headCommit": item.head_commit,
+                "lastSuccessfulBuildNumber": item.last_success_build_number,
                 "consoleFile": str(item.path),
                 "noticeFile": str(notice_path),
                 "stdoutFile": str(stdout_path),
@@ -571,6 +580,7 @@ def main() -> int:
                         "hasHighConfidenceOwner"
                     )
                     record["failureReason"] = notice.get("failureReason")
+                    record["historyEnabled"] = os.environ.get("CI_AGENT_HISTORY_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
                 else:
                     record["noticeParseError"] = True
 
@@ -605,6 +615,11 @@ def main() -> int:
         "skipReason",
         "baseCommit",
         "headCommit",
+        "lastSuccessfulBuildNumber",
+        "historyEnabled",
+        "historicalMatchCount",
+        "topHistoricalMatchBuild",
+        "topHistoricalMatchSimilarity",
         "returnCode",
         "ownerType",
         "ownerName",

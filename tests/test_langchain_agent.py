@@ -446,6 +446,17 @@ def test_prompt_requires_final_json_after_sufficient_evidence_or_budget_exhausti
         assert text in LANGCHAIN_RESPONSIBILITY_AGENT_SYSTEM_PROMPT
 
 
+def test_prompt_pre_existing_failure_keeps_schema_owner_type():
+    for text in [
+        "history_search_similar_failures",
+        "pre-existing failure",
+        "必须输出 no_high_confidence_owner",
+        "不要输出 pre_existing_failure",
+        "type 只能使用 reasoning 或 build_info",
+    ]:
+        assert text in LANGCHAIN_RESPONSIBILITY_AGENT_SYSTEM_PROMPT
+
+
 def test_prompt_and_tool_docs_describe_literal_log_search_and_direct_log_paths(repo_cache, sample_repo, logs):
     for text in [
         "log_search 是字面字符串搜索",

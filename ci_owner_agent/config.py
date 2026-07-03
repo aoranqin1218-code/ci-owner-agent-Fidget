@@ -32,6 +32,10 @@ class Settings:
     langsmith_api_key: str | None
     langsmith_project: str
     langsmith_endpoint: str
+    history_enabled: bool
+    history_mongo_uri: str
+    history_mongo_db: str
+    history_max_candidates: int
 
 
 def _int_env(name: str, default: int) -> int:
@@ -57,6 +61,13 @@ def _int_env_or_default(name: str, default: int) -> int:
 def _response_format_env() -> str:
     value = os.getenv("CI_AGENT_RESPONSE_FORMAT", "tool").lower()
     return value if value in {"tool", "json_text"} else "tool"
+
+
+def _bool_env(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None or value == "":
+        return default
+    return value.lower() in {"1", "true", "yes", "on"}
 
 
 def load_settings(env_file: str | Path | None = None) -> Settings:
@@ -86,6 +97,10 @@ def load_settings(env_file: str | Path | None = None) -> Settings:
         langsmith_api_key=os.getenv("LANGSMITH_API_KEY") or None,
         langsmith_project=os.getenv("LANGSMITH_PROJECT", "ci-owner-agent-dev"),
         langsmith_endpoint=os.getenv("LANGSMITH_ENDPOINT", "https://api.smith.langchain.com"),
+        history_enabled=_bool_env("CI_AGENT_HISTORY_ENABLED", False),
+        history_mongo_uri=os.getenv("CI_AGENT_HISTORY_MONGO_URI", "mongodb://localhost:27017"),
+        history_mongo_db=os.getenv("CI_AGENT_HISTORY_MONGO_DB", "ci_owner_agent"),
+        history_max_candidates=_int_env_or_default("CI_AGENT_HISTORY_MAX_CANDIDATES", 5),
     )
 
 
