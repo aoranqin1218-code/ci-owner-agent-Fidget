@@ -298,3 +298,25 @@ python -m ci_owner_agent analyze-local `
   --console-file samples/company_log/company-unittest-5104.log `
   --build-url local://services/fx-code-unittest/5104
 ```
+
+## Batch Company Logs
+
+`scripts/batch_analyze_company_logs.py` scans local Jenkins console logs by build number, keeps the previous successful build commit, and calls `analyze-local` for runnable failed builds. It writes `index.jsonl`, `summary.csv`, stdout/stderr, notices, and optional traces under the output directory.
+
+Useful parameters:
+
+```powershell
+python .\scripts\batch_analyze_company_logs.py `
+  --log-dir .\samples\company_log `
+  --out-dir .\runs\company-log-batch-5072-5076-dryrun `
+  --env-file .\.env `
+  --build-from 5072 `
+  --build-to 5076 `
+  --dry-run
+```
+
+- `--build-from`: only execute/report logs with `buildNumber >= value`.
+- `--build-to`: only execute/report logs with `buildNumber <= value`.
+- Range filtering happens after scanning all logs, so a failed build inside the range still gets the correct previous successful commit and `--last-success-build` from earlier logs outside the range.
+- `--limit` applies after build range filtering.
+- `--dry-run` prints commands without calling the real LLM.

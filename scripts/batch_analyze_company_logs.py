@@ -160,6 +160,18 @@ def load_logs(log_dir: Path, log_glob: str, initial_base_commit: str | None = No
     return logs
 
 
+def in_build_range(item: BuildLog, build_from: int | None, build_to: int | None) -> bool:
+    if build_from is not None and item.build < build_from:
+        return False
+    if build_to is not None and item.build > build_to:
+        return False
+    return True
+
+
+def filter_logs_by_build_range(logs: list[BuildLog], build_from: int | None, build_to: int | None) -> list[BuildLog]:
+    return [item for item in logs if in_build_range(item, build_from, build_to)]
+
+
 def extract_first_json_object(text: str) -> dict[str, Any] | None:
     decoder = json.JSONDecoder()
     for idx, ch in enumerate(text):
@@ -402,10 +414,14 @@ def main() -> int:
 
     parser.add_argument("--timeout-seconds", type=int, default=900)
     parser.add_argument("--limit", type=int, default=0)
+    parser.add_argument("--build-from", type=int, default=None)
+    parser.add_argument("--build-to", type=int, default=None)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--resume", action="store_true")
 
     args = parser.parse_args()
+    if args.build_from is not None and args.build_to is not None and args.build_from > args.build_to:
+        parser.error("--build-from must be <= --build-to")
 
     repo_root = Path.cwd()
     log_dir = Path(args.log_dir).resolve()
@@ -434,11 +450,12 @@ def main() -> int:
         or f"ci-owner-agent-batch-{batch_id}"
     )
 
-    logs = load_logs(
+    logs_all = load_logs(
         log_dir=log_dir,
         log_glob=args.log_glob,
         initial_base_commit=args.initial_base_commit,
     )
+    logs = filter_logs_by_build_range(logs_all, args.build_from, args.build_to)
 
     runnable_failures = [
         item for item in logs if item.status == "FAILURE" and not item.skip_reason
@@ -468,7 +485,10 @@ def main() -> int:
     print(f"out_dir={out_dir}")
     print(f"env_file={env_file}")
     print(f"langsmith_project={project_name}")
-    print(f"total_logs={len(logs)}")
+    print(f"build_from={args.build_from}")
+    print(f"build_to={args.build_to}")
+    print(f"total_logs_all={len(logs_all)}")
+    print(f"total_logs_selected={len(logs)}")
     print(f"runnable_failures={len(runnable_failures)}")
 
     rows: list[dict[str, Any]] = []
