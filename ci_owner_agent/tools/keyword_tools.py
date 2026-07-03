@@ -4,6 +4,19 @@ from ci_owner_agent.schemas import KeywordMatch
 from ci_owner_agent.services.command_runner import validate_commit_ref, validate_git_path
 from ci_owner_agent.services.git_client import GitClient
 
+_SCOPE_ALIASES = {
+    "changed": "changed_files",
+    "changedFiles": "changed_files",
+    "changed_files": "changed_files",
+    "path": "paths",
+    "paths": "paths",
+    "repo": "whole_repo",
+    "repository": "whole_repo",
+    "all": "whole_repo",
+    "all_repo": "whole_repo",
+    "whole_repo": "whole_repo",
+}
+
 
 def _changed_paths(client: GitClient, repo: str, base_commit: str | None, head_commit: str | None) -> tuple[list[str], str | None]:
     if not base_commit or not head_commit:
@@ -30,6 +43,9 @@ def repo_keyword_search(
     error = validate_commit_ref(commit)
     if error:
         return {"ok": False, "error": error, "matches": []}
+    paths = paths or []
+    original_scope = scope
+    scope = "paths" if paths else _SCOPE_ALIASES.get(scope, scope)
 
     search_paths: list[str] = []
     if scope == "changed_files":
@@ -41,7 +57,7 @@ def repo_keyword_search(
     elif scope == "whole_repo":
         search_paths = []
     else:
-        return {"ok": False, "error": f"unsupported scope: {scope}", "matches": []}
+        return {"ok": False, "error": f"unsupported scope: {original_scope}", "matches": []}
 
     for path in search_paths:
         path_error = validate_git_path(path)

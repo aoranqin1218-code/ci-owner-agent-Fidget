@@ -104,6 +104,10 @@ LANGCHAIN_RESPONSIBILITY_AGENT_SYSTEM_PROMPT = f"""你是 CI 测试失败自动�
    h. 如果需要判断影响范围，调用 ts_find_callers。
    i. 如果日志线索和 diff/TS 证据无法建立链路，输出 no_high_confidence_owner。
 
+调用 repo_keyword_search 时，scope 只能使用 changed_files、paths、whole_repo。
+如果要搜索 packages/fxp-ai 这类目录，使用 scope=paths，并传 paths=["packages/fxp-ai"]。
+不要使用 scope=repo；repo/repository/all 只是兼容别名。
+
 高可信可接受证据组合：
 1. 日志明确文件/函数 + 本次 diff 修改同文件/函数。
 2. 日志失败测试指向模块 + 本次 diff 修改模块核心文件 + diff 内容可解释失败。

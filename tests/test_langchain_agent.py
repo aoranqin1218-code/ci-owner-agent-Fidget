@@ -334,6 +334,22 @@ def test_langchain_tools_context_defaults(repo_cache, sample_repo, logs):
     assert "changedFunctions" in ts_result
 
 
+def test_langchain_repo_keyword_search_repo_scope_with_paths(repo_cache, sample_repo, logs):
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    tools = {tool.name: tool for tool in build_langchain_tools(context)}
+    result = tools["repo_keyword_search"].invoke(
+        {
+            "scope": "repo",
+            "paths": ["packages/fxp-ai"],
+            "keywords": ["FILE_SIZE_EXCEEDED"],
+        }
+    )
+    assert result["ok"] is True
+    assert "unsupported scope: repo" not in str(result)
+    assert result["matches"]
+    assert all(match["file"].startswith("packages/fxp-ai/") for match in result["matches"])
+
+
 def test_langchain_tools_force_checkout_for_ts_definitions_and_callers(monkeypatch, repo_cache, sample_repo, logs):
     context = make_lc_context(repo_cache, sample_repo, logs)
     calls = {}

@@ -88,7 +88,7 @@ def build_langchain_tools(context: AgentRuntimeContext) -> list[Any]:
         return _limit(context.git_client.get_file_content(context.repo, commit, path, startLine, endLine), max_chars)
 
     def repo_keyword_search(keywords: list[str], scope: str = "changed_files", paths: list[str] | None = None, maxMatches: int = 50) -> dict:
-        """Search keywords in changed files, specified paths, or the whole repository."""
+        """Search keywords. Valid scope values: changed_files, paths, whole_repo. Use scope=paths with paths=[...] for specific directories/files. Aliases repo/repository/all are accepted as whole_repo."""
         return _limit(
             keyword_search(
                 context.git_client,
@@ -157,7 +157,11 @@ def build_langchain_tools(context: AgentRuntimeContext) -> list[Any]:
         ("repo_get_diff_files", "Get changed files in base..head.", repo_get_diff_files),
         ("repo_get_file_diff", "Get diff for a changed file.", repo_get_file_diff),
         ("repo_get_file_content", "Get file content at a commit.", repo_get_file_content),
-        ("repo_keyword_search", "Search keywords in changed files, paths, or whole repo.", repo_keyword_search),
+        (
+            "repo_keyword_search",
+            "Search keywords. Valid scope values: changed_files, paths, whole_repo. Use scope=paths with paths=[...] to search specific directories/files. Use scope=whole_repo for the whole repository. Aliases repo/repository/all are accepted as whole_repo.",
+            repo_keyword_search,
+        ),
         ("ts_analyze_changed_functions", "Analyze changed TS/TSX functions.", ts_analyze_changed_functions),
         ("ts_find_definitions", "Find TypeScript definitions for symbols.", ts_find_definitions),
         ("ts_find_callers", "Find TypeScript callers of a symbol.", ts_find_callers),

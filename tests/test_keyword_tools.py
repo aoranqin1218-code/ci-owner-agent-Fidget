@@ -36,3 +36,61 @@ def test_keyword_search_empty_keywords(repo_cache: Path, sample_repo):
     client = GitClient(repo_cache)
     result = repo_keyword_search(client, sample_repo["repo"], sample_repo["head"], [], scope="whole_repo")
     assert result == {"ok": True, "matches": []}
+
+
+def test_keyword_search_repo_alias(repo_cache: Path, sample_repo):
+    client = GitClient(repo_cache)
+    result = repo_keyword_search(
+        client,
+        sample_repo["repo"],
+        sample_repo["head"],
+        ["FILE_SIZE_EXCEEDED"],
+        scope="repo",
+        maxMatches=10,
+    )
+    assert result["ok"] is True
+    assert result["matches"]
+
+
+def test_keyword_search_repository_and_all_aliases(repo_cache: Path, sample_repo):
+    client = GitClient(repo_cache)
+    for scope in ("repository", "all"):
+        result = repo_keyword_search(
+            client,
+            sample_repo["repo"],
+            sample_repo["head"],
+            ["FILE_SIZE_EXCEEDED"],
+            scope=scope,
+            maxMatches=10,
+        )
+        assert result["ok"] is True
+        assert result["matches"]
+
+
+def test_keyword_search_paths_override_repo_alias(repo_cache: Path, sample_repo):
+    client = GitClient(repo_cache)
+    result = repo_keyword_search(
+        client,
+        sample_repo["repo"],
+        sample_repo["head"],
+        ["FILE_SIZE_EXCEEDED"],
+        scope="repo",
+        paths=["packages/fxp-ai"],
+        maxMatches=10,
+    )
+    assert result["ok"] is True
+    assert result["matches"]
+    assert all(match["file"].startswith("packages/fxp-ai/") for match in result["matches"])
+
+
+def test_keyword_search_unsupported_scope_still_errors(repo_cache: Path, sample_repo):
+    client = GitClient(repo_cache)
+    result = repo_keyword_search(
+        client,
+        sample_repo["repo"],
+        sample_repo["head"],
+        ["FILE_SIZE_EXCEEDED"],
+        scope="unknown",
+    )
+    assert result["ok"] is False
+    assert "unsupported scope" in result["error"]
