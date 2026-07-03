@@ -43,42 +43,52 @@ def build_langchain_tools(context: AgentRuntimeContext) -> list[Any]:
     max_chars = context.settings.max_tool_output_chars
 
     def log_read_tail(lines: int = 500) -> dict:
+        """Read the tail of the current build log."""
         return _limit(context.log_provider.read_tail(lines).model_dump(), max_chars)
 
     def log_search(query: str, contextLines: int = 30, maxMatches: int = 10) -> dict:
+        """Search the current build log and return context around matching lines."""
         return _limit(context.log_provider.search(query, contextLines, maxMatches), max_chars)
 
     def log_read_range(startLine: int, endLine: int) -> dict:
+        """Read a line range from the current build log."""
         return _limit(context.log_provider.read_range(startLine, endLine), max_chars)
 
     def log_find_error_chunks(chunkLines: int = 200, maxChunks: int = 5) -> dict:
+        """Find high-signal error chunks in the current build log."""
         return _limit(context.log_provider.find_error_chunks(chunkLines, maxChunks), max_chars)
 
     def log_detect_final_status() -> dict:
+        """Detect the final Jenkins Finished status from the current build log."""
         return {"status": context.log_provider.detect_final_status()}
 
     def repo_get_commits_between() -> dict:
+        """Get commits between the context base and head commits."""
         return _limit(
             context.git_client.get_commits_between(context.repo, context.base_commit or "", context.head_commit or ""),
             max_chars,
         )
 
     def repo_get_diff_files() -> dict:
+        """Get files changed between the context base and head commits."""
         return _limit(
             context.git_client.get_diff_files(context.repo, context.base_commit or "", context.head_commit or ""),
             max_chars,
         )
 
     def repo_get_file_diff(path: str, contextLines: int = 8) -> dict:
+        """Get the Git diff for one path between the context base and head commits."""
         return _limit(
             context.git_client.get_file_diff(context.repo, context.base_commit or "", context.head_commit or "", path, contextLines),
             max_chars,
         )
 
     def repo_get_file_content(commit: str, path: str, startLine: int | None = None, endLine: int | None = None) -> dict:
+        """Get file content at a commit, optionally limited to a line range."""
         return _limit(context.git_client.get_file_content(context.repo, commit, path, startLine, endLine), max_chars)
 
     def repo_keyword_search(keywords: list[str], scope: str = "changed_files", paths: list[str] | None = None, maxMatches: int = 50) -> dict:
+        """Search keywords in changed files, specified paths, or the whole repository."""
         return _limit(
             keyword_search(
                 context.git_client,
@@ -95,6 +105,7 @@ def build_langchain_tools(context: AgentRuntimeContext) -> list[Any]:
         )
 
     def ts_analyze_changed_functions(files: list[str] | None = None) -> dict:
+        """Analyze changed TypeScript or TSX functions for context changed files."""
         target_files = files or [item.path for item in context.changed_files if item.path.endswith((".ts", ".tsx"))]
         return analyze_changed_functions(
             repo=context.repo,
@@ -107,6 +118,7 @@ def build_langchain_tools(context: AgentRuntimeContext) -> list[Any]:
         )
 
     def ts_find_definitions(symbols: list[str]) -> dict:
+        """Find TypeScript definitions for symbols at the context head commit."""
         return find_definitions(
             repo=context.repo,
             commit=context.head_commit,
@@ -118,6 +130,7 @@ def build_langchain_tools(context: AgentRuntimeContext) -> list[Any]:
         )
 
     def ts_find_callers(symbol: str, definitionFile: str, maxResults: int = 50) -> dict:
+        """Find TypeScript callers of a symbol at the context head commit."""
         return find_callers(
             repo=context.repo,
             commit=context.head_commit,
@@ -131,6 +144,7 @@ def build_langchain_tools(context: AgentRuntimeContext) -> list[Any]:
         )
 
     def check_node_dependencies_for_analysis() -> dict:
+        """Check node_modules, tsconfig, and dependency marker readiness for TypeScript analysis."""
         return check_ts_deps(context.repo, repo_cache_dir=context.settings.repo_cache_dir)
 
     specs = [

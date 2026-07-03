@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import sys
+import types
 from dataclasses import replace
 
 from ci_owner_agent.agents.context import AgentRuntimeContext
@@ -109,6 +111,91 @@ def test_langchain_agent_valid_json_high_confidence(monkeypatch, repo_cache, sam
     notice = agent.analyze()
     assert notice.hasHighConfidenceOwner is True
     assert notice.owner.type == "high_confidence"
+
+
+def test_langchain_v1_create_agent_is_used(monkeypatch, repo_cache, sample_repo, logs):
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    calls = {}
+
+    class FakeAgent:
+        def invoke(self, payload, config=None):
+            calls["invoke_payload"] = payload
+            calls["invoke_config"] = config
+            return {"structured_response": high_confidence_payload(context)}
+
+    def fake_create_agent(**kwargs):
+        calls["create_agent"] = kwargs
+        return FakeAgent()
+
+    class FakeToolStrategy:
+        def __init__(self, schema, handle_errors=None):
+            self.schema = schema
+            self.handle_errors = handle_errors
+
+    fake_agents = types.ModuleType("langchain.agents")
+    fake_agents.create_agent = fake_create_agent
+    fake_structured = types.ModuleType("langchain.agents.structured_output")
+    fake_structured.ToolStrategy = FakeToolStrategy
+    monkeypatch.setitem(sys.modules, "langchain.agents", fake_agents)
+    monkeypatch.setitem(sys.modules, "langchain.agents.structured_output", fake_structured)
+
+    agent = LangChainResponsibilityAgent(context.settings, context, ["tool"])
+    monkeypatch.setattr(agent, "_model", lambda: object())
+    notice = agent.analyze()
+    assert notice.owner.type == "high_confidence"
+    assert calls["create_agent"]["tools"] == ["tool"]
+    assert "system_prompt" in calls["create_agent"]
+    assert "response_format" in calls["create_agent"]
+    assert "messages" in calls["invoke_payload"]
+
+
+def test_langchain_agent_structured_response_parsed(monkeypatch, repo_cache, sample_repo, logs):
+    context = make_lc_context(repo_cache, sample_repo, logs)
+
+    class FakeAgent:
+        def invoke(self, payload, config=None):
+            return {"structured_response": high_confidence_payload(context)}
+
+    agent = LangChainResponsibilityAgent(context.settings, context, [])
+    monkeypatch.setattr(agent, "_model", lambda: object())
+    monkeypatch.setattr(agent, "_create_v1_agent", lambda model: FakeAgent())
+    notice = agent.analyze()
+    assert notice.owner.type == "high_confidence"
+
+
+def test_langchain_agent_messages_fallback_parsed(monkeypatch, repo_cache, sample_repo, logs):
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    output_payload = json.dumps(high_confidence_payload(context), ensure_ascii=False)
+
+    class FakeAgent:
+        def invoke(self, payload, config=None):
+            return {"messages": [type("Msg", (), {"content": output_payload})()]}
+
+    agent = LangChainResponsibilityAgent(context.settings, context, [])
+    monkeypatch.setattr(agent, "_model", lambda: object())
+    monkeypatch.setattr(agent, "_create_v1_agent", lambda model: FakeAgent())
+    notice = agent.analyze()
+    assert notice.owner.type == "high_confidence"
+
+
+def test_langchain_v1_import_error_is_clear(monkeypatch, repo_cache, sample_repo, logs):
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    agent = LangChainResponsibilityAgent(context.settings, context, [])
+    monkeypatch.setattr(agent, "_model", lambda: object())
+    monkeypatch.setattr(
+        agent,
+        "_create_v1_agent",
+        lambda model: (_ for _ in ()).throw(
+            RuntimeError(
+                "LangChain v1 create_agent dependencies are not installed or incompatible. "
+                "Please install langchain>=1.3,<2 and langchain-openai compatible with LangChain v1."
+            )
+        ),
+    )
+    notice = agent.analyze()
+    assert notice.owner.type == "no_high_confidence_owner"
+    assert "LangChain v1 create_agent" in notice.failureReason
+    assert "langchain>=1.3,<2" in notice.failureReason
 
 
 def test_langchain_agent_insufficient_evidence_downgrades(monkeypatch, repo_cache, sample_repo, logs):

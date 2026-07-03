@@ -123,6 +123,23 @@ Jenkins analyze mode is implemented. It reads build metadata and console logs fr
 
 In real LLM mode, the outer orchestrator still performs deterministic gates first. `SUCCESS` and `ABORTED` never enter the Agent. Failed builds enter a LangChain tool-calling Agent, which reads logs through tools instead of receiving the full Jenkins log at once.
 
+The real Agent uses LangChain v1 `create_agent` with `response_format=CiResponsibilityNotice`. Agent invocation uses the v1 `messages` input format. If a provider cannot produce structured output, the project still falls back to text parsing plus one repair attempt, followed by local validator/scorer checks.
+
+Recommended LangChain v1 packages:
+
+```text
+langchain>=1.3,<2
+langchain-openai>=1.0,<2
+langgraph>=1.2,<2
+```
+
+Verify the environment with:
+
+```bash
+python -c "from langchain.agents import create_agent; print('ok')"
+python -m pip check
+```
+
 ## TypeScript Analyzer
 
 The TypeScript analyzer lives under `ts-analyzer/` and is called by Python through `node` subprocesses. It provides:
@@ -209,7 +226,7 @@ Tests create temporary Git repositories under `tmp_path`; they do not call Jenki
 - TypeScript Compiler API tools are implemented as subprocess-backed optional analysis helpers.
 - `ts_find_definitions` and `ts_find_callers` may detach-checkout the agent-owned analysis repository to the requested commit; do not point `CI_AGENT_REPO_CACHE_DIR` at a human developer working copy.
 - TypeScript dependency checks do not auto-install unless explicitly requested with `install=True`; real project `tsconfig` and installed npm dependencies must be available in the target repo.
-- Real LLM mode requires `langchain`, `langchain-openai`, and provider credentials. Fake mode remains the default for offline pytest.
+- Real LLM mode requires LangChain v1, `langchain-openai`, and provider credentials. Fake mode remains the default for offline pytest.
 - `repo_sync` errors are warnings in local analysis so temporary repos without remotes can still be analyzed; formal Jenkins mode should treat sync failure as blocking for high-confidence ownership.
 - The rule engine is intentionally conservative and prefers `无高可信责任人` when evidence is weak.
 

@@ -57,35 +57,63 @@ class LangChainResponsibilityAgent:
         }
         if self.settings.model_base_url:
             kwargs["base_url"] = self.settings.model_base_url
-        return ChatOpenAI(**kwargs)
+        try:
+            return ChatOpenAI(**kwargs)
+        except TypeError:
+            if "base_url" in kwargs:
+                kwargs["openai_api_base"] = kwargs.pop("base_url")
+            return ChatOpenAI(**kwargs)
 
     def _invoke_agent(self) -> str:
-        try:
-            from langchain.agents import AgentExecutor, create_tool_calling_agent
-            from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-        except Exception as exc:
-            raise RuntimeError(f"langchain tool-calling dependencies are not installed: {exc}") from exc
+        agent = self._create_v1_agent(self._model())
+        result = agent.invoke(
+            {"messages": [{"role": "user", "content": self._initial_input()}]},
+            config={
+                "metadata": self._metadata(),
+                "run_name": "ci-owner-agent-langchain-v1",
+                "recursion_limit": max(self.settings.max_tool_steps * 2, 20),
+            },
+        )
+        structured = result.get("structured_response") if isinstance(result, dict) else None
+        if structured is not None:
+            if isinstance(structured, CiResponsibilityNotice):
+                return structured.model_dump_json()
+            if isinstance(structured, dict):
+                return json.dumps(structured, ensure_ascii=False, default=str)
+            return str(structured)
 
-        prompt = ChatPromptTemplate.from_messages(
-            [
-                ("system", LANGCHAIN_RESPONSIBILITY_AGENT_SYSTEM_PROMPT),
-                ("human", "{input}"),
-                MessagesPlaceholder("agent_scratchpad"),
-            ]
-        )
-        agent = create_tool_calling_agent(self._model(), self.tools, prompt)
-        executor = AgentExecutor(
-            agent=agent,
+        messages = result.get("messages") if isinstance(result, dict) else None
+        if messages:
+            last = messages[-1]
+            content = getattr(last, "content", None)
+            if content is not None:
+                return str(content)
+
+        return json.dumps(result, ensure_ascii=False, default=str)
+
+    def _create_v1_agent(self, model):
+        try:
+            from langchain.agents import create_agent
+            from langchain.agents.structured_output import ToolStrategy
+        except Exception as exc:
+            raise RuntimeError(
+                "LangChain v1 create_agent dependencies are not installed or incompatible. "
+                "Please install langchain>=1.3,<2 and langchain-openai compatible with LangChain v1. "
+                f"Original error: {exc}"
+            ) from exc
+        return create_agent(
+            model=model,
             tools=self.tools,
-            max_iterations=self.settings.max_tool_steps,
-            handle_parsing_errors=True,
-            verbose=False,
+            system_prompt=LANGCHAIN_RESPONSIBILITY_AGENT_SYSTEM_PROMPT,
+            response_format=ToolStrategy(
+                schema=CiResponsibilityNotice,
+                handle_errors=(
+                    "请输出严格合法的 CiResponsibilityNotice。"
+                    "不得新增 schema 之外的字段。"
+                    "如果证据不足，必须输出 no_high_confidence_owner。"
+                ),
+            ),
         )
-        result = executor.invoke(
-            {"input": self._initial_input()},
-            config={"metadata": self._metadata()},
-        )
-        return str(result.get("output", result))
 
     def _repair_output(self, raw: str) -> str:
         try:
