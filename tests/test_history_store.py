@@ -40,6 +40,9 @@ class FakeCollection:
     def find(self, query):
         return FakeCursor([doc for doc in self.docs if _matches(doc, query)])
 
+    def delete_many(self, query):
+        self.docs = [doc for doc in self.docs if not _matches(doc, query)]
+
 
 class FakeDb:
     def __init__(self):
@@ -115,6 +118,22 @@ def test_mongo_history_store_queries_by_last_successful_build(repo_cache, sample
         store.save_analysis(build_info, notice, context.base_commit, context.head_commit, 5068, context.base_commit, [{"content": f"FAIL getJsSdkConfig {build}"}])
     chunks = store.find_historical_failure_chunks(context.job, context.branch, current_build_number=5076, last_successful_build_number=5068)
     assert {item["buildNumber"] for item in chunks} == {5072, 5075}
+
+
+def test_mongo_history_store_replaces_old_chunks_when_new_run_has_fewer(repo_cache, sample_repo, logs):
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    from ci_owner_agent.schemas import CiResponsibilityNotice
+
+    store = make_store()
+    notice = CiResponsibilityNotice.model_validate(high_confidence_payload(context))
+    build_info = BuildInfo(job=context.job, buildNumber=5076, result="FAILURE", buildUrl=context.build_url, branch=context.branch, commit=context.head_commit)
+    first_chunks = [{"content": f"old chunk {idx}"} for idx in range(5)]
+    second_chunks = [{"content": f"new chunk {idx}"} for idx in range(2)]
+    store.save_analysis(build_info, notice, context.base_commit, context.head_commit, 5068, context.base_commit, first_chunks)
+    assert len(store.failure_chunks.docs) == 5
+    store.save_analysis(build_info, notice, context.base_commit, context.head_commit, 5068, context.base_commit, second_chunks)
+    assert len(store.failure_chunks.docs) == 2
+    assert {doc["chunkText"] for doc in store.failure_chunks.docs} == {"new chunk 0", "new chunk 1"}
 
 
 def test_history_search_similar_failures_disabled(repo_cache, sample_repo, logs):

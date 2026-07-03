@@ -84,6 +84,7 @@ class MongoHistoryStore:
             },
             upsert=True,
         )
+        self.failure_chunks.delete_many(key)
         for idx, chunk in enumerate(error_chunks):
             text = str(chunk.get("content") or chunk.get("chunkText") or "")
             normalized = normalize_error_chunk(text)

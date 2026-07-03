@@ -167,6 +167,7 @@ class LangChainResponsibilityAgent:
             "branch": self.context.branch,
             "baseCommit": self.context.base_commit,
             "headCommit": self.context.head_commit,
+            "lastSuccessfulBuildNumber": self.context.last_successful_build_number,
             "result": self.context.result,
         }
 

@@ -19,6 +19,24 @@ def test_normalize_error_chunk_preserves_chinese_and_expected_actual():
     assert "unknown" in normalized
 
 
+def test_normalize_error_chunk_preserves_long_identifiers():
+    text = "ViewDataQueryServiceTest FormDataPageChartVizAdapter veryLongFileNameForBusinessCase.ts"
+    normalized = normalize_error_chunk(text)
+    assert "viewdataqueryservicetest" in normalized
+    assert "formdatapagechartvizadapter" in normalized
+    assert "verylongfilenameforbusinesscase.ts" in normalized
+    assert "<id>" not in normalized
+
+
+def test_normalize_error_chunk_replaces_uuid_and_object_id():
+    text = "request 550e8400-e29b-41d4-a716-446655440000 object 64b7f0d2e138237b4c9f1234"
+    normalized = normalize_error_chunk(text)
+    assert "<uuid>" in normalized
+    assert "<object_id>" in normalized
+    assert "550e8400" not in normalized
+    assert "64b7f0d2e138237b4c9f1234" not in normalized
+
+
 def test_chunk_similarity_same_get_js_sdk_config_is_high():
     a = "FAIL test getJsSdkConfig dingtalk ua\nError: UNKNOWN\nExpected: dingtalk\nActual: unknown\nat test/packages/fxp-ai/errors/classify.test.ts:1:23\n123ms"
     b = "FAIL test getJsSdkConfig dingtalk ua\nError: UNKNOWN\nExpected: dingtalk\nActual: unknown\nat test/packages/fxp-ai/errors/classify.test.ts:99:8\nabcdef123456\n1.23s"
