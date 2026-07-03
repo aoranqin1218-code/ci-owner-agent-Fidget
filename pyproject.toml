@@ -12,6 +12,10 @@ dependencies = [
   "pydantic>=2,<3",
   "python-dotenv>=1,<2",
   "requests>=2,<3",
+  "langchain>=0.2",
+  "langchain-core>=0.2",
+  "langchain-openai>=0.1",
+  "langsmith>=0.1",
 ]
 
 [project.optional-dependencies]
@@ -19,8 +23,10 @@ dev = [
   "pytest>=8,<9",
 ]
 llm = [
-  "langchain",
-  "langchain-openai",
+  "langchain>=0.2",
+  "langchain-core>=0.2",
+  "langchain-openai>=0.1",
+  "langsmith>=0.1",
 ]
 
 [tool.setuptools.packages.find]

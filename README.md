@@ -30,9 +30,41 @@ CI_AGENT_DEFAULT_LOG_TAIL_LINES=500
 CI_AGENT_MAX_TOOL_OUTPUT_CHARS=20000
 CI_AGENT_MODEL_PROVIDER=fake
 TS_ANALYZER_DIR=./ts-analyzer
+LANGSMITH_TRACING=false
+LANGSMITH_PROJECT=ci-owner-agent-dev
 ```
 
-Phase 1 does not call a real LLM or Jenkins.
+`CI_AGENT_MODEL_PROVIDER=fake` is the default offline test mode. It uses the rule-based MVP agent only to verify the toolchain and tests; it is not the formal analysis mode.
+
+OpenAI-compatible real LLM providers are supported with `openai`, `deepseek`, and `doubao`.
+
+Doubao example:
+
+```env
+CI_AGENT_MODEL_PROVIDER=doubao
+CI_AGENT_MODEL_BASE_URL=https://ark.cn-beijing.volces.com/api/v3
+CI_AGENT_MODEL_NAME=doubao-seed-2-0-lite-260428
+CI_AGENT_API_KEY=your-api-key
+```
+
+DeepSeek example:
+
+```env
+CI_AGENT_MODEL_PROVIDER=deepseek
+CI_AGENT_MODEL_BASE_URL=https://api.deepseek.com
+CI_AGENT_MODEL_NAME=deepseek-chat
+CI_AGENT_API_KEY=your-api-key
+```
+
+LangSmith tracing is optional:
+
+```env
+LANGSMITH_TRACING=true
+LANGSMITH_API_KEY=your-langsmith-key
+LANGSMITH_PROJECT=ci-owner-agent-dev
+```
+
+Tracing is enabled only when both `LANGSMITH_TRACING=true` and `LANGSMITH_API_KEY` are present. Keys are not printed.
 
 ## Local Repo Cache
 
@@ -75,6 +107,8 @@ python -m ci_owner_agent analyze ^
 ```
 
 Jenkins analyze mode is implemented. It reads build metadata and console logs from Jenkins, short-circuits `SUCCESS` and `ABORTED`, and for failed builds compares the failed commit against `lastSuccessfulBuild` before running the existing responsibility analysis.
+
+In real LLM mode, the outer orchestrator still performs deterministic gates first. `SUCCESS` and `ABORTED` never enter the Agent. Failed builds enter a LangChain tool-calling Agent, which reads logs through tools instead of receiving the full Jenkins log at once.
 
 ## TypeScript Analyzer
 
@@ -124,13 +158,14 @@ The CLI prints JSON only, without Markdown wrapping.
 
 ## High Confidence Rules
 
-High confidence requires at least two supporting evidence types. Phase 1 accepts:
+High confidence requires at least two supporting evidence types. Accepted combinations include:
 
 - log clue plus changed diff file
 - log keyword plus hit inside changed files
 - changed file diff that contains the same symbol, file, or keyword found in logs
+- log symbol plus TypeScript definition/caller relationship plus relevant diff
 
-Only "someone committed in the interval" is not enough. Only "a file changed" is not enough.
+Only "someone committed in the interval" is not enough. Only "a file changed" is not enough. Only a keyword match is not enough. `node_modules` definitions can be background type evidence but cannot be responsibility files. Validator/scorer downgrades weak or contradictory outputs to `无高可信责任人`.
 
 ## ABORTED Strategy
 
@@ -161,6 +196,46 @@ Tests create temporary Git repositories under `tmp_path`; they do not call Jenki
 - TypeScript Compiler API tools are implemented as subprocess-backed optional analysis helpers.
 - `ts_find_definitions` and `ts_find_callers` may detach-checkout the agent-owned analysis repository to the requested commit; do not point `CI_AGENT_REPO_CACHE_DIR` at a human developer working copy.
 - TypeScript dependency checks do not auto-install unless explicitly requested with `install=True`; real project `tsconfig` and installed npm dependencies must be available in the target repo.
-- The current agent is rule based, not a real LangChain tool-calling LLM agent.
+- Real LLM mode requires `langchain`, `langchain-openai`, and provider credentials. Fake mode remains the default for offline pytest.
 - `repo_sync` errors are warnings in local analysis so temporary repos without remotes can still be analyzed; formal Jenkins mode should treat sync failure as blocking for high-confidence ownership.
 - The rule engine is intentionally conservative and prefers `无高可信责任人` when evidence is weak.
+
+## Smoke Test
+
+```powershell
+cd E:\workspace\lanchain\ci-owner-agent
+python -m pytest -q
+
+$env:CI_AGENT_MODEL_PROVIDER="fake"
+python -m ci_owner_agent analyze-local `
+  --repo fx-code `
+  --job services/fx-code-unittest `
+  --build 5064 `
+  --branch dev `
+  --base-commit <base> `
+  --head-commit <head> `
+  --console-file samples/company_log/company-unittest-5064.log `
+  --build-url local://services/fx-code-unittest/5064
+```
+
+Real LLM example:
+
+```powershell
+$env:CI_AGENT_MODEL_PROVIDER="doubao"
+$env:CI_AGENT_MODEL_BASE_URL="https://ark.cn-beijing.volces.com/api/v3"
+$env:CI_AGENT_MODEL_NAME="doubao-seed-2-0-lite-260428"
+$env:CI_AGENT_API_KEY="..."
+$env:LANGSMITH_TRACING="true"
+$env:LANGSMITH_API_KEY="..."
+$env:LANGSMITH_PROJECT="ci-owner-agent-dev"
+
+python -m ci_owner_agent analyze-local `
+  --repo fx-code `
+  --job services/fx-code-unittest `
+  --build 5104 `
+  --branch dev `
+  --base-commit <base> `
+  --head-commit <head> `
+  --console-file samples/company_log/company-unittest-5104.log `
+  --build-url local://services/fx-code-unittest/5104
+```

@@ -24,6 +24,10 @@ class Settings:
     model_name: str | None
     api_key: str | None
     ts_analyzer_dir: Path
+    langsmith_tracing: bool
+    langsmith_api_key: str | None
+    langsmith_project: str
+    langsmith_endpoint: str
 
 
 def _int_env(name: str, default: int) -> int:
@@ -57,13 +61,33 @@ def load_settings(env_file: str | Path | None = None) -> Settings:
         model_name=os.getenv("CI_AGENT_MODEL_NAME") or None,
         api_key=os.getenv("CI_AGENT_API_KEY") or None,
         ts_analyzer_dir=ts_analyzer_dir,
+        langsmith_tracing=os.getenv("LANGSMITH_TRACING", "false").lower() in {"1", "true", "yes", "on"},
+        langsmith_api_key=os.getenv("LANGSMITH_API_KEY") or None,
+        langsmith_project=os.getenv("LANGSMITH_PROJECT", "ci-owner-agent-dev"),
+        langsmith_endpoint=os.getenv("LANGSMITH_ENDPOINT", "https://api.smith.langchain.com"),
     )
+
+
+def validate_model_settings(settings: Settings) -> str | None:
+    provider = settings.model_provider.lower()
+    if provider == "fake":
+        return None
+    if provider not in {"openai", "deepseek", "doubao"}:
+        return f"unsupported CI_AGENT_MODEL_PROVIDER: {settings.model_provider}"
+    if not settings.api_key:
+        return "CI_AGENT_API_KEY is required when CI_AGENT_MODEL_PROVIDER is not fake"
+    if not settings.model_name:
+        return "CI_AGENT_MODEL_NAME is required when CI_AGENT_MODEL_PROVIDER is not fake"
+    if provider in {"deepseek", "doubao"} and not settings.model_base_url:
+        return "CI_AGENT_MODEL_BASE_URL is required for deepseek/doubao providers"
+    return None
 
 
 def public_settings(settings: Settings) -> dict[str, object]:
     data = settings.__dict__.copy()
     data["jenkins_token"] = "***" if settings.jenkins_token else None
     data["api_key"] = "***" if settings.api_key else None
+    data["langsmith_api_key"] = "***" if settings.langsmith_api_key else None
     data["repo_cache_dir"] = str(settings.repo_cache_dir)
     data["ts_analyzer_dir"] = str(settings.ts_analyzer_dir)
     return data

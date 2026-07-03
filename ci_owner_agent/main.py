@@ -58,6 +58,7 @@ def main(argv: list[str] | None = None) -> int:
             log_tail_lines=args.log_tail_lines or settings.default_log_tail_lines,
             result=args.result,
             max_output_chars=settings.max_tool_output_chars,
+            settings=settings,
         )
         _print_json(notice)
         return 0
@@ -93,6 +94,7 @@ def main(argv: list[str] | None = None) -> int:
             jenkins_client=jenkins_client,
             git_client=git_client,
             log_tail_lines=args.log_tail_lines or settings.default_log_tail_lines,
+            settings=settings,
         )
         _print_json(notice)
         return 0

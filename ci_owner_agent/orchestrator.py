@@ -1,11 +1,15 @@
 from __future__ import annotations
 
-from ci_owner_agent.agents.responsibility_agent import AgentContext, RuleBasedResponsibilityAgent
+from ci_owner_agent.agents.context import AgentRuntimeContext
+from ci_owner_agent.agents.factory import AgentConfigurationError, create_responsibility_agent
+from ci_owner_agent.agents.langchain_agent import LangChainResponsibilityAgent
+from ci_owner_agent.agents.responsibility_agent import AgentContext
+from ci_owner_agent.config import Settings, load_settings
 from ci_owner_agent.schemas import BuildInfo, ChangedFile, CiResponsibilityNotice, CommitInfo, EvidenceItem
 from ci_owner_agent.services.git_client import GitClient
 from ci_owner_agent.services.jenkins_client import JenkinsClient
 from ci_owner_agent.services.log_provider import JenkinsLogProvider, LocalFileLogProvider, LogProvider
-from ci_owner_agent.services.scorer import no_owner
+from ci_owner_agent.services.scorer import no_owner, validate_notice
 from ci_owner_agent.tools.jenkins_tools import jenkins_get_build_info, jenkins_get_last_successful_build_info
 
 
@@ -96,7 +100,9 @@ def analyze_failed_build(
     log_provider: LogProvider,
     git_client: GitClient,
     allow_sync_failure: bool = False,
+    settings: Settings | None = None,
 ) -> CiResponsibilityNotice:
+    settings = settings or load_settings()
     sync_result = git_client.sync(repo)
     sync_warning: EvidenceItem | None = None
     if not sync_result.get("ok"):
@@ -128,10 +134,33 @@ def analyze_failed_build(
         changed_files=changed_files,
         log_provider=log_provider,
     )
-    notice = RuleBasedResponsibilityAgent(git_client).analyze(context)
+    runtime_context = AgentRuntimeContext(
+        repo=repo,
+        job=build_info.job,
+        build_number=build_info.buildNumber,
+        build_url=build_info.buildUrl,
+        result=build_info.result,
+        branch=build_info.branch,
+        base_commit=base_commit,
+        head_commit=head_commit,
+        build_info=build_info,
+        commits=commits,
+        changed_files=changed_files,
+        log_provider=log_provider,
+        git_client=git_client,
+        settings=settings,
+    )
+    try:
+        agent = create_responsibility_agent(settings, runtime_context)
+        if isinstance(agent, LangChainResponsibilityAgent):
+            notice = agent.analyze()
+        else:
+            notice = agent.analyze(context)
+    except AgentConfigurationError as exc:
+        return failure_without_context(build_info, base_commit, f"LLM 配置错误：{exc}")
     if sync_warning is not None:
         notice.evidence.append(sync_warning)
-    return notice
+    return validate_notice(notice)
 
 
 def analyze_local(
@@ -147,7 +176,9 @@ def analyze_local(
     log_tail_lines: int = 500,
     result: str | None = None,
     max_output_chars: int = 20000,
+    settings: Settings | None = None,
 ) -> CiResponsibilityNotice:
+    settings = settings or load_settings()
     log_provider = LocalFileLogProvider(console_file, max_output_chars=max_output_chars)
     log_tail = log_provider.read_tail(log_tail_lines)
     detected = log_provider.detect_final_status()
@@ -176,6 +207,7 @@ def analyze_local(
         log_provider,
         git_client,
         allow_sync_failure=True,
+        settings=settings,
     )
 
 
@@ -186,7 +218,9 @@ def analyze_jenkins(
     jenkins_client: JenkinsClient,
     git_client: GitClient,
     log_tail_lines: int = 500,
+    settings: Settings | None = None,
 ) -> CiResponsibilityNotice:
+    settings = settings or load_settings()
     build_result = jenkins_get_build_info(jenkins_client, job, build, log_tail_lines)
     if not build_result.get("ok"):
         build_info = BuildInfo(
@@ -281,4 +315,5 @@ def analyze_jenkins(
         log_provider,
         git_client,
         allow_sync_failure=False,
+        settings=settings,
     )
