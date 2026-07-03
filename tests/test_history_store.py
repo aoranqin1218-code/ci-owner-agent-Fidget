@@ -120,6 +120,26 @@ def test_mongo_history_store_queries_by_last_successful_build(repo_cache, sample
     assert {item["buildNumber"] for item in chunks} == {5072, 5075}
 
 
+def test_mongo_history_store_notice_query_filters_branch(repo_cache, sample_repo, logs):
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    from ci_owner_agent.schemas import CiResponsibilityNotice
+
+    store = make_store()
+    dev_notice = CiResponsibilityNotice.model_validate(high_confidence_payload(context))
+    other_payload = high_confidence_payload(context)
+    other_payload["owner"]["name"] = "Other Branch Owner"
+    other_notice = CiResponsibilityNotice.model_validate(other_payload)
+
+    dev_build = BuildInfo(job=context.job, buildNumber=5075, result="FAILURE", buildUrl=context.build_url, branch="dev", commit=context.head_commit)
+    other_build = BuildInfo(job=context.job, buildNumber=5075, result="FAILURE", buildUrl=context.build_url, branch="feature", commit=context.head_commit)
+    store.save_analysis(dev_build, dev_notice, context.base_commit, context.head_commit, 5068, context.base_commit, [{"content": "FAIL dev branch"}])
+    store.save_analysis(other_build, other_notice, context.base_commit, context.head_commit, 5068, context.base_commit, [{"content": "FAIL feature branch"}])
+
+    chunks = store.find_historical_failure_chunks(context.job, "dev", current_build_number=5076, last_successful_build_number=5068)
+    assert {item["branch"] for item in chunks} == {"dev"}
+    assert all(item["noticeDoc"]["ownerName"] != "Other Branch Owner" for item in chunks)
+
+
 def test_mongo_history_store_replaces_old_chunks_when_new_run_has_fewer(repo_cache, sample_repo, logs):
     context = make_lc_context(repo_cache, sample_repo, logs)
     from ci_owner_agent.schemas import CiResponsibilityNotice

@@ -131,10 +131,10 @@ class MongoHistoryStore:
         if branch is not None:
             chunk_query["branch"] = {"$in": [branch, None]}
         chunks = list(self.failure_chunks.find(chunk_query))
-        notices = {
-            item.get("buildNumber"): item
-            for item in self.notices.find({"job": job, "buildNumber": {"$in": build_numbers}})
-        }
+        notice_query: dict[str, Any] = {"job": job, "buildNumber": {"$in": build_numbers}}
+        if branch is not None:
+            notice_query["branch"] = {"$in": [branch, None]}
+        notices = {item.get("buildNumber"): item for item in self.notices.find(notice_query)}
         build_by_number = {item.get("buildNumber"): item for item in builds}
         for chunk in chunks:
             build_number = chunk.get("buildNumber")
