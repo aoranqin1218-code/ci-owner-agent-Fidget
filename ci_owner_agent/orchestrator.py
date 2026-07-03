@@ -8,7 +8,7 @@ from ci_owner_agent.config import Settings, load_settings
 from ci_owner_agent.schemas import BuildInfo, ChangedFile, CiResponsibilityNotice, CommitInfo, EvidenceItem
 from ci_owner_agent.services.git_client import GitClient
 from ci_owner_agent.services.jenkins_client import JenkinsClient
-from ci_owner_agent.services.log_provider import JenkinsLogProvider, LocalFileLogProvider, LogProvider
+from ci_owner_agent.services.log_provider import JenkinsLogProvider, LocalFileLogProvider, LogProvider, detect_checkout_revision_from_console_log
 from ci_owner_agent.services.scorer import no_owner, validate_notice
 from ci_owner_agent.tools.jenkins_tools import jenkins_get_build_info, jenkins_get_last_successful_build_info
 
@@ -177,9 +177,22 @@ def analyze_local(
     result: str | None = None,
     max_output_chars: int = 20000,
     settings: Settings | None = None,
+    ignore_checkout_commit_mismatch: bool = False,
 ) -> CiResponsibilityNotice:
     settings = settings or load_settings()
     log_provider = LocalFileLogProvider(console_file, max_output_chars=max_output_chars)
+    actual_checkout_commit = detect_checkout_revision_from_console_log(log_provider._content())
+    if (
+        actual_checkout_commit
+        and actual_checkout_commit.lower() != head_commit.lower()
+        and not ignore_checkout_commit_mismatch
+    ):
+        raise ValueError(
+            f"console log checkout commit {actual_checkout_commit} does not match --head-commit {head_commit}.\n"
+            f"The build actually tested {actual_checkout_commit}.\n"
+            "Please rerun analyze-local with:\n"
+            f"  --head-commit {actual_checkout_commit}"
+        )
     log_tail = log_provider.read_tail(log_tail_lines)
     detected = log_provider.detect_final_status()
     final_result = (result or detected).upper()

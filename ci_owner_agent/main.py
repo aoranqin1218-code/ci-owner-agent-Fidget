@@ -36,6 +36,7 @@ def build_parser() -> argparse.ArgumentParser:
     local.add_argument("--build-url", required=True)
     local.add_argument("--log-tail-lines", type=int, default=None)
     local.add_argument("--result", choices=["SUCCESS", "FAILURE", "UNSTABLE", "ABORTED", "UNKNOWN"], default=None)
+    local.add_argument("--ignore-checkout-commit-mismatch", action="store_true")
     return parser
 
 
@@ -45,21 +46,26 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.command == "analyze-local":
         git_client = GitClient(settings.repo_cache_dir, max_output_chars=settings.max_tool_output_chars)
-        notice = analyze_local(
-            repo=args.repo,
-            job=args.job,
-            build=args.build,
-            branch=args.branch,
-            base_commit=args.base_commit,
-            head_commit=args.head_commit,
-            console_file=args.console_file,
-            build_url=args.build_url,
-            git_client=git_client,
-            log_tail_lines=args.log_tail_lines or settings.default_log_tail_lines,
-            result=args.result,
-            max_output_chars=settings.max_tool_output_chars,
-            settings=settings,
-        )
+        try:
+            notice = analyze_local(
+                repo=args.repo,
+                job=args.job,
+                build=args.build,
+                branch=args.branch,
+                base_commit=args.base_commit,
+                head_commit=args.head_commit,
+                console_file=args.console_file,
+                build_url=args.build_url,
+                git_client=git_client,
+                log_tail_lines=args.log_tail_lines or settings.default_log_tail_lines,
+                result=args.result,
+                max_output_chars=settings.max_tool_output_chars,
+                settings=settings,
+                ignore_checkout_commit_mismatch=args.ignore_checkout_commit_mismatch,
+            )
+        except ValueError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            return 2
         _print_json(notice)
         return 0
     if args.command == "analyze":

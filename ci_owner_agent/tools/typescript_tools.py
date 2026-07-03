@@ -20,8 +20,8 @@ DEPENDENCY_FILES = ["package.json", "package-lock.json", "pnpm-lock.yaml", "yarn
 def _settings_paths(repo_cache_dir: str | Path | None = None, analyzer_dir: str | Path | None = None) -> tuple[Path, Path]:
     settings = load_settings()
     return (
-        Path(repo_cache_dir).expanduser() if repo_cache_dir is not None else settings.repo_cache_dir,
-        Path(analyzer_dir).expanduser() if analyzer_dir is not None else settings.ts_analyzer_dir,
+        (Path(repo_cache_dir).expanduser() if repo_cache_dir is not None else settings.repo_cache_dir).resolve(),
+        (Path(analyzer_dir).expanduser() if analyzer_dir is not None else settings.ts_analyzer_dir).resolve(),
     )
 
 
@@ -75,9 +75,18 @@ def _call_node(
     analyzer_dir: Path,
     max_output_chars: int = 20000,
 ) -> dict:
-    script_path = analyzer_dir / "src" / script_name
+    analyzer_dir = analyzer_dir.expanduser().resolve()
+    script_path = (analyzer_dir / "src" / script_name).resolve()
     if not script_path.exists():
-        return {"ok": False, "error": f"TypeScript analyzer script not found: {script_path}", empty_key: []}
+        return {
+            "ok": False,
+            "error": (
+                f"TypeScript analyzer script not found: {script_path}. "
+                "Set TS_ANALYZER_DIR to the directory containing src/find_definitions.js, "
+                "for example E:/workspace/lanchain/ci-owner-agent/ts-analyzer"
+            ),
+            empty_key: [],
+        }
     result = run_command(
         ["node", str(script_path), json.dumps(payload, ensure_ascii=False)],
         cwd=analyzer_dir,

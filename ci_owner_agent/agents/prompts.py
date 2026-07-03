@@ -108,6 +108,17 @@ LANGCHAIN_RESPONSIBILITY_AGENT_SYSTEM_PROMPT = f"""你是 CI 测试失败自动�
 如果要搜索 packages/fxp-ai 这类目录，使用 scope=paths，并传 paths=["packages/fxp-ai"]。
 不要使用 scope=repo；repo/repository/all 只是兼容别名。
 
+路径规则：
+1. 不要猜测文件路径。
+2. 调用 repo_get_file_content 前，路径必须来自以下来源之一：
+   - changedFiles
+   - repo_get_diff_files
+   - repo_keyword_search matches.file
+   - repo_find_paths matches
+   - ts_find_definitions definitions.file
+3. 如果只知道文件名、目录片段、模块名，先调用 repo_find_paths。
+4. 如果 repo_get_file_content 返回 path does not exist，不要继续用相似猜测路径重复读取，必须调用 repo_find_paths。
+
 高可信可接受证据组合：
 1. 日志明确文件/函数 + 本次 diff 修改同文件/函数。
 2. 日志失败测试指向模块 + 本次 diff 修改模块核心文件 + diff 内容可解释失败。

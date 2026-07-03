@@ -325,6 +325,9 @@ def test_langchain_tools_context_defaults(repo_cache, sample_repo, logs):
     context = make_lc_context(repo_cache, sample_repo, logs)
     tools = {tool.name: tool for tool in build_langchain_tools(context)}
     assert tools["log_read_tail"].invoke({"lines": 2})["endLine"] >= 1
+    paths = tools["repo_find_paths"].invoke({"query": "classify", "paths": ["packages/fxp-ai"], "suffixes": [".ts"]})
+    assert paths["ok"] is True
+    assert "packages/fxp-ai/errors/classify.ts" in paths["matches"]
     diff = tools["repo_get_file_diff"].invoke({"path": "packages/fxp-ai/errors/classify.ts"})
     assert diff["ok"] is True
     assert "classifyError" in diff["diff"]
@@ -407,6 +410,47 @@ def test_tool_limit_returns_json_text_not_python_repr():
     assert "contentJson" in limited
     assert "originalKeys" in limited
     assert "'ok': True" not in limited["contentJson"]
+    json.loads(limited["contentJson"])
+
+
+def test_tool_limit_content_json_is_valid_after_truncation():
+    limited = _limit({"ok": True, "items": [{"x": "值", "long": "a" * 5000} for _ in range(100)]}, 300)
+    assert limited["truncated"] is True
+    json.loads(limited["contentJson"])
+
+
+def test_tool_limit_truncates_large_list_structurally():
+    limited = _limit({"ok": True, "matches": [{"file": f"src/{i}.ts"} for i in range(200)]}, 600)
+    payload = json.loads(limited["contentJson"])
+    assert payload["matches"]["_truncated_items"] is True
+    assert payload["matches"]["_original_length"] == 200
+
+
+def test_tool_limit_truncates_large_string_fields_structurally():
+    limited = _limit({"ok": True, "content": "x" * 5000}, 800)
+    payload = json.loads(limited["contentJson"])
+    assert "content" in payload
+    assert "content" in payload["_truncated_fields"]
+
+
+def test_duplicate_tool_call_blocked(repo_cache, sample_repo, logs):
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    tools = {tool.name: tool for tool in build_langchain_tools(context)}
+    assert tools["repo_keyword_search"].invoke({"keywords": ["FILE_SIZE_EXCEEDED"]})["ok"] is True
+    blocked = tools["repo_keyword_search"].invoke({"keywords": ["FILE_SIZE_EXCEEDED"]})
+    assert blocked["ok"] is False
+    assert blocked["error"] == "duplicate tool call blocked"
+
+
+def test_tool_budget_exhausted(repo_cache, sample_repo, logs):
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    settings = replace(context.settings, max_tool_steps=1)
+    context = replace(context, settings=settings)
+    tools = {tool.name: tool for tool in build_langchain_tools(context)}
+    assert tools["log_detect_final_status"].invoke({})["status"] == "FAILURE"
+    blocked = tools["repo_get_diff_files"].invoke({})
+    assert blocked["ok"] is False
+    assert blocked["error"] == "tool call budget exhausted"
 
 
 def test_initial_input_is_truncated(repo_cache, sample_repo, logs):

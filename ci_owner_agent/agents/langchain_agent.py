@@ -73,7 +73,7 @@ class LangChainResponsibilityAgent:
             config={
                 "metadata": self._metadata(),
                 "run_name": "ci-owner-agent-langchain-v1",
-                "recursion_limit": max(self.settings.max_tool_steps * 2, 20),
+                "recursion_limit": self.settings.agent_recursion_limit,
             },
         )
         structured = result.get("structured_response") if isinstance(result, dict) else None

@@ -26,6 +26,7 @@ class Settings:
     model_timeout_seconds: int
     model_max_retries: int
     response_format: str
+    agent_recursion_limit: int
     ts_analyzer_dir: Path
     langsmith_tracing: bool
     langsmith_api_key: str | None
@@ -63,13 +64,14 @@ def load_settings(env_file: str | Path | None = None) -> Settings:
         load_dotenv(dotenv_path=env_file, override=False)
     repo_cache_dir = Path(os.getenv("CI_AGENT_REPO_CACHE_DIR", "repos")).expanduser()
     ts_analyzer_dir = Path(os.getenv("TS_ANALYZER_DIR", "./ts-analyzer")).expanduser()
+    max_tool_steps = _int_env("CI_AGENT_MAX_TOOL_STEPS", 12)
     return Settings(
         jenkins_url=os.getenv("JENKINS_URL") or None,
         jenkins_user=os.getenv("JENKINS_USER") or None,
         jenkins_token=os.getenv("JENKINS_TOKEN") or None,
         repo_cache_dir=repo_cache_dir,
         default_log_tail_lines=_int_env("CI_AGENT_DEFAULT_LOG_TAIL_LINES", 500),
-        max_tool_steps=_int_env("CI_AGENT_MAX_TOOL_STEPS", 12),
+        max_tool_steps=max_tool_steps,
         max_tool_output_chars=_int_env("CI_AGENT_MAX_TOOL_OUTPUT_CHARS", 20000),
         model_provider=os.getenv("CI_AGENT_MODEL_PROVIDER", "fake"),
         model_base_url=os.getenv("CI_AGENT_MODEL_BASE_URL") or None,
@@ -78,6 +80,7 @@ def load_settings(env_file: str | Path | None = None) -> Settings:
         model_timeout_seconds=_int_env_or_default("CI_AGENT_MODEL_TIMEOUT_SECONDS", 90),
         model_max_retries=_int_env_or_default("CI_AGENT_MODEL_MAX_RETRIES", 1),
         response_format=_response_format_env(),
+        agent_recursion_limit=_int_env_or_default("CI_AGENT_RECURSION_LIMIT", max(max_tool_steps * 4, 40)),
         ts_analyzer_dir=ts_analyzer_dir,
         langsmith_tracing=os.getenv("LANGSMITH_TRACING", "false").lower() in {"1", "true", "yes", "on"},
         langsmith_api_key=os.getenv("LANGSMITH_API_KEY") or None,

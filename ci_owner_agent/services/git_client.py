@@ -220,7 +220,15 @@ class GitClient:
         if repo_error:
             return {"ok": False, "error": repo_error, "path": path, "content": "", "truncated": False}
         if result is None or not result.ok:
-            return {"ok": False, "error": result.error if result else "git command failed", "command": result.to_dict() if result else None, "path": path, "content": "", "truncated": False}
+            response = {"ok": False, "error": result.error if result else "git command failed", "command": result.to_dict() if result else None, "path": path, "content": "", "truncated": False}
+            stderr = result.stderr if result else ""
+            stdout = result.stdout if result else ""
+            if "does not exist" in stderr or "exists on disk, but not in" in stderr or "does not exist" in stdout:
+                response["suggestion"] = (
+                    "Path does not exist at this commit. Call repo_find_paths with a filename or directory fragment first, "
+                    "then call repo_get_file_content using an exact returned path."
+                )
+            return response
         lines = result.stdout.splitlines()
         if start_line is not None or end_line is not None:
             start = max(1, start_line or 1)
@@ -230,3 +238,21 @@ class GitClient:
             start, end, content = 1, len(lines), result.stdout
         content, truncated = truncate_text(content, self.max_output_chars)
         return {"ok": True, "path": path, "startLine": start, "endLine": end, "content": content, "truncated": truncated}
+
+    def list_paths(self, repo: str, commit: str, paths: list[str] | None = None) -> dict:
+        error = validate_commit_ref(commit)
+        if error:
+            return {"ok": False, "error": error, "paths": []}
+        for path in paths or []:
+            path_error = validate_git_path(path)
+            if path_error:
+                return {"ok": False, "error": path_error, "paths": []}
+        args = ["ls-tree", "-r", "--name-only", commit]
+        if paths:
+            args.extend(["--", *paths])
+        result, repo_error = self._run_git(repo, args)
+        if repo_error:
+            return {"ok": False, "error": repo_error, "paths": []}
+        if result is None or not result.ok:
+            return {"ok": False, "error": result.error if result else "git command failed", "command": result.to_dict() if result else None, "paths": []}
+        return {"ok": True, "paths": [line for line in result.stdout.splitlines() if line]}

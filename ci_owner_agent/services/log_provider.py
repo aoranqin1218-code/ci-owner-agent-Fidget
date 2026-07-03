@@ -10,6 +10,8 @@ from ci_owner_agent.services.command_runner import truncate_text
 
 FinalStatus = Literal["SUCCESS", "FAILURE", "ABORTED", "UNKNOWN"]
 FINAL_STATUS_RE = re.compile(r"Finished:\s*(SUCCESS|FAILURE|ABORTED)\b", re.IGNORECASE)
+CHECKING_OUT_REVISION_RE = re.compile(r"\bChecking out Revision\s+([0-9a-f]{7,40})\b", re.IGNORECASE)
+GIT_CHECKOUT_FORCE_RE = re.compile(r"\bgit\s+checkout\s+-f\s+([0-9a-f]{7,40})\b", re.IGNORECASE)
 ERROR_TERMS = [
     "error",
     "exception",
@@ -32,6 +34,16 @@ def log_detect_final_status(log_content: str) -> FinalStatus:
     if not matches:
         return "UNKNOWN"
     return matches[-1].group(1).upper()  # type: ignore[return-value]
+
+
+def detect_checkout_revision_from_console_log(text: str) -> str | None:
+    checkout_revision = CHECKING_OUT_REVISION_RE.search(text)
+    if checkout_revision:
+        return checkout_revision.group(1)
+    forced_checkout = GIT_CHECKOUT_FORCE_RE.search(text)
+    if forced_checkout:
+        return forced_checkout.group(1)
+    return None
 
 
 class LogProvider(ABC):

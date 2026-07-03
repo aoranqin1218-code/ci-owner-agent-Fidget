@@ -6,6 +6,7 @@ import pytest
 
 from ci_owner_agent.orchestrator import analyze_local
 from ci_owner_agent.services.command_runner import run_command
+from ci_owner_agent.services.command_runner import CommandResult
 from ci_owner_agent.services.git_client import GitClient
 from ci_owner_agent.tools.typescript_tools import (
     check_node_dependencies_for_analysis,
@@ -60,6 +61,53 @@ def test_typescript_tool_missing_dependency_is_structured(repo_cache: Path, samp
     assert result["ok"] is False
     assert result["definitions"] == []
     assert "typescript package is not installed" in result["error"]
+
+
+def test_ts_analyzer_relative_dir_does_not_duplicate_path(repo_cache: Path, sample_repo, monkeypatch):
+    calls = {}
+
+    def fake_run_command(args, cwd=None, timeout=30, max_output_chars=20000):
+        calls["args"] = [str(arg) for arg in args]
+        calls["cwd"] = str(cwd)
+        return CommandResult(
+            ok=True,
+            args=calls["args"],
+            returncode=0,
+            stdout='{"ok":true,"definitions":[]}',
+            stderr="",
+        )
+
+    monkeypatch.setattr("ci_owner_agent.tools.typescript_tools.run_command", fake_run_command)
+    result = ts_find_definitions(
+        repo=sample_repo["repo"],
+        commit=sample_repo["head"],
+        symbols=["classifyError"],
+        repo_cache_dir=repo_cache,
+        analyzer_dir=Path("ts-analyzer"),
+        allow_checkout=False,
+    )
+    assert result["ok"] is True
+    script = Path(calls["args"][1])
+    assert script.is_absolute()
+    assert "ts-analyzer\\ts-analyzer" not in calls["args"][1]
+    assert "ts-analyzer/ts-analyzer" not in calls["args"][1]
+    assert Path(calls["cwd"]).is_absolute()
+
+
+def test_ts_analyzer_missing_script_returns_clear_error(repo_cache: Path, sample_repo, tmp_path: Path):
+    analyzer = tmp_path / "empty-analyzer"
+    analyzer.mkdir()
+    result = ts_find_definitions(
+        repo=sample_repo["repo"],
+        commit=sample_repo["head"],
+        symbols=["classifyError"],
+        repo_cache_dir=repo_cache,
+        analyzer_dir=analyzer,
+        allow_checkout=False,
+    )
+    assert result["ok"] is False
+    assert "TS_ANALYZER_DIR" in result["error"]
+    assert "src/find_definitions.js" in result["error"].replace("\\", "/")
 
 
 def test_check_node_dependencies_missing_node_modules(repo_cache: Path, sample_repo):

@@ -27,7 +27,9 @@ Important settings:
 ```text
 CI_AGENT_REPO_CACHE_DIR=E:/ci-agent-cache
 CI_AGENT_DEFAULT_LOG_TAIL_LINES=500
+CI_AGENT_MAX_TOOL_STEPS=12
 CI_AGENT_MAX_TOOL_OUTPUT_CHARS=20000
+CI_AGENT_RECURSION_LIMIT=60
 CI_AGENT_MODEL_PROVIDER=fake
 CI_AGENT_MODEL_TIMEOUT_SECONDS=90
 CI_AGENT_MODEL_MAX_RETRIES=1
@@ -112,6 +114,8 @@ python -m ci_owner_agent analyze-local ^
 
 Optional `--result SUCCESS|FAILURE|UNSTABLE|ABORTED|UNKNOWN` overrides the status detected from `Finished: ...` in the log.
 
+`analyze-local` also checks whether the console log contains `Checking out Revision <sha>` or `git checkout -f <sha>`. If that commit differs from `--head-commit`, the command fails before LLM analysis so responsibility is not assigned against the wrong commit. Rerun with the checkout SHA shown in the error, or pass `--ignore-checkout-commit-mismatch` only when you intentionally want to bypass this guard.
+
 ## Run analyze
 
 ```bash
@@ -160,6 +164,12 @@ The TypeScript analyzer lives under `ts-analyzer/` and is called by Python throu
 - `ts_analyze_changed_functions`
 - `ts_find_definitions`
 - `ts_find_callers`
+
+`TS_ANALYZER_DIR` must point to the directory containing `src/find_definitions.js`, for example:
+
+```text
+E:/workspace/lanchain/ci-owner-agent/ts-analyzer
+```
 
 Install its Node dependency before using the successful TypeScript paths:
 
