@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -25,11 +26,17 @@ class SimpleTool:
 
 
 def _limit(data: dict, max_chars: int) -> dict:
-    text = str(data)
+    text = json.dumps(data, ensure_ascii=False, default=str)
     if len(text) <= max_chars:
         return data
     truncated, _ = truncate_text(text, max_chars)
-    return {"ok": data.get("ok", True), "truncated": True, "content": truncated}
+    return {
+        "ok": data.get("ok", True),
+        "truncated": True,
+        "originalKeys": list(data.keys()),
+        "contentJson": truncated,
+        "note": "Tool output exceeded max chars and was truncated as JSON text. Re-run with narrower arguments if needed.",
+    }
 
 
 def build_langchain_tools(context: AgentRuntimeContext) -> list[Any]:
@@ -106,6 +113,7 @@ def build_langchain_tools(context: AgentRuntimeContext) -> list[Any]:
             symbols=symbols,
             repo_cache_dir=context.settings.repo_cache_dir,
             analyzer_dir=context.settings.ts_analyzer_dir,
+            force_checkout=True,
             max_output_chars=max_chars,
         )
 
@@ -118,6 +126,7 @@ def build_langchain_tools(context: AgentRuntimeContext) -> list[Any]:
             maxResults=maxResults,
             repo_cache_dir=context.settings.repo_cache_dir,
             analyzer_dir=context.settings.ts_analyzer_dir,
+            force_checkout=True,
             max_output_chars=max_chars,
         )
 

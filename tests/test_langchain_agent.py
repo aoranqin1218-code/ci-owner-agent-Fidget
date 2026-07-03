@@ -5,12 +5,16 @@ from dataclasses import replace
 
 from ci_owner_agent.agents.context import AgentRuntimeContext
 from ci_owner_agent.agents.langchain_agent import LangChainResponsibilityAgent
+from ci_owner_agent.agents.prompts import (
+    CI_RESPONSIBILITY_NOTICE_JSON_SCHEMA_PROMPT,
+    LANGCHAIN_RESPONSIBILITY_AGENT_SYSTEM_PROMPT,
+)
 from ci_owner_agent.config import load_settings
 from ci_owner_agent.orchestrator import analyze_local
 from ci_owner_agent.schemas import BuildInfo, ChangedFile, CommitInfo
 from ci_owner_agent.services.git_client import GitClient
 from ci_owner_agent.services.log_provider import LocalFileLogProvider
-from ci_owner_agent.tools.langchain_tools import build_langchain_tools
+from ci_owner_agent.tools.langchain_tools import _limit, build_langchain_tools
 
 
 def make_lc_context(repo_cache, sample_repo, logs):
@@ -162,6 +166,65 @@ def test_langchain_tools_context_defaults(repo_cache, sample_repo, logs):
     assert keyword["ok"] is True
     ts_result = tools["ts_analyze_changed_functions"].invoke({})
     assert "changedFunctions" in ts_result
+
+
+def test_langchain_tools_force_checkout_for_ts_definitions_and_callers(monkeypatch, repo_cache, sample_repo, logs):
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    calls = {}
+
+    def fake_find_definitions(**kwargs):
+        calls["definitions"] = kwargs
+        return {"ok": True, "definitions": []}
+
+    def fake_find_callers(**kwargs):
+        calls["callers"] = kwargs
+        return {"ok": True, "callers": []}
+
+    monkeypatch.setattr("ci_owner_agent.tools.langchain_tools.find_definitions", fake_find_definitions)
+    monkeypatch.setattr("ci_owner_agent.tools.langchain_tools.find_callers", fake_find_callers)
+    tools = {tool.name: tool for tool in build_langchain_tools(context)}
+    tools["ts_find_definitions"].invoke({"symbols": ["classifyError"]})
+    tools["ts_find_callers"].invoke({"symbol": "classifyError", "definitionFile": "packages/fxp-ai/errors/classify.ts"})
+    assert calls["definitions"]["force_checkout"] is True
+    assert calls["callers"]["force_checkout"] is True
+
+
+def test_prompt_contains_schema_fields():
+    for text in [
+        "buildNumber",
+        "owner",
+        "evidence",
+        "hasHighConfidenceOwner",
+        "no_high_confidence_owner",
+        "禁止输出额外字段",
+    ]:
+        assert text in CI_RESPONSIBILITY_NOTICE_JSON_SCHEMA_PROMPT
+        assert text in LANGCHAIN_RESPONSIBILITY_AGENT_SYSTEM_PROMPT
+
+
+def test_repair_prompt_uses_schema(monkeypatch, repo_cache, sample_repo, logs):
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    agent = LangChainResponsibilityAgent(context.settings, context, [])
+    captured = {}
+
+    class FakeModel:
+        def invoke(self, prompt):
+            captured["prompt"] = prompt
+            return type("Msg", (), {"content": "{}"})()
+
+    monkeypatch.setattr(agent, "_model", lambda: FakeModel())
+    agent._repair_output("bad")
+    assert "buildNumber" in captured["prompt"]
+    assert "hasHighConfidenceOwner" in captured["prompt"]
+    assert "禁止输出额外字段" in captured["prompt"]
+
+
+def test_tool_limit_returns_json_text_not_python_repr():
+    limited = _limit({"ok": True, "items": [{"x": "值"}] * 100}, 100)
+    assert limited["truncated"] is True
+    assert "contentJson" in limited
+    assert "originalKeys" in limited
+    assert "'ok': True" not in limited["contentJson"]
 
 
 def test_success_short_circuits_before_agent_factory(monkeypatch, repo_cache, sample_repo, logs):

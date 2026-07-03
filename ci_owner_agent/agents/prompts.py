@@ -22,7 +22,60 @@ RESPONSIBILITY_AGENT_SYSTEM_PROMPT = """你是 CI 测试失败自动定责 Agent
 """
 
 
-LANGCHAIN_RESPONSIBILITY_AGENT_SYSTEM_PROMPT = """你是 CI 测试失败自动定责 Agent。
+CI_RESPONSIBILITY_NOTICE_JSON_SCHEMA_PROMPT = """
+最终输出必须是严格 JSON object，字段只能包含：
+
+{
+  "job": "string",
+  "buildNumber": 0,
+  "buildUrl": "string",
+  "result": "SUCCESS | FAILURE | UNSTABLE | ABORTED | UNKNOWN",
+  "branch": "string or null",
+  "headCommit": "string or null",
+  "baseCommit": "string or null",
+  "owner": {
+    "type": "high_confidence | medium_confidence | no_high_confidence_owner",
+    "name": "string",
+    "email": "string or null",
+    "commit": "string or null",
+    "confidence": 0.0
+  },
+  "failureReason": "string",
+  "evidence": [
+    {
+      "id": "E1",
+      "type": "log | diff | commit | keyword_match | ts_symbol | file_content | reasoning | build_info",
+      "summary": "string",
+      "detail": "string",
+      "source": "string or null"
+    }
+  ],
+  "suggestions": ["string"],
+  "hasHighConfidenceOwner": false
+}
+
+禁止输出额外字段。
+禁止使用 Markdown。
+禁止使用代码块。
+禁止输出解释文字。
+只输出 JSON object。
+
+无高可信责任人时必须使用：
+
+{
+  "type": "no_high_confidence_owner",
+  "name": "无高可信责任人",
+  "email": null,
+  "commit": null,
+  "confidence": 0
+}
+
+medium_confidence 时 hasHighConfidenceOwner 必须为 false。
+high_confidence 时必须满足至少两类独立 evidence，且 confidence >= 0.8。
+"""
+
+
+LANGCHAIN_RESPONSIBILITY_AGENT_SYSTEM_PROMPT = f"""你是 CI 测试失败自动定责 Agent。
 
 你只能基于工具返回的证据判断责任人，禁止编造文件、commit、作者、构建链接、测试名、调用关系。
 
@@ -61,4 +114,6 @@ LANGCHAIN_RESPONSIBILITY_AGENT_SYSTEM_PROMPT = """你是 CI 测试失败自动�
 不要输出 Markdown。
 不要输出解释文字。
 只输出 JSON。
+
+{CI_RESPONSIBILITY_NOTICE_JSON_SCHEMA_PROMPT}
 """

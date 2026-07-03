@@ -72,14 +72,14 @@ def validate_model_settings(settings: Settings) -> str | None:
     provider = settings.model_provider.lower()
     if provider == "fake":
         return None
-    if provider not in {"openai", "deepseek", "doubao"}:
+    if provider not in {"openai", "deepseek", "doubao", "openai-compatible"}:
         return f"unsupported CI_AGENT_MODEL_PROVIDER: {settings.model_provider}"
     if not settings.api_key:
         return "CI_AGENT_API_KEY is required when CI_AGENT_MODEL_PROVIDER is not fake"
     if not settings.model_name:
         return "CI_AGENT_MODEL_NAME is required when CI_AGENT_MODEL_PROVIDER is not fake"
-    if provider in {"deepseek", "doubao"} and not settings.model_base_url:
-        return "CI_AGENT_MODEL_BASE_URL is required for deepseek/doubao providers"
+    if provider in {"deepseek", "doubao", "openai-compatible"} and not settings.model_base_url:
+        return "CI_AGENT_MODEL_BASE_URL is required for deepseek/doubao/openai-compatible providers"
     return None
 
 

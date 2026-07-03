@@ -36,7 +36,7 @@ LANGSMITH_PROJECT=ci-owner-agent-dev
 
 `CI_AGENT_MODEL_PROVIDER=fake` is the default offline test mode. It uses the rule-based MVP agent only to verify the toolchain and tests; it is not the formal analysis mode.
 
-OpenAI-compatible real LLM providers are supported with `openai`, `deepseek`, and `doubao`.
+OpenAI-compatible real LLM providers are supported with `openai`, `deepseek`, `doubao`, and `openai-compatible`.
 
 Doubao example:
 
@@ -55,6 +55,17 @@ CI_AGENT_MODEL_BASE_URL=https://api.deepseek.com
 CI_AGENT_MODEL_NAME=deepseek-chat
 CI_AGENT_API_KEY=your-api-key
 ```
+
+Generic OpenAI-compatible example:
+
+```env
+CI_AGENT_MODEL_PROVIDER=openai-compatible
+CI_AGENT_MODEL_BASE_URL=https://your-compatible-endpoint/v1
+CI_AGENT_MODEL_NAME=your-model
+CI_AGENT_API_KEY=your-key
+```
+
+Use `openai-compatible` when a vendor exposes an OpenAI-compatible API but should not be configured as `deepseek` or `doubao`.
 
 LangSmith tracing is optional:
 
@@ -77,7 +88,9 @@ Supported layouts:
 {CI_AGENT_REPO_CACHE_DIR}/{repo}.git
 ```
 
-Normal clones and bare mirrors are both supported. Analysis reads commits directly and does not checkout revisions.
+Ordinary Git analysis supports both normal clones and bare mirrors: diff files, commit lists, keyword search, and file content can read commit objects directly without checkout.
+
+TypeScript Program analysis is different. `ts_find_definitions` and `ts_find_callers` only support a normal working-tree repo. They checkout the agent-owned analysis repo to the requested commit in detached HEAD mode, then create the TypeScript Program from the real project `tsconfig`. Do not point `CI_AGENT_REPO_CACHE_DIR` at a human developer working copy. Use a dedicated agent cache, for example `E:/workspace/temp/fx-code`.
 
 ## Run analyze-local
 
@@ -127,7 +140,7 @@ npm install
 
 If Node.js, `typescript`, `tsconfig.json`, or Program creation is unavailable, the Python tools return structured errors and the main analysis continues.
 
-`ts_find_definitions` and `ts_find_callers` analyze the requested `commit` by checking out the dedicated analysis repository to that commit in detached HEAD mode before creating the TypeScript Program. The project intentionally does not create temporary worktrees or temporary checkout directories; the repo cache is assumed to be agent-owned. Dirty worktrees are rejected unless `force_checkout=True` is passed.
+`ts_find_definitions` and `ts_find_callers` analyze the requested `commit` by checking out the dedicated analysis repository to that commit in detached HEAD mode before creating the TypeScript Program. The project intentionally does not create temporary worktrees or temporary checkout directories; the repo cache is assumed to be agent-owned. In the LangChain Agent wrapper these tools use `force_checkout=True`, because the analysis repository is considered Agent-owned. This operation does not run `git clean -fdx`, so it does not delete `node_modules`.
 
 The analyzer always uses the real project `tsconfig` passed by the caller, defaulting to `tsconfig.json`. It does not provide a fallback tsconfig and does not generate `tsconfig.ci-agent.json`.
 

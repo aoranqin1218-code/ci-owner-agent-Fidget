@@ -6,7 +6,10 @@ import re
 from typing import Any
 
 from ci_owner_agent.agents.context import AgentRuntimeContext
-from ci_owner_agent.agents.prompts import LANGCHAIN_RESPONSIBILITY_AGENT_SYSTEM_PROMPT
+from ci_owner_agent.agents.prompts import (
+    CI_RESPONSIBILITY_NOTICE_JSON_SCHEMA_PROMPT,
+    LANGCHAIN_RESPONSIBILITY_AGENT_SYSTEM_PROMPT,
+)
 from ci_owner_agent.config import Settings, validate_model_settings
 from ci_owner_agent.schemas import CiResponsibilityNotice
 from ci_owner_agent.services.scorer import downgrade_to_no_high_confidence, validate_notice
@@ -88,9 +91,11 @@ class LangChainResponsibilityAgent:
         try:
             model = self._model()
             prompt = (
-                "把下面模型输出修复为严格合法的 CiResponsibilityNotice JSON。"
-                "不要输出 Markdown，不要解释，只输出 JSON。"
-                "如果证据不足，owner.type 必须为 no_high_confidence_owner。\n\n"
+                "请把下面模型输出修复为严格合法的 CiResponsibilityNotice JSON。\n"
+                "不得新增 schema 之外的字段。\n"
+                "不要输出 Markdown，不要解释，只输出 JSON object。\n"
+                "如果原输出证据不足或无法判断，必须输出 no_high_confidence_owner。\n\n"
+                f"{CI_RESPONSIBILITY_NOTICE_JSON_SCHEMA_PROMPT}\n\n"
                 f"原始输出:\n{raw}"
             )
             response = model.invoke(prompt)

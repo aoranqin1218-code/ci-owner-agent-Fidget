@@ -70,3 +70,32 @@ def test_factory_real_provider_returns_langchain_agent(repo_cache, sample_repo, 
     context = replace(context, settings=settings)
     agent = create_responsibility_agent(settings, context)
     assert isinstance(agent, LangChainResponsibilityAgent)
+
+
+def test_openai_compatible_requires_base_url(repo_cache, sample_repo, logs):
+    context = make_context(repo_cache, sample_repo, logs, provider="openai-compatible")
+    settings = replace(
+        context.settings,
+        model_provider="openai-compatible",
+        api_key="test-key",
+        model_name="test-model",
+        model_base_url=None,
+    )
+    context = replace(context, settings=settings)
+    with pytest.raises(AgentConfigurationError) as exc:
+        create_responsibility_agent(settings, context)
+    assert "CI_AGENT_MODEL_BASE_URL" in str(exc.value)
+
+
+def test_openai_compatible_valid(repo_cache, sample_repo, logs):
+    context = make_context(repo_cache, sample_repo, logs, provider="openai-compatible")
+    settings = replace(
+        context.settings,
+        model_provider="openai-compatible",
+        api_key="test-key",
+        model_name="test-model",
+        model_base_url="https://compatible.example/v1",
+    )
+    context = replace(context, settings=settings)
+    agent = create_responsibility_agent(settings, context)
+    assert isinstance(agent, LangChainResponsibilityAgent)
