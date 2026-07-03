@@ -149,6 +149,70 @@ def test_langchain_v1_create_agent_is_used(monkeypatch, repo_cache, sample_repo,
     assert "messages" in calls["invoke_payload"]
 
 
+def test_model_uses_timeout_and_max_retries(monkeypatch, repo_cache, sample_repo, logs):
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    settings = replace(context.settings, model_timeout_seconds=77, model_max_retries=3)
+    context = replace(context, settings=settings)
+    captured = {}
+
+    class FakeChatOpenAI:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    fake_module = types.ModuleType("langchain_openai")
+    fake_module.ChatOpenAI = FakeChatOpenAI
+    monkeypatch.setitem(sys.modules, "langchain_openai", fake_module)
+    LangChainResponsibilityAgent(settings, context, [])._model()
+    assert captured["timeout"] == 77
+    assert captured["max_retries"] == 3
+
+
+def test_response_format_tool_uses_tool_strategy(monkeypatch, repo_cache, sample_repo, logs):
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    calls = {}
+
+    def fake_create_agent(**kwargs):
+        calls.update(kwargs)
+        return object()
+
+    class FakeToolStrategy:
+        def __init__(self, schema, handle_errors=None):
+            self.schema = schema
+
+    fake_agents = types.ModuleType("langchain.agents")
+    fake_agents.create_agent = fake_create_agent
+    fake_structured = types.ModuleType("langchain.agents.structured_output")
+    fake_structured.ToolStrategy = FakeToolStrategy
+    monkeypatch.setitem(sys.modules, "langchain.agents", fake_agents)
+    monkeypatch.setitem(sys.modules, "langchain.agents.structured_output", fake_structured)
+    LangChainResponsibilityAgent(context.settings, context, [])._create_v1_agent(object())
+    assert "response_format" in calls
+
+
+def test_response_format_json_text_omits_response_format(monkeypatch, repo_cache, sample_repo, logs):
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    settings = replace(context.settings, response_format="json_text")
+    context = replace(context, settings=settings)
+    calls = {}
+
+    def fake_create_agent(**kwargs):
+        calls.update(kwargs)
+        return object()
+
+    class FakeToolStrategy:
+        def __init__(self, schema, handle_errors=None):
+            self.schema = schema
+
+    fake_agents = types.ModuleType("langchain.agents")
+    fake_agents.create_agent = fake_create_agent
+    fake_structured = types.ModuleType("langchain.agents.structured_output")
+    fake_structured.ToolStrategy = FakeToolStrategy
+    monkeypatch.setitem(sys.modules, "langchain.agents", fake_agents)
+    monkeypatch.setitem(sys.modules, "langchain.agents.structured_output", fake_structured)
+    LangChainResponsibilityAgent(settings, context, [])._create_v1_agent(object())
+    assert "response_format" not in calls
+
+
 def test_langchain_agent_structured_response_parsed(monkeypatch, repo_cache, sample_repo, logs):
     context = make_lc_context(repo_cache, sample_repo, logs)
 
@@ -161,6 +225,21 @@ def test_langchain_agent_structured_response_parsed(monkeypatch, repo_cache, sam
     monkeypatch.setattr(agent, "_create_v1_agent", lambda model: FakeAgent())
     notice = agent.analyze()
     assert notice.owner.type == "high_confidence"
+
+
+def test_agent_timeout_downgrades(monkeypatch, repo_cache, sample_repo, logs):
+    context = make_lc_context(repo_cache, sample_repo, logs)
+
+    class FakeAgent:
+        def invoke(self, payload, config=None):
+            raise TimeoutError("model timed out")
+
+    agent = LangChainResponsibilityAgent(context.settings, context, [])
+    monkeypatch.setattr(agent, "_model", lambda: object())
+    monkeypatch.setattr(agent, "_create_v1_agent", lambda model: FakeAgent())
+    notice = agent.analyze()
+    assert notice.owner.type == "no_high_confidence_owner"
+    assert "超时" in notice.failureReason or "LLM 分析失败" in notice.failureReason
 
 
 def test_langchain_agent_messages_fallback_parsed(monkeypatch, repo_cache, sample_repo, logs):
@@ -312,6 +391,26 @@ def test_tool_limit_returns_json_text_not_python_repr():
     assert "contentJson" in limited
     assert "originalKeys" in limited
     assert "'ok': True" not in limited["contentJson"]
+
+
+def test_initial_input_is_truncated(repo_cache, sample_repo, logs):
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    changed_files = [
+        ChangedFile(path=f"src/file{i}.ts", status="M", additions=1, deletions=0, authors=[])
+        for i in range(45)
+    ]
+    commits = [
+        CommitInfo(hash=f"{i:040x}", authorName="A", authorEmail="a@example.com", subject="s", timestamp=None)
+        for i in range(35)
+    ]
+    context = replace(context, changed_files=changed_files, commits=commits)
+    payload = json.loads(LangChainResponsibilityAgent(context.settings, context, [])._initial_input())
+    assert len(payload["changedFiles"]) == 30
+    assert payload["changedFilesTotal"] == 45
+    assert payload["changedFilesTruncated"] is True
+    assert len(payload["commits"]) == 20
+    assert payload["commitsTotal"] == 35
+    assert payload["commitsTruncated"] is True
 
 
 def test_success_short_circuits_before_agent_factory(monkeypatch, repo_cache, sample_repo, logs):

@@ -23,6 +23,9 @@ class Settings:
     model_base_url: str | None
     model_name: str | None
     api_key: str | None
+    model_timeout_seconds: int
+    model_max_retries: int
+    response_format: str
     ts_analyzer_dir: Path
     langsmith_tracing: bool
     langsmith_api_key: str | None
@@ -43,6 +46,18 @@ def _int_env(name: str, default: int) -> int:
     return parsed
 
 
+def _int_env_or_default(name: str, default: int) -> int:
+    try:
+        return _int_env(name, default)
+    except ValueError:
+        return default
+
+
+def _response_format_env() -> str:
+    value = os.getenv("CI_AGENT_RESPONSE_FORMAT", "tool").lower()
+    return value if value in {"tool", "json_text"} else "tool"
+
+
 def load_settings(env_file: str | Path | None = None) -> Settings:
     if load_dotenv is not None:
         load_dotenv(dotenv_path=env_file, override=False)
@@ -60,6 +75,9 @@ def load_settings(env_file: str | Path | None = None) -> Settings:
         model_base_url=os.getenv("CI_AGENT_MODEL_BASE_URL") or None,
         model_name=os.getenv("CI_AGENT_MODEL_NAME") or None,
         api_key=os.getenv("CI_AGENT_API_KEY") or None,
+        model_timeout_seconds=_int_env_or_default("CI_AGENT_MODEL_TIMEOUT_SECONDS", 90),
+        model_max_retries=_int_env_or_default("CI_AGENT_MODEL_MAX_RETRIES", 1),
+        response_format=_response_format_env(),
         ts_analyzer_dir=ts_analyzer_dir,
         langsmith_tracing=os.getenv("LANGSMITH_TRACING", "false").lower() in {"1", "true", "yes", "on"},
         langsmith_api_key=os.getenv("LANGSMITH_API_KEY") or None,

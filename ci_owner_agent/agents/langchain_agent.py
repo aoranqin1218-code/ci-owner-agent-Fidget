@@ -36,7 +36,7 @@ class LangChainResponsibilityAgent:
                 return self._failure_notice("LLM 输出无法解析为 CiResponsibilityNotice，已降级为无高可信责任人。")
             return validate_notice(notice)
         except Exception as exc:
-            return self._failure_notice(f"LLM 分析失败，已降级为无高可信责任人：{exc}")
+            return self._failure_notice(f"LLM 分析失败或超时，已降级为无高可信责任人：{exc}")
 
     def _configure_langsmith(self) -> None:
         if self.settings.langsmith_tracing and self.settings.langsmith_api_key:
@@ -54,6 +54,8 @@ class LangChainResponsibilityAgent:
             "model": self.settings.model_name,
             "api_key": self.settings.api_key,
             "temperature": 0,
+            "timeout": self.settings.model_timeout_seconds,
+            "max_retries": self.settings.model_max_retries,
         }
         if self.settings.model_base_url:
             kwargs["base_url"] = self.settings.model_base_url
@@ -101,19 +103,21 @@ class LangChainResponsibilityAgent:
                 "Please install langchain>=1.3,<2 and langchain-openai compatible with LangChain v1. "
                 f"Original error: {exc}"
             ) from exc
-        return create_agent(
-            model=model,
-            tools=self.tools,
-            system_prompt=LANGCHAIN_RESPONSIBILITY_AGENT_SYSTEM_PROMPT,
-            response_format=ToolStrategy(
+        kwargs = {
+            "model": model,
+            "tools": self.tools,
+            "system_prompt": LANGCHAIN_RESPONSIBILITY_AGENT_SYSTEM_PROMPT,
+        }
+        if self.settings.response_format == "tool":
+            kwargs["response_format"] = ToolStrategy(
                 schema=CiResponsibilityNotice,
                 handle_errors=(
                     "请输出严格合法的 CiResponsibilityNotice。"
                     "不得新增 schema 之外的字段。"
                     "如果证据不足，必须输出 no_high_confidence_owner。"
                 ),
-            ),
-        )
+            )
+        return create_agent(**kwargs)
 
     def _repair_output(self, raw: str) -> str:
         try:
@@ -140,12 +144,17 @@ class LangChainResponsibilityAgent:
             "branch": self.context.branch,
             "baseCommit": self.context.base_commit,
             "headCommit": self.context.head_commit,
-            "changedFiles": [item.model_dump() for item in self.context.changed_files[:80]],
-            "changedFilesTruncated": len(self.context.changed_files) > 80,
-            "commits": [item.model_dump() for item in self.context.commits[:50]],
-            "commitsTruncated": len(self.context.commits) > 50,
+            "changedFiles": [item.model_dump() for item in self.context.changed_files[:30]],
+            "changedFilesTotal": len(self.context.changed_files),
+            "changedFilesTruncated": len(self.context.changed_files) > 30,
+            "commits": [item.model_dump() for item in self.context.commits[:20]],
+            "commitsTotal": len(self.context.commits),
+            "commitsTruncated": len(self.context.commits) > 20,
             "logTail": self.context.build_info.logTail.model_dump() if self.context.build_info.logTail else None,
-            "instruction": "必须基于工具证据。证据不足输出 no_high_confidence_owner。最终只输出 JSON。",
+            "instruction": (
+                "必须基于工具证据。证据不足输出 no_high_confidence_owner。最终只输出 JSON。"
+                "如需更多 changed files 或 commits，请调用 repo_get_diff_files / repo_get_commits_between。"
+            ),
         }
         return json.dumps(payload, ensure_ascii=False)
 
@@ -196,6 +205,7 @@ class LangChainResponsibilityAgent:
             suggestions=[
                 "人工查看 Jenkins 日志和本次 diff。",
                 "检查 Agent prompt、模型输出格式和 LangSmith trace。",
+                "检查 CI_AGENT_MODEL_TIMEOUT_SECONDS、模型服务响应、LangSmith trace 中最后一个 model run。",
             ],
             hasHighConfidenceOwner=False,
         )

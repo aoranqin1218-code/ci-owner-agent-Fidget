@@ -29,6 +29,9 @@ CI_AGENT_REPO_CACHE_DIR=E:/ci-agent-cache
 CI_AGENT_DEFAULT_LOG_TAIL_LINES=500
 CI_AGENT_MAX_TOOL_OUTPUT_CHARS=20000
 CI_AGENT_MODEL_PROVIDER=fake
+CI_AGENT_MODEL_TIMEOUT_SECONDS=90
+CI_AGENT_MODEL_MAX_RETRIES=1
+CI_AGENT_RESPONSE_FORMAT=tool
 TS_ANALYZER_DIR=./ts-analyzer
 LANGSMITH_TRACING=false
 LANGSMITH_PROJECT=ci-owner-agent-dev
@@ -124,6 +127,16 @@ Jenkins analyze mode is implemented. It reads build metadata and console logs fr
 In real LLM mode, the outer orchestrator still performs deterministic gates first. `SUCCESS` and `ABORTED` never enter the Agent. Failed builds enter a LangChain tool-calling Agent, which reads logs through tools instead of receiving the full Jenkins log at once.
 
 The real Agent uses LangChain v1 `create_agent` with `response_format=CiResponsibilityNotice`. Agent invocation uses the v1 `messages` input format. If a provider cannot produce structured output, the project still falls back to text parsing plus one repair attempt, followed by local validator/scorer checks.
+
+If an OpenAI-compatible model hangs during structured output / ToolStrategy, try:
+
+```env
+CI_AGENT_MODEL_TIMEOUT_SECONDS=90
+CI_AGENT_MODEL_MAX_RETRIES=1
+CI_AGENT_RESPONSE_FORMAT=json_text
+```
+
+`json_text` mode omits LangChain structured `response_format`; the model is still required by prompt to output JSON, and the result still goes through local JSON parse, one repair attempt, and validator/scorer.
 
 Recommended LangChain v1 packages:
 
