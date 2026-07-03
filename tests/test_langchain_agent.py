@@ -29,6 +29,7 @@ def make_lc_context(repo_cache, sample_repo, logs):
         repo_cache_dir=repo_cache,
         langsmith_tracing=False,
         langsmith_api_key=None,
+        response_format="tool",
     )
     log_provider = LocalFileLogProvider(logs["auth_failed"], max_output_chars=500)
     build_info = BuildInfo(
@@ -384,6 +385,16 @@ def test_prompt_contains_schema_fields():
         "禁止输出额外字段",
     ]:
         assert text in CI_RESPONSIBILITY_NOTICE_JSON_SCHEMA_PROMPT
+        assert text in LANGCHAIN_RESPONSIBILITY_AGENT_SYSTEM_PROMPT
+
+
+def test_prompt_allows_explicit_log_file_paths_before_file_content():
+    for text in [
+        "日志堆栈",
+        "失败测试行",
+        "错误输出中明确出现的文件路径",
+        "test/packages/fxp-ai/errors/classify.test.ts:1:23",
+    ]:
         assert text in LANGCHAIN_RESPONSIBILITY_AGENT_SYSTEM_PROMPT
 
 

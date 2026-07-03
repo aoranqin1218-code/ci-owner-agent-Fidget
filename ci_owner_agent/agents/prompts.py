@@ -116,6 +116,7 @@ LANGCHAIN_RESPONSIBILITY_AGENT_SYSTEM_PROMPT = f"""你是 CI 测试失败自动�
    - repo_keyword_search matches.file
    - repo_find_paths matches
    - ts_find_definitions definitions.file
+   - 日志堆栈、失败测试行、错误输出中明确出现的文件路径，例如 test/packages/fxp-ai/errors/classify.test.ts:1:23
 3. 如果只知道文件名、目录片段、模块名，先调用 repo_find_paths。
 4. 如果 repo_get_file_content 返回 path does not exist，不要继续用相似猜测路径重复读取，必须调用 repo_find_paths。
 
