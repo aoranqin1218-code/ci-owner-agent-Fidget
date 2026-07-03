@@ -116,7 +116,7 @@ def build_langchain_tools(context: AgentRuntimeContext) -> list[Any]:
         return _limit(context.log_provider.read_tail(lines).model_dump(), max_chars)
 
     def log_search(query: str, contextLines: int = 30, maxMatches: int = 10) -> dict:
-        """Search the current build log and return context around matching lines."""
+        """Search the current build log by literal string and return context. Regex and | OR are not supported; for multiple keywords use log_find_error_chunks or separate single-keyword searches."""
         blocked = _guard_tool_call("log_search", {"query": query, "contextLines": contextLines, "maxMatches": maxMatches})
         if blocked:
             return blocked
@@ -280,7 +280,11 @@ def build_langchain_tools(context: AgentRuntimeContext) -> list[Any]:
 
     specs = [
         ("log_read_tail", "Read the tail of the current build log.", log_read_tail),
-        ("log_search", "Search current build log with context.", log_search),
+        (
+            "log_search",
+            "Search current build log by literal string with context. Regex and | OR are not supported; do not pass queries like FAILED|failed|Error. For multiple keywords use log_find_error_chunks or separate searches.",
+            log_search,
+        ),
         ("log_read_range", "Read a line range from current build log.", log_read_range),
         ("log_find_error_chunks", "Recall high-signal error chunks from the log.", log_find_error_chunks),
         ("log_detect_final_status", "Detect final Jenkins Finished status from log.", log_detect_final_status),
@@ -290,7 +294,7 @@ def build_langchain_tools(context: AgentRuntimeContext) -> list[Any]:
         ("repo_get_file_content", "Get file content at a commit.", repo_get_file_content),
         (
             "repo_find_paths",
-            "Find real file paths at the context head commit before reading file content. Use this before repo_get_file_content when the exact path is uncertain.",
+            "Find real file paths at the context head commit before reading file content. Use this before repo_get_file_content when the exact path is uncertain. If a log stack already contains a full path like test/packages/fxp-ai/errors/classify.test.ts:1:23, call repo_get_file_content directly.",
             repo_find_paths,
         ),
         (

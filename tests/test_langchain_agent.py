@@ -446,6 +446,20 @@ def test_prompt_requires_final_json_after_sufficient_evidence_or_budget_exhausti
         assert text in LANGCHAIN_RESPONSIBILITY_AGENT_SYSTEM_PROMPT
 
 
+def test_prompt_and_tool_docs_describe_literal_log_search_and_direct_log_paths(repo_cache, sample_repo, logs):
+    for text in [
+        "log_search 是字面字符串搜索",
+        "不支持正则表达式和 | OR",
+        "不要传 \"FAILED|failed|Error\"",
+        "可以直接调用 repo_get_file_content，不需要先 repo_find_paths",
+    ]:
+        assert text in LANGCHAIN_RESPONSIBILITY_AGENT_SYSTEM_PROMPT
+    tools = {tool.name: tool for tool in build_langchain_tools(make_lc_context(repo_cache, sample_repo, logs))}
+    assert "literal string" in tools["log_search"].description
+    assert "FAILED|failed|Error" in tools["log_search"].description
+    assert "call repo_get_file_content directly" in tools["repo_find_paths"].description
+
+
 def test_repair_prompt_uses_schema(monkeypatch, repo_cache, sample_repo, logs):
     context = make_lc_context(repo_cache, sample_repo, logs)
     agent = LangChainResponsibilityAgent(context.settings, context, [])

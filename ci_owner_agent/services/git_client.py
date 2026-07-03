@@ -255,4 +255,4 @@ class GitClient:
             return {"ok": False, "error": repo_error, "paths": []}
         if result is None or not result.ok:
             return {"ok": False, "error": result.error if result else "git command failed", "command": result.to_dict() if result else None, "paths": []}
-        return {"ok": True, "paths": [line for line in result.stdout.splitlines() if line]}
+        return {"ok": True, "paths": [line for line in result.stdout.splitlines() if line], "truncated": result.truncated}
