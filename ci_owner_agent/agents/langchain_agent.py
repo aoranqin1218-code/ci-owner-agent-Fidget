@@ -136,6 +136,16 @@ class LangChainResponsibilityAgent:
             return ""
 
     def _initial_input(self) -> str:
+        failure_summaries = self.context.failure_summaries
+        if failure_summaries is None:
+            try:
+                failure_summaries = self.context.log_provider.find_test_failure_summaries(
+                    tail_lines=self.settings.failure_chunk_tail_lines,
+                    max_chunks=5,
+                )
+            except Exception as exc:
+                failure_summaries = {"chunks": [], "warning": f"failure summary extraction failed: {exc}"}
+        log_tail = self.context.build_info.logTail
         payload = {
             "job": self.context.job,
             "buildNumber": self.context.build_number,
@@ -151,13 +161,102 @@ class LangChainResponsibilityAgent:
             "commits": [item.model_dump() for item in self.context.commits[:20]],
             "commitsTotal": len(self.context.commits),
             "commitsTruncated": len(self.context.commits) > 20,
-            "logTail": self.context.build_info.logTail.model_dump() if self.context.build_info.logTail else None,
+            "failureSummaries": self._compact_failure_summaries(failure_summaries),
+            "failureSummaryWarning": failure_summaries.get("warning") if isinstance(failure_summaries, dict) else None,
+            "logTailMeta": self._log_tail_meta(log_tail),
+            "historyPrecheck": self._compact_history_precheck(self.context.history_precheck),
             "instruction": (
                 "必须基于工具证据。证据不足输出 no_high_confidence_owner。最终只输出 JSON。"
                 "如需更多 changed files 或 commits，请调用 repo_get_diff_files / repo_get_commits_between。"
+                "failureSummaries 是当前构建最重要的失败摘要；如果存在，优先基于它判断失败测试名、错误类型、测试文件和栈。"
+                "如需更多日志，再调用 log_read_range / log_search / log_read_tail。"
+                "不要仅凭 changedFiles 或 package.json 依赖升级输出 high_confidence。"
             ),
         }
         return json.dumps(payload, ensure_ascii=False)
+
+    def _compact_failure_summaries(self, summaries: dict[str, Any] | None) -> list[dict[str, Any]]:
+        chunks = summaries.get("chunks", []) if isinstance(summaries, dict) else []
+        compact: list[dict[str, Any]] = []
+        for idx, chunk in enumerate(chunks[:5]):
+            content = str(chunk.get("content") or "")
+            compact.append(
+                {
+                    "chunkIndex": chunk.get("chunkIndex", idx),
+                    "chunkSource": chunk.get("chunkSource"),
+                    "startLine": chunk.get("startLine"),
+                    "endLine": chunk.get("endLine"),
+                    "signature": chunk.get("signature") or {},
+                    "content": self._truncate_summary_content(content),
+                }
+            )
+        return compact
+
+    def _truncate_summary_content(self, content: str, limit: int = 4000) -> str:
+        if len(content) <= limit:
+            return content
+        return content[:limit] + "\n...[truncated]"
+
+    def _log_tail_meta(self, log_tail: Any | None) -> dict[str, Any] | None:
+        if log_tail is None:
+            return None
+        content = str(getattr(log_tail, "content", "") or "")
+        return {
+            "startLine": getattr(log_tail, "startLine", None),
+            "endLine": getattr(log_tail, "endLine", None),
+            "contentChars": len(content),
+            "omitted": True,
+            "reason": "full logTail.content omitted from initial prompt; use log_read_tail/log_search/log_read_range tools if needed",
+        }
+
+    def _compact_history_precheck(self, precheck: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not isinstance(precheck, dict):
+            return precheck
+        compact: dict[str, Any] = {
+            "ok": precheck.get("ok"),
+            "historyEnabled": precheck.get("historyEnabled"),
+            "currentBuild": precheck.get("currentBuild"),
+            "lastSuccessfulBuildNumber": precheck.get("lastSuccessfulBuildNumber"),
+            "lastSuccessfulBuildNumberMissing": precheck.get("lastSuccessfulBuildNumberMissing"),
+            "warning": precheck.get("warning"),
+            "error": precheck.get("error"),
+            "stage": precheck.get("stage"),
+            "candidateCount": len(precheck.get("candidates") or []),
+            "currentChunks": [
+                {
+                    "chunkIndex": item.get("chunkIndex"),
+                    "normalizedHash": item.get("normalizedHash"),
+                    "signature": item.get("signature") or {},
+                }
+                for item in (precheck.get("currentChunks") or [])[:5]
+                if isinstance(item, dict)
+            ],
+            "candidates": [],
+            "instruction": (
+                "如果 candidates 中存在 signature_exact 或 signature_structural，relationship=very_likely_same_failure，"
+                "且 buildNumber 小于当前 build，则当前失败属于 pre-existing failure，必须输出 no_high_confidence_owner。"
+            ),
+        }
+        for candidate in (precheck.get("candidates") or [])[:5]:
+            if not isinstance(candidate, dict):
+                continue
+            compact["candidates"].append(
+                {
+                    "buildNumber": candidate.get("buildNumber"),
+                    "headCommit": candidate.get("headCommit"),
+                    "similarity": candidate.get("similarity"),
+                    "relationship": candidate.get("relationship"),
+                    "matchType": candidate.get("matchType"),
+                    "ownerType": candidate.get("ownerType"),
+                    "ownerName": candidate.get("ownerName"),
+                    "ownerCommit": candidate.get("ownerCommit"),
+                    "hasHighConfidenceOwner": candidate.get("hasHighConfidenceOwner"),
+                    "failureReason": candidate.get("failureReason"),
+                    "signature": candidate.get("signature"),
+                    "historicalSignature": candidate.get("historicalSignature"),
+                }
+            )
+        return compact
 
     def _metadata(self) -> dict[str, Any]:
         return {

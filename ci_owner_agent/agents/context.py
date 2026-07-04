@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 from ci_owner_agent.config import Settings
 from ci_owner_agent.schemas import BuildInfo, ChangedFile, CommitInfo
@@ -25,3 +26,5 @@ class AgentRuntimeContext:
     git_client: GitClient
     settings: Settings
     last_successful_build_number: int | None = None
+    failure_summaries: dict[str, Any] | None = None
+    history_precheck: dict[str, Any] | None = None

@@ -31,10 +31,12 @@ def history_search_similar_failures(
         if history_store is None:
             return {"ok": False, "historyEnabled": False, "error": "history store disabled or unavailable"}
 
-        summaries = context.log_provider.find_test_failure_summaries(
-            tail_lines=context.settings.failure_chunk_tail_lines,
-            max_chunks=5,
-        )
+        summaries = context.failure_summaries
+        if summaries is None:
+            summaries = context.log_provider.find_test_failure_summaries(
+                tail_lines=context.settings.failure_chunk_tail_lines,
+                max_chunks=5,
+            )
         current_chunks_raw = [
             chunk
             for chunk in summaries.get("chunks", [])

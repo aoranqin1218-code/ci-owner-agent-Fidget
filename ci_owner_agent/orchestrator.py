@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 from ci_owner_agent.agents.context import AgentRuntimeContext
 from ci_owner_agent.agents.factory import AgentConfigurationError, create_responsibility_agent
 from ci_owner_agent.agents.langchain_agent import LangChainResponsibilityAgent
@@ -11,6 +13,7 @@ from ci_owner_agent.services.history_store import get_history_store
 from ci_owner_agent.services.jenkins_client import JenkinsClient
 from ci_owner_agent.services.log_provider import JenkinsLogProvider, LocalFileLogProvider, LogProvider, detect_checkout_revision_from_console_log
 from ci_owner_agent.services.scorer import no_owner, validate_notice
+from ci_owner_agent.tools.history_tools import history_search_similar_failures
 from ci_owner_agent.tools.jenkins_tools import jenkins_get_build_info, jenkins_get_last_successful_build_info
 
 
@@ -153,6 +156,7 @@ def analyze_failed_build(
         settings=settings,
         last_successful_build_number=last_successful_build_number,
     )
+    runtime_context = _with_precomputed_failure_context(runtime_context)
     try:
         agent = create_responsibility_agent(settings, runtime_context)
         if isinstance(agent, LangChainResponsibilityAgent):
@@ -164,8 +168,42 @@ def analyze_failed_build(
     if sync_warning is not None:
         notice.evidence.append(sync_warning)
     notice = validate_notice(notice)
-    _save_history(settings, build_info, notice, log_provider, base_commit, head_commit, last_successful_build_number)
+    _save_history(
+        settings,
+        build_info,
+        notice,
+        log_provider,
+        base_commit,
+        head_commit,
+        last_successful_build_number,
+        runtime_context.failure_summaries,
+    )
     return notice
+
+
+def _with_precomputed_failure_context(context: AgentRuntimeContext) -> AgentRuntimeContext:
+    try:
+        failure_summaries = context.log_provider.find_test_failure_summaries(
+            tail_lines=context.settings.failure_chunk_tail_lines,
+            max_chunks=5,
+        )
+    except Exception as exc:
+        failure_summaries = {"chunks": [], "warning": f"failure summary extraction failed: {exc}"}
+    enriched = replace(context, failure_summaries=failure_summaries)
+    try:
+        history_precheck = history_search_similar_failures(
+            enriched,
+            maxCandidates=enriched.settings.history_max_candidates,
+        )
+    except Exception as exc:
+        history_precheck = {
+            "ok": False,
+            "historyEnabled": enriched.settings.history_enabled,
+            "error": str(exc),
+            "stage": "orchestrator_history_precheck",
+            "candidates": [],
+        }
+    return replace(enriched, history_precheck=history_precheck)
 
 
 def _save_history(
@@ -176,15 +214,19 @@ def _save_history(
     base_commit: str | None,
     head_commit: str | None,
     last_successful_build_number: int | None,
+    failure_summaries: dict | None = None,
 ) -> None:
     store = get_history_store(settings)
     if store is None:
         return
     try:
-        chunks = log_provider.find_test_failure_summaries(
-            tail_lines=settings.failure_chunk_tail_lines,
-            max_chunks=5,
-        ).get("chunks", [])
+        summaries = failure_summaries
+        if summaries is None:
+            summaries = log_provider.find_test_failure_summaries(
+                tail_lines=settings.failure_chunk_tail_lines,
+                max_chunks=5,
+            )
+        chunks = summaries.get("chunks", [])
         store.save_analysis(
             build_info=build_info,
             notice=notice,

@@ -13,7 +13,7 @@ from ci_owner_agent.agents.prompts import (
 )
 from ci_owner_agent.config import load_settings
 from ci_owner_agent.orchestrator import analyze_local
-from ci_owner_agent.schemas import BuildInfo, ChangedFile, CommitInfo
+from ci_owner_agent.schemas import BuildInfo, ChangedFile, CommitInfo, LogTail
 from ci_owner_agent.services.git_client import GitClient
 from ci_owner_agent.services.log_provider import LocalFileLogProvider
 from ci_owner_agent.tools.langchain_tools import _limit, build_langchain_tools
@@ -555,6 +555,100 @@ def test_initial_input_is_truncated(repo_cache, sample_repo, logs):
     assert len(payload["commits"]) == 20
     assert payload["commitsTotal"] == 35
     assert payload["commitsTruncated"] is True
+
+
+def test_initial_input_omits_full_log_tail_and_includes_failure_summaries(repo_cache, sample_repo, logs):
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    noisy_tail = "NOISY_LOG_TOKEN_" + ("x" * 20000)
+    build_info = context.build_info.model_copy(update={"logTail": LogTail(startLine=1, endLine=500, content=noisy_tail)})
+    summaries = {
+        "chunks": [
+            {
+                "chunkIndex": 0,
+                "chunkSource": "local_test_failure_summary",
+                "startLine": 100,
+                "endLine": 110,
+                "signature": {"testName": "getJsSdkConfig dingtalk ua", "errorType": "Error"},
+                "content": "1) getJsSdkConfig dingtalk ua\nError: UNKNOWN\nat test/a.test.ts:1:1",
+            }
+        ]
+    }
+    context = replace(context, build_info=build_info, failure_summaries=summaries)
+    raw = LangChainResponsibilityAgent(context.settings, context, [])._initial_input()
+    payload = json.loads(raw)
+    assert "logTail" not in payload
+    assert payload["failureSummaries"]
+    assert payload["failureSummaries"][0]["signature"]["testName"] == "getJsSdkConfig dingtalk ua"
+    assert payload["logTailMeta"]["omitted"] is True
+    assert payload["logTailMeta"]["contentChars"] == len(noisy_tail)
+    assert noisy_tail not in raw
+    assert "NOISY_LOG_TOKEN" not in raw
+
+
+def test_initial_input_without_failure_summary_still_omits_full_log_tail(repo_cache, sample_repo, logs):
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    noisy_tail = "UNHELPFUL_TAIL_" + ("z" * 20000)
+    build_info = context.build_info.model_copy(update={"logTail": LogTail(startLine=1, endLine=500, content=noisy_tail)})
+    context = replace(
+        context,
+        build_info=build_info,
+        failure_summaries={"chunks": [], "warning": "test failure summaries unavailable; no mocha failure blocks found"},
+    )
+    raw = LangChainResponsibilityAgent(context.settings, context, [])._initial_input()
+    payload = json.loads(raw)
+    assert payload["failureSummaries"] == []
+    assert "no mocha failure blocks found" in payload["failureSummaryWarning"]
+    assert "logTailPreview" not in payload
+    assert noisy_tail not in raw
+    assert "UNHELPFUL_TAIL" not in raw
+
+
+def test_initial_input_includes_compact_history_precheck(repo_cache, sample_repo, logs):
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    long_text = "很长" * 5000
+    context = replace(
+        context,
+        history_precheck={
+            "ok": True,
+            "historyEnabled": True,
+            "currentBuild": 5077,
+            "lastSuccessfulBuildNumber": 5068,
+            "currentChunks": [{"chunkIndex": 0, "normalizedHash": "abc", "signature": {"testName": "t"}}],
+            "candidates": [
+                {
+                    "buildNumber": 5076,
+                    "similarity": 1.0,
+                    "relationship": "very_likely_same_failure",
+                    "matchType": "signature_exact",
+                    "matchedHistoricalChunk": long_text,
+                    "matchedCurrentChunk": long_text,
+                    "notice": {"large": long_text},
+                    "ownerType": "no_high_confidence_owner",
+                    "ownerName": "无高可信责任人",
+                    "hasHighConfidenceOwner": False,
+                    "failureReason": "历史持续失败",
+                }
+            ],
+        },
+    )
+    raw = LangChainResponsibilityAgent(context.settings, context, [])._initial_input()
+    payload = json.loads(raw)
+    candidate = payload["historyPrecheck"]["candidates"][0]
+    assert candidate["buildNumber"] == 5076
+    assert candidate["matchType"] == "signature_exact"
+    assert candidate["relationship"] == "very_likely_same_failure"
+    assert "matchedHistoricalChunk" not in candidate
+    assert "matchedCurrentChunk" not in candidate
+    assert "notice" not in candidate
+    assert long_text not in raw
+
+
+def test_load_settings_reads_model_timeout_and_retries(monkeypatch):
+    monkeypatch.setenv("CI_AGENT_MODEL_TIMEOUT_SECONDS", "180")
+    monkeypatch.setenv("CI_AGENT_MODEL_MAX_RETRIES", "2")
+    settings = load_settings()
+    assert settings.model_timeout_seconds == 180
+    assert settings.model_max_retries == 2
 
 
 def test_success_short_circuits_before_agent_factory(monkeypatch, repo_cache, sample_repo, logs):

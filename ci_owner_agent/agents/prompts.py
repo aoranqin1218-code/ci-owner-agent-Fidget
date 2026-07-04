@@ -94,8 +94,10 @@ LANGCHAIN_RESPONSIBILITY_AGENT_SYSTEM_PROMPT = f"""你是 CI 测试失败自动�
 2. 如果 result 是 SUCCESS，不定责。
 3. 如果 result 是 ABORTED，不进入普通代码责任流程。
 4. 对 FAILURE / UNSTABLE：
-   a. 从日志尾部找明确线索：测试名、异常、文件路径、函数名、接口名、模块名、业务关键词。
-   a1. 优先调用 history_search_similar_failures 检查当前失败是否为上次成功构建之后已经出现过的持续失败。
+   a. 首轮输入里的 failureSummaries 是当前构建最重要的失败摘要，优先基于它判断失败测试名、错误类型、测试文件和栈。
+   a1. 首轮输入里的 historyPrecheck 是 orchestrator 预先执行的历史相似失败检查；如果已有可用结果，优先使用它，不要重复调用 history_search_similar_failures。
+   a2. 如果首轮没有 failureSummaries 或 historyPrecheck 不可用，再从日志尾部/工具找明确线索：测试名、异常、文件路径、函数名、接口名、模块名、业务关键词。
+   a3. 必要时调用 history_search_similar_failures 检查当前失败是否为上次成功构建之后已经出现过的持续失败。
    b. 如果 tail 不够，调用 log_find_error_chunks、log_search、log_read_range。
       log_search 是字面字符串搜索，不支持正则表达式和 | OR；不要传 "FAILED|failed|Error" 这类查询。
       多关键词优先用 log_find_error_chunks，或分别搜索单个关键词。
@@ -117,10 +119,10 @@ LANGCHAIN_RESPONSIBILITY_AGENT_SYSTEM_PROMPT = f"""你是 CI 测试失败自动�
 不要使用 scope=repo；repo/repository/all 只是兼容别名。
 
 历史持续失败规则：
-1. 分析失败构建时，应优先调用 history_search_similar_failures。
-2. history_search_similar_failures 的结果来自 schemaVersion=3 的 test_failure_summary / failure_signature，不再读取整段 500 行 Test tail 或普通 console 随机 error window。
-3. 如果 history_search_similar_failures 返回 matchType=signature_exact 或 signature_structural，且历史 buildNumber 小于当前 buildNumber，则当前失败应视为 pre-existing failure。
-4. 如果 history_search_similar_failures 返回 very_likely_same_failure，且历史 buildNumber 小于当前 buildNumber，则当前失败应视为 pre-existing failure。
+1. 分析失败构建时，应优先使用首轮输入里的 historyPrecheck；它与 history_search_similar_failures 语义一致。
+2. historyPrecheck / history_search_similar_failures 的结果来自 schemaVersion=3 的 test_failure_summary / failure_signature，不再读取整段 500 行 Test tail 或普通 console 随机 error window。
+3. 如果 historyPrecheck 或 history_search_similar_failures 返回 matchType=signature_exact 或 signature_structural，且历史 buildNumber 小于当前 buildNumber，则当前失败应视为 pre-existing failure。
+4. 如果 historyPrecheck 或 history_search_similar_failures 返回 very_likely_same_failure，且历史 buildNumber 小于当前 buildNumber，则当前失败应视为 pre-existing failure。
 5. 对 pre-existing failure，不得因为当前 build 的 package.json、package-lock、依赖升级、相关模块 diff 或后续提交作者而输出 high_confidence_owner。
 6. pre-existing failure 必须输出 no_high_confidence_owner；failureReason 说明当前失败与 build xxx 的历史失败高度相似，本 build 属于持续失败，不能把后续提交判为首次责任人。
 7. evidence 中加入历史匹配说明，type 只能使用 reasoning 或 build_info，不要输出 schema 不允许的 history 类型。

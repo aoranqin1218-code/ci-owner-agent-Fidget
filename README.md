@@ -31,8 +31,8 @@ CI_AGENT_MAX_TOOL_STEPS=12
 CI_AGENT_MAX_TOOL_OUTPUT_CHARS=20000
 CI_AGENT_RECURSION_LIMIT=60
 CI_AGENT_MODEL_PROVIDER=fake
-CI_AGENT_MODEL_TIMEOUT_SECONDS=90
-CI_AGENT_MODEL_MAX_RETRIES=1
+CI_AGENT_MODEL_TIMEOUT_SECONDS=180
+CI_AGENT_MODEL_MAX_RETRIES=2
 CI_AGENT_RESPONSE_FORMAT=tool
 TS_ANALYZER_DIR=./ts-analyzer
 LANGSMITH_TRACING=false
@@ -157,12 +157,14 @@ The real Agent uses LangChain v1 `create_agent` with `response_format=CiResponsi
 If an OpenAI-compatible model hangs during structured output / ToolStrategy, try:
 
 ```env
-CI_AGENT_MODEL_TIMEOUT_SECONDS=90
-CI_AGENT_MODEL_MAX_RETRIES=1
+CI_AGENT_MODEL_TIMEOUT_SECONDS=180
+CI_AGENT_MODEL_MAX_RETRIES=2
 CI_AGENT_RESPONSE_FORMAT=json_text
 ```
 
 `json_text` mode omits LangChain structured `response_format`; the model is still required by prompt to output JSON, and the result still goes through local JSON parse, one repair attempt, and validator/scorer.
+
+`CI_AGENT_MODEL_TIMEOUT_SECONDS` controls a single model HTTP request timeout. `CI_AGENT_MODEL_MAX_RETRIES` controls retries for model timeouts or transient failures. For noisy CI batches, 180 seconds with 2 retries is a practical starting point; 300 seconds with 2 retries is useful for slower OpenAI-compatible gateways. These settings only reduce the impact of occasional model/API read timeouts. The main latency reduction comes from keeping the initial Agent input compact: full `logTail.content` is omitted, focused `failureSummaries` are included, and history precheck is passed in compact form.
 
 Recommended LangChain v1 packages:
 
