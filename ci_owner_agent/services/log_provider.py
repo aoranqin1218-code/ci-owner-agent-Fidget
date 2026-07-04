@@ -13,6 +13,7 @@ FinalStatus = Literal["SUCCESS", "FAILURE", "ABORTED", "UNKNOWN"]
 FINAL_STATUS_RE = re.compile(r"Finished:\s*(SUCCESS|FAILURE|ABORTED)\b", re.IGNORECASE)
 CHECKING_OUT_REVISION_RE = re.compile(r"\bChecking out Revision\s+([0-9a-f]{7,40})\b", re.IGNORECASE)
 GIT_CHECKOUT_FORCE_RE = re.compile(r"\bgit\s+checkout\s+-f\s+([0-9a-f]{7,40})\b", re.IGNORECASE)
+ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 ERROR_TERMS = [
     "error",
     "exception",
@@ -252,7 +253,7 @@ class TextLogProvider(LogProvider):
         if focused_source == "local_console_tail_fallback":
             return {"chunks": [], "warning": "test failure summaries unavailable; focused chunk is console tail fallback"}
         raw_lines = str(focused_chunk.get("content") or "").splitlines()
-        lines = [_strip_docker_log_prefix(line) for line in raw_lines]
+        lines = [_semantic_log_line(line) for line in raw_lines]
         starts = [idx for idx, line in enumerate(lines) if FAILURE_BLOCK_RE.match(line)]
         if not starts:
             return {"chunks": [], "warning": "test failure summaries unavailable; no mocha failure blocks found"}
@@ -335,6 +336,12 @@ def _summary_source_for_focused_source(source: str) -> str:
 def _strip_docker_log_prefix(line: str) -> str:
     match = re.match(r"^#\d+\s+(?:\d+(?:\.\d+)?\s+)?(.*)$", line)
     return match.group(1) if match else line
+
+
+def _semantic_log_line(line: str) -> str:
+    line = _strip_docker_log_prefix(line)
+    line = ANSI_RE.sub("", line)
+    return line.strip()
 
 
 def _trim_failure_block_end(lines: list[str], start: int, end: int) -> int:

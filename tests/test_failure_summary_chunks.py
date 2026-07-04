@@ -118,3 +118,25 @@ def test_buildkit_prefixed_failure_summary_signature(tmp_path):
     assert "ERROR: process" not in chunk["content"]
     assert "Dockerfile:" not in chunk["content"]
     assert "ERROR: failed to solve:" not in chunk["content"]
+
+
+def test_ansi_and_buildkit_prefixed_failure_summary_signature(tmp_path):
+    lines = [
+        "#28 851.7 \x1b[31m  1 failing\x1b[0m",
+        "#28 851.7 \x1b[0m  1) getJsSdkConfig dingtalk ua",
+        "#28 851.7        dingtalk ua dingtalk corpId:",
+        "#28 851.7 \x1b[0m\x1b[31m     Error: UNKNOWN\x1b[0m\x1b[90m",
+        "#28 851.7       at Object.Corp (node_modules/@fx/corp-core/src/errors/Factory.ts:260:36)",
+        "#28 851.7       at test/server/services/integrate/integrate.service.test.ts",
+    ]
+    result = provider(tmp_path, lines).find_test_failure_summaries(tail_lines=500, max_chunks=5)
+    assert result["chunks"]
+    chunk = result["chunks"][0]
+    signature = chunk["signature"]
+    assert signature["testName"] == "getJsSdkConfig dingtalk ua"
+    assert signature["errorType"] == "Error"
+    assert "unknown" in signature["errorMessage"]
+    assert signature["testFile"] == "test/server/services/integrate/integrate.service.test.ts"
+    assert "\x1b[" not in chunk["content"]
+    assert "#28" not in chunk["content"]
+    assert "Error: UNKNOWN" in chunk["content"]
