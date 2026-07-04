@@ -227,6 +227,7 @@ class LangChainResponsibilityAgent:
                     "chunkIndex": item.get("chunkIndex"),
                     "normalizedHash": item.get("normalizedHash"),
                     "signature": item.get("signature") or {},
+                    "inheritedOwner": self._compact_inherited_owner(item.get("inheritedOwner")),
                 }
                 for item in (precheck.get("currentChunks") or [])[:5]
                 if isinstance(item, dict)
@@ -254,9 +255,28 @@ class LangChainResponsibilityAgent:
                     "failureReason": candidate.get("failureReason"),
                     "signature": candidate.get("signature"),
                     "historicalSignature": candidate.get("historicalSignature"),
+                    "inheritedOwner": self._compact_inherited_owner(candidate.get("inheritedOwner")),
                 }
             )
         return compact
+
+    def _compact_inherited_owner(self, value: Any) -> dict[str, Any]:
+        if not isinstance(value, dict):
+            return {"found": False}
+        if not value.get("found"):
+            return {"found": False}
+        return {
+            "found": True,
+            "sourceBuildNumber": value.get("sourceBuildNumber"),
+            "sourceBuildUrl": value.get("sourceBuildUrl"),
+            "ownerType": value.get("ownerType"),
+            "ownerName": value.get("ownerName"),
+            "ownerEmail": value.get("ownerEmail"),
+            "ownerCommit": value.get("ownerCommit"),
+            "confidence": value.get("confidence"),
+            "matchType": value.get("matchType"),
+            "relationship": value.get("relationship"),
+        }
 
     def _metadata(self) -> dict[str, Any]:
         return {

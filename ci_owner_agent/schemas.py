@@ -86,7 +86,12 @@ class EvidenceItem(StrictModel):
     source: str | None = None
 
 
-OwnerType = Literal["high_confidence", "medium_confidence", "no_high_confidence_owner"]
+OwnerType = Literal[
+    "high_confidence",
+    "medium_confidence",
+    "no_high_confidence_owner",
+    "inherited_failure_owner",
+]
 
 
 class Owner(StrictModel):
@@ -95,6 +100,31 @@ class Owner(StrictModel):
     email: str | None = None
     commit: str | None = None
     confidence: float
+
+
+ResponsibilityType = Literal[
+    "current_build_owner",
+    "inherited_failure_owner",
+    "no_high_confidence_owner",
+    "unknown",
+]
+
+
+class ResponsibilityItem(StrictModel):
+    failureId: str
+    failureTitle: str
+    failureSignature: str | None = None
+    failureSummary: str | None = None
+    owner: Owner
+    responsibilityType: ResponsibilityType
+    sourceBuildNumber: int | None = None
+    sourceBuildUrl: str | None = None
+    sourceCommit: str | None = None
+    matchType: str | None = None
+    relationship: str | None = None
+    confidence: float
+    reason: str
+    evidenceIds: list[str] = Field(default_factory=list)
 
 
 class CiResponsibilityNotice(StrictModel):
@@ -109,10 +139,33 @@ class CiResponsibilityNotice(StrictModel):
     failureReason: str
     evidence: list[EvidenceItem] = Field(default_factory=list)
     suggestions: list[str] = Field(default_factory=list)
+    responsibilityItems: list[ResponsibilityItem] = Field(default_factory=list)
     hasHighConfidenceOwner: bool
 
     @model_validator(mode="after")
     def enforce_owner_consistency(self) -> "CiResponsibilityNotice":
+        responsible_owners = {
+            (
+                item.owner.name,
+                item.owner.email,
+                item.owner.commit,
+                item.responsibilityType,
+            )
+            for item in self.responsibilityItems
+            if item.owner.type in {"high_confidence", "medium_confidence", "inherited_failure_owner"}
+            and item.owner.name
+            and item.owner.name != "无高可信责任人"
+        }
+        if len(responsible_owners) > 1:
+            self.owner = Owner(
+                type="no_high_confidence_owner",
+                name="无高可信责任人",
+                email=None,
+                commit=None,
+                confidence=0,
+            )
+            self.hasHighConfidenceOwner = False
+            return self
         if self.owner.type == "high_confidence":
             self.hasHighConfidenceOwner = True
         else:

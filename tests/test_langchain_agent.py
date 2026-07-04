@@ -13,7 +13,7 @@ from ci_owner_agent.agents.prompts import (
 )
 from ci_owner_agent.config import load_settings
 from ci_owner_agent.orchestrator import analyze_local
-from ci_owner_agent.schemas import BuildInfo, ChangedFile, CommitInfo, LogTail
+from ci_owner_agent.schemas import BuildInfo, ChangedFile, CiResponsibilityNotice, CommitInfo, LogTail
 from ci_owner_agent.services.git_client import GitClient
 from ci_owner_agent.services.log_provider import LocalFileLogProvider
 from ci_owner_agent.tools.langchain_tools import _limit, build_langchain_tools
@@ -103,6 +103,121 @@ def high_confidence_payload(context):
         "suggestions": [],
         "hasHighConfidenceOwner": True,
     }
+
+
+def test_responsibility_items_keep_inherited_owner_when_top_owner_is_no_owner(repo_cache, sample_repo, logs):
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    payload = high_confidence_payload(context)
+    payload["owner"] = {
+        "type": "no_high_confidence_owner",
+        "name": "无高可信责任人",
+        "email": None,
+        "commit": None,
+        "confidence": 0,
+    }
+    payload["hasHighConfidenceOwner"] = False
+    payload["responsibilityItems"] = [
+        {
+            "failureId": "F1",
+            "failureTitle": "getJsSdkConfig dingtalk ua",
+            "failureSignature": "sig-1",
+            "failureSummary": "same mocha failure as 5104",
+            "owner": {
+                "type": "inherited_failure_owner",
+                "name": "Tang.Tangerine-唐嘉伟",
+                "email": "tang@example.com",
+                "commit": "ab286e5",
+                "confidence": 0.9,
+            },
+            "responsibilityType": "inherited_failure_owner",
+            "sourceBuildNumber": 5104,
+            "sourceBuildUrl": "local://services/fx-code-unittest/5104",
+            "sourceCommit": "ab286e5",
+            "matchType": "signature_exact",
+            "relationship": "very_likely_same_failure",
+            "confidence": 1.0,
+            "reason": "历史持续失败，继承首次失败责任人。",
+            "evidenceIds": ["E1"],
+        }
+    ]
+    notice = CiResponsibilityNotice.model_validate(payload)
+    assert notice.owner.type == "no_high_confidence_owner"
+    assert notice.hasHighConfidenceOwner is False
+    assert notice.responsibilityItems[0].owner.type == "inherited_failure_owner"
+    assert notice.responsibilityItems[0].owner.name == "Tang.Tangerine-唐嘉伟"
+
+
+def test_single_current_build_responsibility_item_keeps_top_high_confidence(repo_cache, sample_repo, logs):
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    payload = high_confidence_payload(context)
+    payload["responsibilityItems"] = [
+        {
+            "failureId": "F1",
+            "failureTitle": "FILE_SIZE_EXCEEDED classify failure",
+            "failureSignature": "sig-current",
+            "failureSummary": "AssertionError FILE_SIZE_EXCEEDED",
+            "owner": payload["owner"],
+            "responsibilityType": "current_build_owner",
+            "sourceCommit": context.head_commit,
+            "confidence": 0.88,
+            "reason": "日志和 diff 互相支撑。",
+            "evidenceIds": ["E1", "E2"],
+        }
+    ]
+    notice = CiResponsibilityNotice.model_validate(payload)
+    assert notice.owner.type == "high_confidence"
+    assert notice.hasHighConfidenceOwner is True
+    assert notice.responsibilityItems[0].responsibilityType == "current_build_owner"
+
+
+def test_multiple_responsibility_item_owners_keep_top_owner_no_high_confidence(repo_cache, sample_repo, logs):
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    payload = high_confidence_payload(context)
+    payload["responsibilityItems"] = [
+        {
+            "failureId": "F1",
+            "failureTitle": "historical failure",
+            "owner": {
+                "type": "inherited_failure_owner",
+                "name": "Tang.Tangerine-唐嘉伟",
+                "email": "tang@example.com",
+                "commit": "ab286e5",
+                "confidence": 0.9,
+            },
+            "responsibilityType": "inherited_failure_owner",
+            "sourceBuildNumber": 5104,
+            "confidence": 1.0,
+            "reason": "历史持续失败。",
+        },
+        {
+            "failureId": "F2",
+            "failureTitle": "new independent failure",
+            "owner": {
+                "type": "high_confidence",
+                "name": "Li Si",
+                "email": "lisi@example.com",
+                "commit": context.head_commit,
+                "confidence": 0.88,
+            },
+            "responsibilityType": "current_build_owner",
+            "sourceCommit": context.head_commit,
+            "confidence": 0.88,
+            "reason": "日志和 diff 支撑新失败。",
+            "evidenceIds": ["E1", "E2"],
+        },
+    ]
+    notice = CiResponsibilityNotice.model_validate(payload)
+    assert notice.owner.type == "no_high_confidence_owner"
+    assert notice.hasHighConfidenceOwner is False
+    assert {item.owner.name for item in notice.responsibilityItems} == {"Tang.Tangerine-唐嘉伟", "Li Si"}
+
+
+def test_old_notice_without_responsibility_items_still_parses(repo_cache, sample_repo, logs):
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    payload = high_confidence_payload(context)
+    notice = CiResponsibilityNotice.model_validate(payload)
+    assert notice.responsibilityItems == []
+    assert notice.owner.type == "high_confidence"
 
 
 def test_langchain_agent_valid_json_high_confidence(monkeypatch, repo_cache, sample_repo, logs):
@@ -417,6 +532,8 @@ def test_prompt_contains_schema_fields():
         "buildNumber",
         "owner",
         "evidence",
+        "responsibilityItems",
+        "inherited_failure_owner",
         "hasHighConfidenceOwner",
         "no_high_confidence_owner",
         "禁止输出额外字段",
@@ -450,7 +567,9 @@ def test_prompt_pre_existing_failure_keeps_schema_owner_type():
     for text in [
         "history_search_similar_failures",
         "pre-existing failure",
-        "必须输出 no_high_confidence_owner",
+        "pre-existing failure 不代表没有责任人",
+        "responsibilityType=inherited_failure_owner",
+        "多个 failure item 可以有多个不同 owner",
         "不要输出 pre_existing_failure",
         "type 只能使用 reasoning 或 build_info",
     ]:
@@ -627,6 +746,18 @@ def test_initial_input_includes_compact_history_precheck(repo_cache, sample_repo
                     "ownerName": "无高可信责任人",
                     "hasHighConfidenceOwner": False,
                     "failureReason": "历史持续失败",
+                    "inheritedOwner": {
+                        "found": True,
+                        "sourceBuildNumber": 5104,
+                        "sourceBuildUrl": "local://services/fx-code-unittest/5104",
+                        "ownerType": "high_confidence",
+                        "ownerName": "Tang.Tangerine-唐嘉伟",
+                        "ownerEmail": "tang@example.com",
+                        "ownerCommit": "ab286e5",
+                        "confidence": 0.9,
+                        "matchType": "signature_exact",
+                        "relationship": "very_likely_same_failure",
+                    },
                 }
             ],
         },
@@ -637,6 +768,9 @@ def test_initial_input_includes_compact_history_precheck(repo_cache, sample_repo
     assert candidate["buildNumber"] == 5076
     assert candidate["matchType"] == "signature_exact"
     assert candidate["relationship"] == "very_likely_same_failure"
+    assert candidate["inheritedOwner"]["found"] is True
+    assert candidate["inheritedOwner"]["sourceBuildNumber"] == 5104
+    assert candidate["inheritedOwner"]["ownerName"] == "Tang.Tangerine-唐嘉伟"
     assert "matchedHistoricalChunk" not in candidate
     assert "matchedCurrentChunk" not in candidate
     assert "notice" not in candidate

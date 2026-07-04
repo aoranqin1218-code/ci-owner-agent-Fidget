@@ -111,6 +111,43 @@ def focused_chunk(text: str, source: str = "local_test_failure_summary", signatu
     }
 
 
+def inherited_notice_payload(context, *, source_build: int = 5104, owner_name: str = "Tang.Tangerine-唐嘉伟") -> dict:
+    payload = high_confidence_payload(context)
+    payload["owner"] = {
+        "type": "no_high_confidence_owner",
+        "name": "无高可信责任人",
+        "email": None,
+        "commit": None,
+        "confidence": 0,
+    }
+    payload["hasHighConfidenceOwner"] = False
+    payload["responsibilityItems"] = [
+        {
+            "failureId": "F1",
+            "failureTitle": "getJsSdkConfig dingtalk ua",
+            "failureSignature": "sig-1",
+            "failureSummary": "same failure as first build",
+            "owner": {
+                "type": "inherited_failure_owner",
+                "name": owner_name,
+                "email": "tang@example.com",
+                "commit": "ab286e5",
+                "confidence": 0.9,
+            },
+            "responsibilityType": "inherited_failure_owner",
+            "sourceBuildNumber": source_build,
+            "sourceBuildUrl": f"local://services/fx-code-unittest/{source_build}",
+            "sourceCommit": "ab286e5",
+            "matchType": "signature_exact",
+            "relationship": "very_likely_same_failure",
+            "confidence": 1.0,
+            "reason": "历史持续失败，继承首次失败责任人。",
+            "evidenceIds": ["E1"],
+        }
+    ]
+    return payload
+
+
 class FocusedProvider:
     def __init__(self, text: str):
         self.text = text
@@ -160,6 +197,9 @@ def test_mongo_history_store_upserts_build_notice_and_chunks(repo_cache, sample_
     assert store.failure_chunks.docs[0]["endLine"] == 20
     assert store.failure_chunks.docs[0]["score"] == 1.0
     assert store.failure_chunks.docs[0]["signatureHash"]
+    assert store.notices.docs[0]["responsibilityItemCount"] == 0
+    assert store.notices.docs[0]["inheritedOwnerCount"] == 0
+    assert store.notices.docs[0]["currentBuildOwnerCount"] == 0
 
 
 def test_mongo_history_store_does_not_save_console_tail_fallback(repo_cache, sample_repo, logs):
@@ -256,6 +296,8 @@ def test_history_search_similar_failures_returns_likely_match(repo_cache, sample
     assert result["candidates"][0]["similarity"] == 1.0
     assert result["candidates"][0]["matchType"] == "signature_exact"
     assert result["candidates"][0]["buildNumber"] == 5075
+    assert result["currentChunks"][0]["inheritedOwner"]["found"] is True
+    assert result["currentChunks"][0]["inheritedOwner"]["sourceBuildNumber"] == 5075
 
 
 def test_history_search_similar_failures_uses_context_failure_summaries(repo_cache, sample_repo, logs):
@@ -279,6 +321,42 @@ def test_history_search_similar_failures_uses_context_failure_summaries(repo_cac
     result = history_search_similar_failures(context, store=store)
     assert result["ok"] is True
     assert result["candidates"][0]["matchType"] == "signature_exact"
+
+
+def test_history_search_traces_inherited_owner_back_to_first_high_confidence(repo_cache, sample_repo, logs):
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    settings = replace(context.settings, history_enabled=True)
+    current_chunk = "FAIL getJsSdkConfig dingtalk ua\nError: UNKNOWN\nExpected: dingtalk\nActual: unknown"
+    context = replace(
+        context,
+        settings=settings,
+        build_number=5106,
+        last_successful_build_number=5103,
+        log_provider=FocusedProvider(current_chunk),
+    )
+    store = make_store()
+    from ci_owner_agent.schemas import CiResponsibilityNotice
+
+    first_payload = high_confidence_payload(context)
+    first_payload["owner"]["name"] = "Tang.Tangerine-唐嘉伟"
+    first_payload["owner"]["email"] = "tang@example.com"
+    first_payload["owner"]["commit"] = "ab286e5"
+    first_notice = CiResponsibilityNotice.model_validate(first_payload)
+    inherited_notice = CiResponsibilityNotice.model_validate(inherited_notice_payload(context, source_build=5104))
+    build_5104 = BuildInfo(job=context.job, buildNumber=5104, result="FAILURE", buildUrl="local://services/fx-code-unittest/5104", branch=context.branch, commit=context.head_commit)
+    build_5105 = BuildInfo(job=context.job, buildNumber=5105, result="FAILURE", buildUrl="local://services/fx-code-unittest/5105", branch=context.branch, commit=context.head_commit)
+    store.save_analysis(build_5104, first_notice, context.base_commit, context.head_commit, 5103, context.base_commit, [focused_chunk(current_chunk)])
+    store.save_analysis(build_5105, inherited_notice, context.base_commit, context.head_commit, 5103, context.base_commit, [focused_chunk(current_chunk)])
+
+    result = history_search_similar_failures(context, store=store)
+    assert result["ok"] is True
+    assert [item["buildNumber"] for item in result["candidates"][:2]] == [5105, 5104]
+    inherited_owner = result["currentChunks"][0]["inheritedOwner"]
+    assert inherited_owner["found"] is True
+    assert inherited_owner["sourceBuildNumber"] == 5104
+    assert inherited_owner["ownerName"] == "Tang.Tangerine-唐嘉伟"
+    assert inherited_owner["ownerType"] == "high_confidence"
+    assert result["candidates"][0]["inheritedOwner"]["sourceBuildNumber"] == 5104
 
 
 def test_history_search_signature_structural_match(repo_cache, sample_repo, logs):

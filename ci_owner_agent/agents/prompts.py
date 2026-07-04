@@ -34,7 +34,7 @@ CI_RESPONSIBILITY_NOTICE_JSON_SCHEMA_PROMPT = """
   "headCommit": "string or null",
   "baseCommit": "string or null",
   "owner": {
-    "type": "high_confidence | medium_confidence | no_high_confidence_owner",
+    "type": "high_confidence | medium_confidence | no_high_confidence_owner | inherited_failure_owner",
     "name": "string",
     "email": "string or null",
     "commit": "string or null",
@@ -48,6 +48,30 @@ CI_RESPONSIBILITY_NOTICE_JSON_SCHEMA_PROMPT = """
       "summary": "string",
       "detail": "string",
       "source": "string or null"
+    }
+  ],
+  "responsibilityItems": [
+    {
+      "failureId": "string",
+      "failureTitle": "string",
+      "failureSignature": "string or null",
+      "failureSummary": "string or null",
+      "owner": {
+        "type": "high_confidence | medium_confidence | no_high_confidence_owner | inherited_failure_owner",
+        "name": "string",
+        "email": "string or null",
+        "commit": "string or null",
+        "confidence": 0.0
+      },
+      "responsibilityType": "current_build_owner | inherited_failure_owner | no_high_confidence_owner | unknown",
+      "sourceBuildNumber": 0,
+      "sourceBuildUrl": "string or null",
+      "sourceCommit": "string or null",
+      "matchType": "string or null",
+      "relationship": "string or null",
+      "confidence": 0.0,
+      "reason": "string",
+      "evidenceIds": ["E1"]
     }
   ],
   "suggestions": ["string"],
@@ -123,15 +147,20 @@ LANGCHAIN_RESPONSIBILITY_AGENT_SYSTEM_PROMPT = f"""你是 CI 测试失败自动�
 2. historyPrecheck / history_search_similar_failures 的结果来自 schemaVersion=3 的 test_failure_summary / failure_signature，不再读取整段 500 行 Test tail 或普通 console 随机 error window。
 3. 如果 historyPrecheck 或 history_search_similar_failures 返回 matchType=signature_exact 或 signature_structural，且历史 buildNumber 小于当前 buildNumber，则当前失败应视为 pre-existing failure。
 4. 如果 historyPrecheck 或 history_search_similar_failures 返回 very_likely_same_failure，且历史 buildNumber 小于当前 buildNumber，则当前失败应视为 pre-existing failure。
-5. 对 pre-existing failure，不得因为当前 build 的 package.json、package-lock、依赖升级、相关模块 diff 或后续提交作者而输出 high_confidence_owner。
-6. pre-existing failure 必须输出 no_high_confidence_owner；failureReason 说明当前失败与 build xxx 的历史失败高度相似，本 build 属于持续失败，不能把后续提交判为首次责任人。
-7. evidence 中加入历史匹配说明，type 只能使用 reasoning 或 build_info，不要输出 schema 不允许的 history 类型。
-8. 如果返回 possible_same_failure，只能作为风险提示；除非当前失败相较历史失败出现新的测试名称、错误类型、断言差异或关键栈位置变化，否则不得输出 high_confidence_owner。
-9. 如果历史工具返回 warning 表示 test failure summaries unavailable，不要把“没有历史候选”解释为“这是首次失败”。只有历史工具成功提取 summary、完成查询且没有 warning 时，才能说未发现历史相似失败。
-10. 如果历史工具未能检查，不得把依赖升级单独作为高可信依据；正确表述是“历史工具未召回候选；但若 summary 不可用，不能证明这是首次失败。”
-11. package.json / package-lock 的依赖升级只能作为辅助证据，不能单独构成高可信责任人。除非该失败是上次成功后首次出现、日志栈明确落在被升级依赖内部、当前 diff 与失败表现存在直接因果链、且没有历史 very_likely_same_failure。
-12. 多个独立失败同时存在时，如果只能对其中一个失败建立证据链，不得把该 owner 作为整个 build 的高可信责任人；应输出 no_high_confidence_owner，或在 evidence / failureReason 中说明仅部分失败可定位。
-13. owner.type 只能使用 high_confidence、medium_confidence、no_high_confidence_owner；不要输出 pre_existing_failure。
+5. pre-existing failure 不代表没有责任人；如果 historyPrecheck 能找到 inheritedOwner，则该 failure item 应输出 responsibilityType=inherited_failure_owner，owner 使用 inheritedOwner。
+6. inherited owner 表示首次失败构建的责任人，不是当前 build 新引入责任人；不得把 inherited owner 误认为当前 build 的顶层 high_confidence owner。
+7. 如果整个 build 只有一个 inherited failure item，顶层 owner 仍建议 no_high_confidence_owner，hasHighConfidenceOwner=false；具体责任人在 responsibilityItems 中表达。
+8. 如果一个 build 有多个独立失败，应分别生成多个 responsibilityItems。对每个新失败继续单独分析 diff / log / TS 证据。
+9. 多个 failure item 可以有多个不同 owner。如果某个 failure item 无法定责，只该 item 输出 no_high_confidence_owner，不影响其他 item。
+10. 如果多个责任人并存，顶层 owner 不要强行选一个，保持 no_high_confidence_owner。
+11. 5095 / 5111 类多失败构建：一个失败是历史持续失败时继承首次失败 owner；另一个失败是当前新失败时继续独立分析并尝试输出 high_confidence / medium_confidence / no_high_confidence_owner。
+12. 不能因为存在一个无法定责的失败，就抹掉另一个失败的责任人；也不能因为一个失败能定责，就把该 owner 当成整个 build 的唯一 owner。
+13. evidence 中加入历史匹配说明，type 只能使用 reasoning 或 build_info，不要输出 schema 不允许的 history 类型。
+14. 如果返回 possible_same_failure，只能作为风险提示；possible_same_failure 不能继承 owner。除非当前失败相较历史失败出现新的测试名称、错误类型、断言差异或关键栈位置变化，否则不得输出 high_confidence_owner。
+15. 如果历史工具返回 warning 表示 test failure summaries unavailable，不要把“没有历史候选”解释为“这是首次失败”。只有历史工具成功提取 summary、完成查询且没有 warning 时，才能说未发现历史相似失败。
+16. 如果历史工具未能检查，不得把依赖升级单独作为高可信依据；正确表述是“历史工具未召回候选；但若 summary 不可用，不能证明这是首次失败。”
+17. package.json / package-lock 的依赖升级只能作为辅助证据，不能单独构成高可信责任人。除非该失败是上次成功后首次出现、日志栈明确落在被升级依赖内部、当前 diff 与失败表现存在直接因果链、且没有历史 very_likely_same_failure。
+18. 顶层 owner.type 只能使用 high_confidence、medium_confidence、no_high_confidence_owner；responsibilityItems[*].owner.type 可以使用 inherited_failure_owner。不要输出 pre_existing_failure。
 
 路径规则：
 1. 不要猜测文件路径。

@@ -75,6 +75,7 @@ def history_search_similar_failures(
         )
 
         candidates: list[dict] = []
+        candidates_by_chunk: dict[int, list[dict]] = {}
         for current in current_chunks:
             for hist in historical:
                 hist_text = str(hist.get("chunkText") or "")
@@ -97,25 +98,39 @@ def history_search_similar_failures(
                 notice_doc = hist.get("noticeDoc") or {}
                 build_doc = hist.get("build") or {}
                 notice = notice_doc.get("notice")
-                candidates.append(
-                    {
-                        "buildNumber": hist.get("buildNumber"),
-                        "headCommit": build_doc.get("headCommit"),
-                        "similarity": round(score, 4),
-                        "relationship": relationship,
-                        "matchType": match_type,
-                        "signature": current.get("signature"),
-                        "historicalSignature": hist_signature,
-                        "ownerType": notice_doc.get("ownerType"),
-                        "ownerName": notice_doc.get("ownerName"),
-                        "ownerCommit": notice_doc.get("ownerCommit"),
-                        "hasHighConfidenceOwner": notice_doc.get("hasHighConfidenceOwner"),
-                        "failureReason": notice_doc.get("failureReason"),
-                        "matchedHistoricalChunk": hist_text[:1000],
-                        "matchedCurrentChunk": current["text"][:1000],
-                        "notice": notice,
-                    }
-                )
+                candidate = {
+                    "currentChunkIndex": current["chunkIndex"],
+                    "buildNumber": hist.get("buildNumber"),
+                    "buildUrl": build_doc.get("buildUrl"),
+                    "headCommit": build_doc.get("headCommit"),
+                    "similarity": round(score, 4),
+                    "relationship": relationship,
+                    "matchType": match_type,
+                    "signature": current.get("signature"),
+                    "historicalSignature": hist_signature,
+                    "ownerType": notice_doc.get("ownerType"),
+                    "ownerName": notice_doc.get("ownerName"),
+                    "ownerEmail": notice_doc.get("ownerEmail"),
+                    "ownerCommit": notice_doc.get("ownerCommit"),
+                    "hasHighConfidenceOwner": notice_doc.get("hasHighConfidenceOwner"),
+                    "failureReason": notice_doc.get("failureReason"),
+                    "matchedHistoricalChunk": hist_text[:1000],
+                    "matchedCurrentChunk": current["text"][:1000],
+                    "notice": notice,
+                    "_noticeDoc": notice_doc,
+                }
+                candidates.append(candidate)
+                candidates_by_chunk.setdefault(current["chunkIndex"], []).append(candidate)
+        inherited_by_chunk = {
+            chunk_index: _find_inherited_owner_for_chunk(chunk_candidates, context.build_number)
+            for chunk_index, chunk_candidates in candidates_by_chunk.items()
+        }
+        for candidate in candidates:
+            candidate["inheritedOwner"] = inherited_by_chunk.get(
+                candidate.get("currentChunkIndex"),
+                {"found": False},
+            )
+            candidate.pop("_noticeDoc", None)
         candidates.sort(
             key=lambda item: (
                 item.get("similarity") or 0,
@@ -136,13 +151,16 @@ def history_search_similar_failures(
                     "normalizedHash": item["normalizedHash"],
                     "preview": item["preview"],
                     "signature": item["signature"],
+                    "inheritedOwner": inherited_by_chunk.get(item["chunkIndex"], {"found": False}),
                 }
                 for item in current_chunks
             ],
             "candidates": candidates[:max_candidates],
             "instruction": (
-                "如果 very_likely_same_failure 出现在当前 build 之前，当前失败应视为历史持续失败，"
-                "不要将后续提交判为首次责任人。"
+                "如果 signature_exact/signature_structural + very_likely_same_failure 出现在当前 build 之前，"
+                "当前 failure item 应视为历史持续失败。若 inheritedOwner.found=true，"
+                "在 responsibilityItems 中使用 inherited_failure_owner 表达首次失败责任人；"
+                "不要将后续提交判为该持续失败的首次责任人。"
             ),
             **(
                 {
@@ -168,3 +186,71 @@ def _signature_structural_match(current: dict, historical: dict) -> bool:
     if not left_message and not right_message:
         return True
     return chunk_similarity(left_message, right_message) >= 0.9
+
+
+def _find_inherited_owner_for_chunk(candidates: list[dict], current_build_number: int) -> dict:
+    eligible = [
+        candidate
+        for candidate in candidates
+        if candidate.get("buildNumber") is not None
+        and candidate.get("buildNumber") < current_build_number
+        and candidate.get("matchType") in {"signature_exact", "signature_structural"}
+        and candidate.get("relationship") == "very_likely_same_failure"
+    ]
+    eligible.sort(key=lambda item: item.get("buildNumber") or 0)
+    for candidate in eligible:
+        source = _high_confidence_source_from_candidate(candidate)
+        if source is None:
+            continue
+        return {
+            "found": True,
+            "sourceBuildNumber": candidate.get("buildNumber"),
+            "sourceBuildUrl": candidate.get("buildUrl"),
+            "ownerType": source.get("ownerType"),
+            "ownerName": source.get("ownerName"),
+            "ownerEmail": source.get("ownerEmail"),
+            "ownerCommit": source.get("ownerCommit"),
+            "confidence": source.get("confidence"),
+            "matchType": candidate.get("matchType"),
+            "relationship": candidate.get("relationship"),
+        }
+    return {"found": False}
+
+
+def _high_confidence_source_from_candidate(candidate: dict) -> dict | None:
+    notice_doc = candidate.get("_noticeDoc") or {}
+    if notice_doc.get("ownerType") == "high_confidence":
+        return {
+            "ownerType": notice_doc.get("ownerType"),
+            "ownerName": notice_doc.get("ownerName"),
+            "ownerEmail": notice_doc.get("ownerEmail"),
+            "ownerCommit": notice_doc.get("ownerCommit"),
+            "confidence": _top_owner_confidence(notice_doc.get("notice")),
+        }
+
+    notice = notice_doc.get("notice")
+    items = notice.get("responsibilityItems") if isinstance(notice, dict) else None
+    if not isinstance(items, list):
+        return None
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        owner = item.get("owner") if isinstance(item.get("owner"), dict) else {}
+        if item.get("responsibilityType") == "current_build_owner" and owner.get("type") == "high_confidence":
+            return {
+                "ownerType": owner.get("type"),
+                "ownerName": owner.get("name"),
+                "ownerEmail": owner.get("email"),
+                "ownerCommit": owner.get("commit"),
+                "confidence": item.get("confidence") or owner.get("confidence"),
+            }
+    return None
+
+
+def _top_owner_confidence(notice: dict | None) -> float | None:
+    if not isinstance(notice, dict):
+        return None
+    owner = notice.get("owner")
+    if not isinstance(owner, dict):
+        return None
+    return owner.get("confidence")

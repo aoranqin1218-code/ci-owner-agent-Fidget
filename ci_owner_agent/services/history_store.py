@@ -77,6 +77,7 @@ class MongoHistoryStore:
             upsert=True,
         )
         notice_doc = notice.model_dump(mode="json")
+        item_summary = _responsibility_item_summary(notice_doc.get("responsibilityItems") or [])
         self.notices.update_one(
             key,
             {
@@ -89,6 +90,7 @@ class MongoHistoryStore:
                     "ownerCommit": notice.owner.commit,
                     "hasHighConfidenceOwner": notice.hasHighConfidenceOwner,
                     "failureReason": notice.failureReason,
+                    **item_summary,
                     "createdAt": now,
                 }
             },
@@ -186,3 +188,31 @@ def _is_allowed_history_chunk(chunk: dict) -> bool:
         and chunk.get("chunkSource") not in DEFAULT_EXCLUDED_CHUNK_SOURCES
         and bool(str(chunk.get("content") or chunk.get("chunkText") or "").strip())
     )
+
+
+def _responsibility_item_summary(items: list[dict]) -> dict[str, Any]:
+    responsible_names: list[str] = []
+    responsible_types: list[str] = []
+    inherited_count = 0
+    current_count = 0
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        responsibility_type = str(item.get("responsibilityType") or "")
+        owner = item.get("owner") if isinstance(item.get("owner"), dict) else {}
+        owner_type = str(owner.get("type") or "")
+        owner_name = str(owner.get("name") or "")
+        if responsibility_type == "inherited_failure_owner":
+            inherited_count += 1
+        if responsibility_type == "current_build_owner":
+            current_count += 1
+        if owner_type != "no_high_confidence_owner" and owner_name and owner_name != "无高可信责任人":
+            responsible_names.append(owner_name)
+            responsible_types.append(owner_type)
+    return {
+        "responsibilityItemCount": len(items),
+        "responsibleOwnerNames": sorted(set(responsible_names)),
+        "responsibleOwnerTypes": sorted(set(responsible_types)),
+        "inheritedOwnerCount": inherited_count,
+        "currentBuildOwnerCount": current_count,
+    }

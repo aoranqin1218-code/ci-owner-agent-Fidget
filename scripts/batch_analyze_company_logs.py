@@ -216,6 +216,51 @@ def extract_history_stats_from_notice(notice: dict[str, Any]) -> dict[str, Any]:
     return empty
 
 
+def extract_responsibility_stats_from_notice(notice: dict[str, Any]) -> dict[str, Any]:
+    items = notice.get("responsibilityItems")
+    if not isinstance(items, list):
+        items = []
+    responsible_owners: list[str] = []
+    inherited_owners: list[str] = []
+    current_build_owners: list[str] = []
+    unresolved = 0
+
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        owner = item.get("owner") if isinstance(item.get("owner"), dict) else {}
+        owner_name = str(owner.get("name") or "")
+        owner_type = str(owner.get("type") or "")
+        responsibility_type = str(item.get("responsibilityType") or "")
+        is_unresolved = (
+            responsibility_type in {"no_high_confidence_owner", "unknown"}
+            or owner_type == "no_high_confidence_owner"
+            or not owner_name
+            or owner_name == "无高可信责任人"
+        )
+        if is_unresolved:
+            unresolved += 1
+            continue
+        if responsibility_type == "inherited_failure_owner":
+            inherited_owners.append(owner_name)
+            source_build = item.get("sourceBuildNumber")
+            suffix = f"inherited from #{source_build}" if source_build is not None else "inherited"
+            responsible_owners.append(f"{owner_name}({suffix})")
+        elif responsibility_type == "current_build_owner":
+            current_build_owners.append(owner_name)
+            responsible_owners.append(f"{owner_name}({owner_type})")
+        else:
+            responsible_owners.append(f"{owner_name}({owner_type or responsibility_type})")
+
+    return {
+        "responsibilityItemCount": len(items),
+        "responsibleOwners": "; ".join(_unique_in_order(responsible_owners)),
+        "inheritedOwners": "; ".join(_unique_in_order(inherited_owners)),
+        "currentBuildOwners": "; ".join(_unique_in_order(current_build_owners)),
+        "unresolvedFailureCount": unresolved,
+    }
+
+
 def _history_stats_from_result(result: dict[str, Any], empty: dict[str, Any]) -> dict[str, Any]:
     if result.get("warning") or result.get("ok") is False:
         return {**empty, "historicalMatchCount": 0}
@@ -256,6 +301,17 @@ def _history_stats_from_text(text: str) -> dict[str, Any] | None:
     if relationship:
         result["topHistoricalRelationship"] = relationship.group(1)
     return result or None
+
+
+def _unique_in_order(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        result.append(value)
+    return result
 
 
 def to_jsonable(obj: Any) -> Any:
@@ -674,6 +730,7 @@ def main() -> int:
                     record["failureReason"] = notice.get("failureReason")
                     record["historyEnabled"] = os.environ.get("CI_AGENT_HISTORY_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
                     record.update(extract_history_stats_from_notice(notice))
+                    record.update(extract_responsibility_stats_from_notice(notice))
                 else:
                     record["noticeParseError"] = True
 
@@ -715,6 +772,11 @@ def main() -> int:
         "topHistoricalMatchSimilarity",
         "topHistoricalMatchType",
         "topHistoricalRelationship",
+        "responsibilityItemCount",
+        "responsibleOwners",
+        "inheritedOwners",
+        "currentBuildOwners",
+        "unresolvedFailureCount",
         "returnCode",
         "ownerType",
         "ownerName",

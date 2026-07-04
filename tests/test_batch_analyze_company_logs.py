@@ -5,6 +5,7 @@ import pytest
 from scripts.batch_analyze_company_logs import (
     build_analyze_command,
     extract_history_stats_from_notice,
+    extract_responsibility_stats_from_notice,
     filter_logs_by_build_range,
     load_logs,
     main,
@@ -162,3 +163,67 @@ def test_extract_history_stats_from_notice_evidence_text():
     assert stats["topHistoricalMatchSimilarity"] == 1.0
     assert stats["topHistoricalMatchType"] == "signature_exact"
     assert stats["topHistoricalRelationship"] == "very_likely_same_failure"
+
+
+def test_extract_responsibility_stats_from_notice_items():
+    stats = extract_responsibility_stats_from_notice(
+        {
+            "responsibilityItems": [
+                {
+                    "failureId": "F1",
+                    "failureTitle": "historical failure",
+                    "owner": {
+                        "type": "inherited_failure_owner",
+                        "name": "Tang.Tangerine-唐嘉伟",
+                        "email": "tang@example.com",
+                        "commit": "ab286e5",
+                        "confidence": 0.9,
+                    },
+                    "responsibilityType": "inherited_failure_owner",
+                    "sourceBuildNumber": 5104,
+                    "confidence": 1.0,
+                    "reason": "历史持续失败。",
+                },
+                {
+                    "failureId": "F2",
+                    "failureTitle": "new failure",
+                    "owner": {
+                        "type": "high_confidence",
+                        "name": "Li Si",
+                        "email": "lisi@example.com",
+                        "commit": "f" * 40,
+                        "confidence": 0.88,
+                    },
+                    "responsibilityType": "current_build_owner",
+                    "confidence": 0.88,
+                    "reason": "新失败可定责。",
+                },
+                {
+                    "failureId": "F3",
+                    "failureTitle": "unknown failure",
+                    "owner": {
+                        "type": "no_high_confidence_owner",
+                        "name": "无高可信责任人",
+                        "email": None,
+                        "commit": None,
+                        "confidence": 0,
+                    },
+                    "responsibilityType": "no_high_confidence_owner",
+                    "confidence": 0,
+                    "reason": "证据不足。",
+                },
+            ]
+        }
+    )
+    assert stats["responsibilityItemCount"] == 3
+    assert stats["responsibleOwners"] == "Tang.Tangerine-唐嘉伟(inherited from #5104); Li Si(high_confidence)"
+    assert stats["inheritedOwners"] == "Tang.Tangerine-唐嘉伟"
+    assert stats["currentBuildOwners"] == "Li Si"
+    assert stats["unresolvedFailureCount"] == 1
+
+
+def test_extract_responsibility_stats_backward_compatible_without_items():
+    stats = extract_responsibility_stats_from_notice({"owner": {"type": "high_confidence", "name": "Zhang San"}})
+    assert stats["responsibilityItemCount"] == 0
+    assert stats["responsibleOwners"] == ""
+    assert stats["unresolvedFailureCount"] == 0
