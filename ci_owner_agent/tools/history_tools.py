@@ -73,6 +73,12 @@ def history_search_similar_failures(
             last_successful_build_number=context.last_successful_build_number,
             lookback_builds=lookbackBuilds,
         )
+        historical_chunk_count_by_build: dict[int, int] = {}
+        for hist in historical:
+            build_number = hist.get("buildNumber")
+            if build_number is None:
+                continue
+            historical_chunk_count_by_build[build_number] = historical_chunk_count_by_build.get(build_number, 0) + 1
 
         candidates: list[dict] = []
         candidates_by_chunk: dict[int, list[dict]] = {}
@@ -103,11 +109,13 @@ def history_search_similar_failures(
                     "buildNumber": hist.get("buildNumber"),
                     "buildUrl": build_doc.get("buildUrl"),
                     "headCommit": build_doc.get("headCommit"),
+                    "historicalBuildFailureChunkCount": historical_chunk_count_by_build.get(hist.get("buildNumber")),
                     "similarity": round(score, 4),
                     "relationship": relationship,
                     "matchType": match_type,
                     "signature": current.get("signature"),
                     "historicalSignature": hist_signature,
+                    "historicalSignatureHash": hist_signature_hash,
                     "ownerType": notice_doc.get("ownerType"),
                     "ownerName": notice_doc.get("ownerName"),
                     "ownerEmail": notice_doc.get("ownerEmail"),
@@ -204,8 +212,8 @@ def _find_inherited_owner_for_chunk(candidates: list[dict], current_build_number
             continue
         return {
             "found": True,
-            "sourceBuildNumber": candidate.get("buildNumber"),
-            "sourceBuildUrl": candidate.get("buildUrl"),
+            "sourceBuildNumber": source.get("sourceBuildNumber") or candidate.get("buildNumber"),
+            "sourceBuildUrl": source.get("sourceBuildUrl") or candidate.get("buildUrl"),
             "ownerType": source.get("ownerType"),
             "ownerName": source.get("ownerName"),
             "ownerEmail": source.get("ownerEmail"),
@@ -219,32 +227,66 @@ def _find_inherited_owner_for_chunk(candidates: list[dict], current_build_number
 
 def _high_confidence_source_from_candidate(candidate: dict) -> dict | None:
     notice_doc = candidate.get("_noticeDoc") or {}
-    if notice_doc.get("ownerType") == "high_confidence":
+    notice = notice_doc.get("notice")
+    items = notice.get("responsibilityItems") if isinstance(notice, dict) else None
+    if isinstance(items, list) and items:
+        for item in items:
+            if not isinstance(item, dict) or not _responsibility_item_matches_candidate(item, candidate):
+                continue
+            owner = item.get("owner") if isinstance(item.get("owner"), dict) else {}
+            if item.get("responsibilityType") == "current_build_owner" and owner.get("type") == "high_confidence":
+                return {
+                    "ownerType": owner.get("type"),
+                    "ownerName": owner.get("name"),
+                    "ownerEmail": owner.get("email"),
+                    "ownerCommit": owner.get("commit"),
+                    "confidence": item.get("confidence") or owner.get("confidence"),
+                }
+            if item.get("responsibilityType") == "inherited_failure_owner" and owner.get("type") == "inherited_failure_owner":
+                return {
+                    "ownerType": owner.get("type"),
+                    "ownerName": owner.get("name"),
+                    "ownerEmail": owner.get("email"),
+                    "ownerCommit": item.get("sourceCommit") or owner.get("commit"),
+                    "confidence": item.get("confidence") or owner.get("confidence"),
+                    "sourceBuildNumber": item.get("sourceBuildNumber"),
+                    "sourceBuildUrl": item.get("sourceBuildUrl"),
+                }
+        return None
+
+    if notice_doc.get("ownerType") == "high_confidence" and _allow_legacy_top_owner_fallback(candidate):
         return {
             "ownerType": notice_doc.get("ownerType"),
             "ownerName": notice_doc.get("ownerName"),
             "ownerEmail": notice_doc.get("ownerEmail"),
             "ownerCommit": notice_doc.get("ownerCommit"),
-            "confidence": _top_owner_confidence(notice_doc.get("notice")),
+            "confidence": _top_owner_confidence(notice),
         }
-
-    notice = notice_doc.get("notice")
-    items = notice.get("responsibilityItems") if isinstance(notice, dict) else None
-    if not isinstance(items, list):
-        return None
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        owner = item.get("owner") if isinstance(item.get("owner"), dict) else {}
-        if item.get("responsibilityType") == "current_build_owner" and owner.get("type") == "high_confidence":
-            return {
-                "ownerType": owner.get("type"),
-                "ownerName": owner.get("name"),
-                "ownerEmail": owner.get("email"),
-                "ownerCommit": owner.get("commit"),
-                "confidence": item.get("confidence") or owner.get("confidence"),
-            }
     return None
+
+
+def _responsibility_item_matches_candidate(item: dict, candidate: dict) -> bool:
+    failure_signature = item.get("failureSignature")
+    if not failure_signature:
+        return False
+    historical_signature = candidate.get("historicalSignature") or {}
+    possible = {
+        historical_signature.get("signatureKey"),
+        candidate.get("historicalSignatureHash"),
+        historical_signature.get("signatureHash"),
+    }
+    return failure_signature in {str(value) for value in possible if value}
+
+
+def _allow_legacy_top_owner_fallback(candidate: dict) -> bool:
+    notice = (candidate.get("_noticeDoc") or {}).get("notice")
+    if isinstance(notice, dict):
+        items = notice.get("responsibilityItems")
+        if isinstance(items, list) and items:
+            return False
+    # Old notices had one top-level owner and no item-to-signature mapping. This fallback is only
+    # safe when the history chunk set for that build appears to contain a single failure.
+    return candidate.get("historicalBuildFailureChunkCount") in {None, 1}
 
 
 def _top_owner_confidence(notice: dict | None) -> float | None:

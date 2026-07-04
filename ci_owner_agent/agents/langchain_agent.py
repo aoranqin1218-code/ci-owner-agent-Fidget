@@ -255,6 +255,7 @@ class LangChainResponsibilityAgent:
                     "failureReason": candidate.get("failureReason"),
                     "signature": candidate.get("signature"),
                     "historicalSignature": candidate.get("historicalSignature"),
+                    "historicalSignatureHash": candidate.get("historicalSignatureHash"),
                     "inheritedOwner": self._compact_inherited_owner(candidate.get("inheritedOwner")),
                 }
             )

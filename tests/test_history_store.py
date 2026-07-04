@@ -148,6 +148,68 @@ def inherited_notice_payload(context, *, source_build: int = 5104, owner_name: s
     return payload
 
 
+def current_owner_item(
+    *,
+    failure_id: str,
+    failure_title: str,
+    failure_signature: str,
+    owner_name: str,
+    owner_email: str,
+    owner_commit: str,
+) -> dict:
+    return {
+        "failureId": failure_id,
+        "failureTitle": failure_title,
+        "failureSignature": failure_signature,
+        "failureSummary": failure_title,
+        "owner": {
+            "type": "high_confidence",
+            "name": owner_name,
+            "email": owner_email,
+            "commit": owner_commit,
+            "confidence": 0.9,
+        },
+        "responsibilityType": "current_build_owner",
+        "sourceCommit": owner_commit,
+        "confidence": 0.9,
+        "reason": "日志和 diff 支撑。",
+        "evidenceIds": ["E1", "E2"],
+    }
+
+
+def inherited_owner_item(
+    *,
+    failure_id: str,
+    failure_title: str,
+    failure_signature: str,
+    owner_name: str,
+    source_build: int,
+    source_commit: str,
+) -> dict:
+    return {
+        "failureId": failure_id,
+        "failureTitle": failure_title,
+        "failureSignature": failure_signature,
+        "failureSummary": failure_title,
+        "owner": {
+            "type": "inherited_failure_owner",
+            "name": owner_name,
+            "email": "tang@example.com",
+            "commit": source_commit,
+            "confidence": 0.9,
+        },
+        "responsibilityType": "inherited_failure_owner",
+        "sourceBuildNumber": source_build,
+        "sourceBuildUrl": f"local://services/fx-code-unittest/{source_build}",
+        "sourceCommit": source_commit,
+        "matchType": "signature_exact",
+        "relationship": "very_likely_same_failure",
+        "confidence": 1.0,
+        "reason": "历史持续失败，继承首次失败责任人。",
+        "evidenceIds": ["E1"],
+    }
+
+
 class FocusedProvider:
     def __init__(self, text: str):
         self.text = text
@@ -357,6 +419,108 @@ def test_history_search_traces_inherited_owner_back_to_first_high_confidence(rep
     assert inherited_owner["ownerName"] == "Tang.Tangerine-唐嘉伟"
     assert inherited_owner["ownerType"] == "high_confidence"
     assert result["candidates"][0]["inheritedOwner"]["sourceBuildNumber"] == 5104
+
+
+def test_history_search_does_not_inherit_unrelated_owner_from_multi_failure_notice(repo_cache, sample_repo, logs):
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    settings = replace(context.settings, history_enabled=True)
+    view_signature = {
+        "testName": "ViewDataQueryServiceTest",
+        "testCase": "view data query",
+        "errorType": "AssertionError",
+        "errorMessage": "view data failed",
+        "testFile": "test/view-data.test.ts",
+        "topStackFile": "server/view-data.ts",
+        "businessStackFiles": ["test/view-data.test.ts"],
+        "signatureKey": "sig-view-data",
+    }
+    quota_signature = {
+        "testName": "QuotaServiceTest",
+        "testCase": "quota exceeded",
+        "errorType": "AssertionError",
+        "errorMessage": "quota failed",
+        "testFile": "test/quota.test.ts",
+        "topStackFile": "server/quota.ts",
+        "businessStackFiles": ["test/quota.test.ts"],
+        "signatureKey": "sig-quota",
+    }
+    view_chunk = focused_chunk("FAIL ViewDataQueryServiceTest\nAssertionError: view data failed", signature=view_signature)
+    quota_chunk = focused_chunk("FAIL QuotaServiceTest\nAssertionError: quota failed", signature=quota_signature)
+    context = replace(
+        context,
+        settings=settings,
+        build_number=5112,
+        last_successful_build_number=5103,
+        failure_summaries={"chunks": [view_chunk]},
+    )
+    store = make_store()
+    from ci_owner_agent.schemas import CiResponsibilityNotice
+
+    tang_payload = high_confidence_payload(context)
+    tang_payload["owner"] = {
+        "type": "high_confidence",
+        "name": "Tang.Tangerine-唐嘉伟",
+        "email": "tang@example.com",
+        "commit": "ab286e5",
+        "confidence": 0.9,
+    }
+    tang_payload["responsibilityItems"] = [
+        current_owner_item(
+            failure_id="F1",
+            failure_title="ViewDataQueryServiceTest",
+            failure_signature="sig-view-data",
+            owner_name="Tang.Tangerine-唐嘉伟",
+            owner_email="tang@example.com",
+            owner_commit="ab286e5",
+        )
+    ]
+    tang_notice = CiResponsibilityNotice.model_validate(tang_payload)
+
+    multi_payload = high_confidence_payload(context)
+    multi_payload["owner"] = {
+        "type": "no_high_confidence_owner",
+        "name": "无高可信责任人",
+        "email": None,
+        "commit": None,
+        "confidence": 0,
+    }
+    multi_payload["hasHighConfidenceOwner"] = False
+    multi_payload["responsibilityItems"] = [
+        inherited_owner_item(
+            failure_id="F1",
+            failure_title="ViewDataQueryServiceTest",
+            failure_signature="sig-view-data",
+            owner_name="Tang.Tangerine-唐嘉伟",
+            source_build=5104,
+            source_commit="ab286e5",
+        ),
+        current_owner_item(
+            failure_id="F2",
+            failure_title="QuotaServiceTest",
+            failure_signature="sig-quota",
+            owner_name="Li Si",
+            owner_email="lisi@example.com",
+            owner_commit="f" * 40,
+        ),
+    ]
+    multi_notice = CiResponsibilityNotice.model_validate(multi_payload)
+    build_5104 = BuildInfo(job=context.job, buildNumber=5104, result="FAILURE", buildUrl="local://services/fx-code-unittest/5104", branch=context.branch, commit="ab286e5")
+    build_5111 = BuildInfo(job=context.job, buildNumber=5111, result="FAILURE", buildUrl="local://services/fx-code-unittest/5111", branch=context.branch, commit=context.head_commit)
+    store.save_analysis(build_5104, tang_notice, context.base_commit, "ab286e5", 5103, context.base_commit, [view_chunk])
+    store.save_analysis(build_5111, multi_notice, context.base_commit, context.head_commit, 5103, context.base_commit, [view_chunk, quota_chunk])
+
+    result = history_search_similar_failures(context, store=store)
+    assert result["ok"] is True
+    inherited_owner = result["currentChunks"][0]["inheritedOwner"]
+    assert inherited_owner["found"] is True
+    assert inherited_owner["sourceBuildNumber"] == 5104
+    assert inherited_owner["ownerName"] == "Tang.Tangerine-唐嘉伟"
+    assert inherited_owner["ownerName"] != "Li Si"
+    matched_5111 = next(candidate for candidate in result["candidates"] if candidate["buildNumber"] == 5111)
+    assert matched_5111["historicalSignature"]["signatureKey"] == "sig-view-data"
+    assert matched_5111["historicalSignatureHash"] == view_chunk["signatureHash"]
+    assert matched_5111["inheritedOwner"]["ownerName"] == "Tang.Tangerine-唐嘉伟"
+    assert "Li Si" not in str(matched_5111["inheritedOwner"])
 
 
 def test_history_search_signature_structural_match(repo_cache, sample_repo, logs):
