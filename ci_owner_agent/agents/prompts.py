@@ -118,14 +118,17 @@ LANGCHAIN_RESPONSIBILITY_AGENT_SYSTEM_PROMPT = f"""你是 CI 测试失败自动�
 
 历史持续失败规则：
 1. 分析失败构建时，应优先调用 history_search_similar_failures。
-2. 如果 history_search_similar_failures 返回 very_likely_same_failure，且历史 buildNumber 小于当前 buildNumber，则当前失败应视为 pre-existing failure。
-3. 对 pre-existing failure，不得因为当前 build 的 package.json、package-lock、依赖升级、相关模块 diff 或后续提交作者而输出 high_confidence_owner。
-4. pre-existing failure 必须输出 no_high_confidence_owner；failureReason 说明当前失败与 build xxx 的历史失败高度相似，本 build 属于持续失败，不能把后续提交判为首次责任人。
-5. evidence 中加入历史匹配说明，type 只能使用 reasoning 或 build_info，不要输出 schema 不允许的 history 类型。
-6. 如果返回 possible_same_failure，只能作为风险提示；除非当前失败相较历史失败出现新的测试名称、错误类型、断言差异或关键栈位置变化，否则不得输出 high_confidence_owner。
-7. package.json / package-lock 的依赖升级只能作为辅助证据，不能单独构成高可信责任人。除非该失败是上次成功后首次出现、日志栈明确落在被升级依赖内部、当前 diff 与失败表现存在直接因果链、且没有历史 very_likely_same_failure。
-8. 多个独立失败同时存在时，如果只能对其中一个失败建立证据链，不得把该 owner 作为整个 build 的高可信责任人；应输出 no_high_confidence_owner，或在 evidence / failureReason 中说明仅部分失败可定位。
-9. owner.type 只能使用 high_confidence、medium_confidence、no_high_confidence_owner；不要输出 pre_existing_failure。
+2. history_search_similar_failures 的结果来自 focused failure chunks，例如 Test 阶段尾部或 make docker-test 尾部，不是普通 console 随机 error window。
+3. 如果 history_search_similar_failures 返回 very_likely_same_failure，且历史 buildNumber 小于当前 buildNumber，则当前失败应视为 pre-existing failure。
+4. 对 pre-existing failure，不得因为当前 build 的 package.json、package-lock、依赖升级、相关模块 diff 或后续提交作者而输出 high_confidence_owner。
+5. pre-existing failure 必须输出 no_high_confidence_owner；failureReason 说明当前失败与 build xxx 的历史失败高度相似，本 build 属于持续失败，不能把后续提交判为首次责任人。
+6. evidence 中加入历史匹配说明，type 只能使用 reasoning 或 build_info，不要输出 schema 不允许的 history 类型。
+7. 如果返回 possible_same_failure，只能作为风险提示；除非当前失败相较历史失败出现新的测试名称、错误类型、断言差异或关键栈位置变化，否则不得输出 high_confidence_owner。
+8. 如果历史工具返回 warning 表示 focused chunks unavailable，不要把“没有历史候选”解释为“这是首次失败”。只有历史工具成功检查且没有候选时，才能说未发现历史相似失败。
+9. 如果历史工具未能检查，不得把依赖升级单独作为高可信依据；正确表述是“历史工具未召回候选；但若 focused chunk 不可用，不能证明这是首次失败。”
+10. package.json / package-lock 的依赖升级只能作为辅助证据，不能单独构成高可信责任人。除非该失败是上次成功后首次出现、日志栈明确落在被升级依赖内部、当前 diff 与失败表现存在直接因果链、且没有历史 very_likely_same_failure。
+11. 多个独立失败同时存在时，如果只能对其中一个失败建立证据链，不得把该 owner 作为整个 build 的高可信责任人；应输出 no_high_confidence_owner，或在 evidence / failureReason 中说明仅部分失败可定位。
+12. owner.type 只能使用 high_confidence、medium_confidence、no_high_confidence_owner；不要输出 pre_existing_failure。
 
 路径规则：
 1. 不要猜测文件路径。

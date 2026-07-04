@@ -8,6 +8,16 @@ from ci_owner_agent.config import Settings
 from ci_owner_agent.schemas import BuildInfo, CiResponsibilityNotice
 from ci_owner_agent.services.failure_similarity import hash_normalized_chunk, normalize_error_chunk
 
+HISTORY_CHUNK_SCHEMA_VERSION = 2
+ALLOWED_HISTORY_CHUNK_SOURCES = {
+    "local_test_stage_tail",
+    "local_make_docker_test_tail",
+    "jenkins_test_stage_tail",
+    "jenkins_failed_stage_log",
+    "notice_failure_summary",
+}
+DEFAULT_EXCLUDED_CHUNK_SOURCES = {"local_console_tail_fallback"}
+
 
 class MongoHistoryStore:
     def __init__(self, uri: str, db_name: str, client: Any | None = None) -> None:
@@ -85,7 +95,8 @@ class MongoHistoryStore:
             upsert=True,
         )
         self.failure_chunks.delete_many(key)
-        for idx, chunk in enumerate(error_chunks):
+        chunks_to_save = [chunk for chunk in error_chunks if _is_allowed_history_chunk(chunk)]
+        for idx, chunk in enumerate(chunks_to_save):
             text = str(chunk.get("content") or chunk.get("chunkText") or "")
             normalized = normalize_error_chunk(text)
             self.failure_chunks.update_one(
@@ -94,6 +105,14 @@ class MongoHistoryStore:
                     "$set": {
                         **key,
                         "chunkIndex": idx,
+                        "schemaVersion": int(chunk.get("schemaVersion") or HISTORY_CHUNK_SCHEMA_VERSION),
+                        "chunkSource": chunk.get("chunkSource"),
+                        "stageName": chunk.get("stageName"),
+                        "stepName": chunk.get("stepName"),
+                        "anchorType": chunk.get("anchorType"),
+                        "startLine": chunk.get("startLine"),
+                        "endLine": chunk.get("endLine"),
+                        "score": chunk.get("score"),
                         "chunkText": text,
                         "normalizedChunk": normalized,
                         "chunkHash": hash_normalized_chunk(text),
@@ -102,7 +121,7 @@ class MongoHistoryStore:
                 },
                 upsert=True,
             )
-        return {"ok": True, "chunksSaved": len(error_chunks)}
+        return {"ok": True, "chunksSaved": len(chunks_to_save), "inputChunks": len(error_chunks)}
 
     def find_historical_failure_chunks(
         self,
@@ -127,7 +146,12 @@ class MongoHistoryStore:
         if not build_numbers:
             return []
 
-        chunk_query: dict[str, Any] = {"job": job, "buildNumber": {"$in": build_numbers}}
+        chunk_query: dict[str, Any] = {
+            "job": job,
+            "buildNumber": {"$in": build_numbers},
+            "schemaVersion": {"$gte": HISTORY_CHUNK_SCHEMA_VERSION},
+            "chunkSource": {"$in": sorted(ALLOWED_HISTORY_CHUNK_SOURCES)},
+        }
         if branch is not None:
             chunk_query["branch"] = {"$in": [branch, None]}
         chunks = list(self.failure_chunks.find(chunk_query))
@@ -151,3 +175,13 @@ def get_history_store(settings: Settings) -> MongoHistoryStore | None:
     except Exception as exc:
         print(f"history store unavailable: {exc}", file=sys.stderr)
         return None
+
+
+def _is_allowed_history_chunk(chunk: dict) -> bool:
+    return (
+        int(chunk.get("schemaVersion") or HISTORY_CHUNK_SCHEMA_VERSION) >= HISTORY_CHUNK_SCHEMA_VERSION
+        and chunk.get("chunkSource") in ALLOWED_HISTORY_CHUNK_SOURCES
+        and chunk.get("chunkSource") not in DEFAULT_EXCLUDED_CHUNK_SOURCES
+        and bool(str(chunk.get("content") or chunk.get("chunkText") or "").strip())
+    )
+

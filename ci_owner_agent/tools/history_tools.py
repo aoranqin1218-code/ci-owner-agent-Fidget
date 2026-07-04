@@ -9,6 +9,14 @@ from ci_owner_agent.services.failure_similarity import (
 )
 from ci_owner_agent.services.history_store import MongoHistoryStore, get_history_store
 
+CURRENT_ALLOWED_CHUNK_SOURCES = {
+    "local_test_stage_tail",
+    "local_make_docker_test_tail",
+    "jenkins_test_stage_tail",
+    "jenkins_failed_stage_log",
+    "notice_failure_summary",
+}
+
 
 def history_search_similar_failures(
     context: AgentRuntimeContext,
@@ -23,7 +31,26 @@ def history_search_similar_failures(
         if history_store is None:
             return {"ok": False, "historyEnabled": False, "error": "history store disabled or unavailable"}
 
-        current_chunks_raw = context.log_provider.find_error_chunks(chunk_lines=200, max_chunks=5).get("chunks", [])
+        focused = context.log_provider.find_focused_failure_chunks(
+            tail_lines=context.settings.failure_chunk_tail_lines,
+            max_chunks=3,
+        )
+        current_chunks_raw = [
+            chunk
+            for chunk in focused.get("chunks", [])
+            if chunk.get("schemaVersion", 2) >= 2 and chunk.get("chunkSource") in CURRENT_ALLOWED_CHUNK_SOURCES
+        ]
+        if not current_chunks_raw:
+            return {
+                "ok": True,
+                "historyEnabled": True,
+                "currentBuild": context.build_number,
+                "lastSuccessfulBuildNumber": context.last_successful_build_number,
+                "lastSuccessfulBuildNumberMissing": context.last_successful_build_number is None,
+                "currentChunks": [],
+                "candidates": [],
+                "warning": "focused failure chunks unavailable; history similarity skipped",
+            }
         current_chunks = [
             {
                 "chunkIndex": idx,

@@ -41,6 +41,7 @@ CI_AGENT_HISTORY_ENABLED=false
 CI_AGENT_HISTORY_MONGO_URI=mongodb://localhost:27017
 CI_AGENT_HISTORY_MONGO_DB=ci_owner_agent
 CI_AGENT_HISTORY_MAX_CANDIDATES=5
+CI_AGENT_FAILURE_CHUNK_TAIL_LINES=500
 ```
 
 `CI_AGENT_MODEL_PROVIDER=fake` is the default offline test mode. It uses the rule-based MVP agent only to verify the toolchain and tests; it is not the formal analysis mode.
@@ -86,7 +87,22 @@ LANGSMITH_PROJECT=ci-owner-agent-dev
 
 Tracing is enabled only when both `LANGSMITH_TRACING=true` and `LANGSMITH_API_KEY` are present. Keys are not printed.
 
-Historical failure recall is optional and disabled by default. When `CI_AGENT_HISTORY_ENABLED=true`, the agent stores build metadata, notices, and normalized error chunks in MongoDB, then exposes `history_search_similar_failures` to detect pre-existing failures. MongoDB write/search failures do not block analysis.
+Historical failure recall is optional and disabled by default. When `CI_AGENT_HISTORY_ENABLED=true`, the agent stores build metadata, notices, and normalized focused failure chunks in MongoDB, then exposes `history_search_similar_failures` to detect pre-existing failures. MongoDB write/search failures do not block analysis.
+
+MongoDB history chunks use focused failure sources only: local/Jenkins Test stage tail, `make docker-test` tail, failed stage logs, or future notice summaries. The older generic `find_error_chunks` windows are still available to the Agent for log exploration, but are not written to `ci_failure_chunks` and are ignored by history search. `CI_AGENT_FAILURE_CHUNK_TAIL_LINES` controls the Test stage tail size and defaults to 500 lines.
+
+If old noisy chunks were written during development, clear them manually:
+
+```bash
+python scripts/clear_history_failure_chunks.py
+```
+
+Manual Mongo equivalent:
+
+```javascript
+use ci_owner_agent
+db.ci_failure_chunks.deleteMany({})
+```
 
 ## Local Repo Cache
 
