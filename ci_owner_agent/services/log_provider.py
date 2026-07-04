@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Literal
 
 from ci_owner_agent.schemas import LogTail
-from ci_owner_agent.services.command_runner import truncate_text
+from ci_owner_agent.services.command_runner import truncate_tail_text, truncate_text
 
 FinalStatus = Literal["SUCCESS", "FAILURE", "ABORTED", "UNKNOWN"]
 FINAL_STATUS_RE = re.compile(r"Finished:\s*(SUCCESS|FAILURE|ABORTED)\b", re.IGNORECASE)
@@ -204,7 +204,7 @@ class TextLogProvider(LogProvider):
             }
 
         start = max(0, len(all_lines) - count)
-        content, truncated = truncate_text("\n".join(all_lines[start:]), self.max_output_chars)
+        content, truncated = truncate_tail_text("\n".join(all_lines[start:]), self.max_output_chars)
         return {
             "chunks": [
                 {
@@ -239,7 +239,7 @@ class TextLogProvider(LogProvider):
         segment = all_lines[start_idx : end_idx + 1]
         tail_start = max(0, len(segment) - tail_lines)
         selected = segment[tail_start:]
-        content, text_truncated = truncate_text("\n".join(selected), self.max_output_chars)
+        content, text_truncated = truncate_tail_text("\n".join(selected), self.max_output_chars)
         return {
             "chunkIndex": 0,
             "schemaVersion": 2,
@@ -294,6 +294,8 @@ class JenkinsLogProvider(TextLogProvider):
         for chunk in result.get("chunks", []):
             if chunk.get("chunkSource") == "local_test_stage_tail":
                 chunk["chunkSource"] = "jenkins_test_stage_tail"
+                chunk["stageName"] = "Test"
             elif chunk.get("chunkSource") == "local_make_docker_test_tail":
                 chunk["chunkSource"] = "jenkins_test_stage_tail"
+                chunk["stageName"] = "Test"
         return result
