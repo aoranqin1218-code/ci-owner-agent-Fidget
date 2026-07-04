@@ -226,6 +226,8 @@ def test_mongo_history_store_replaces_old_chunks_when_new_run_has_fewer(repo_cac
 
 def test_history_search_similar_failures_disabled(repo_cache, sample_repo, logs):
     context = make_lc_context(repo_cache, sample_repo, logs)
+    settings = replace(context.settings, history_enabled=False)
+    context = replace(context, settings=settings)
     result = history_search_similar_failures(context)
     assert result["ok"] is False
     assert result["historyEnabled"] is False
