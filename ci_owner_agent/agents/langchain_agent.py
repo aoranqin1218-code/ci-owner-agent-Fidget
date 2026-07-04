@@ -234,7 +234,7 @@ class LangChainResponsibilityAgent:
             ],
             "candidates": [],
             "instruction": (
-                "如果 candidates 或 currentChunks 中存在 signature_exact / signature_structural + very_likely_same_failure，"
+                "如果 candidates 或 currentChunks 中存在 signature_exact / signature_structural + very_likely_same_failure或 currentChunks[*].inheritedOwner.found=true，"
                 "且历史 buildNumber 小于当前 build，则当前 failure item 属于历史持续失败。"
                 "如果 inheritedOwner.found=true，应在 responsibilityItems 中输出 responsibilityType=inherited_failure_owner，"
                 "owner 使用 inheritedOwner；顶层 owner 不要因为 inherited owner 而输出 high_confidence，"
