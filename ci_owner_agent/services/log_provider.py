@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import hashlib
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Literal
@@ -26,6 +27,19 @@ ERROR_TERMS = [
     "cannot read",
     "timeout",
     "stack trace",
+]
+FAILURE_BLOCK_RE = re.compile(r"^\s*(\d+)\)\s+(.+?)\s*$")
+ERROR_LINE_RE = re.compile(r"\b(AssertionError|Error|TypeError|ReferenceError):\s*(.*)")
+PATH_RE = re.compile(r"((?:node_modules/|test/|server/)[^\s)]+?\.(?:ts|tsx|js|jsx))(?:[:]\d+(?::\d+)?)?")
+FOOTER_TERMS = [
+    "#",
+    "------",
+    "Dockerfile:",
+    "ERROR: failed to solve:",
+    "exit status 1",
+    "make: ***",
+    "[Pipeline] }",
+    "[Pipeline] // stage",
 ]
 
 
@@ -65,6 +79,10 @@ class LogProvider(ABC):
 
     @abstractmethod
     def find_focused_failure_chunks(self, tail_lines: int = 500, max_chunks: int = 3) -> dict:
+        raise NotImplementedError
+
+    @abstractmethod
+    def find_test_failure_summaries(self, tail_lines: int = 500, max_chunks: int = 5) -> dict:
         raise NotImplementedError
 
     @abstractmethod
@@ -224,6 +242,51 @@ class TextLogProvider(LogProvider):
             "warning": "focused Test stage and make docker-test anchors unavailable; returned console tail fallback",
         }
 
+    def find_test_failure_summaries(self, tail_lines: int = 500, max_chunks: int = 5) -> dict:
+        focused = self.find_focused_failure_chunks(tail_lines=tail_lines, max_chunks=1)
+        focused_chunks = focused.get("chunks", [])
+        if not focused_chunks:
+            return {"chunks": [], "warning": "focused failure chunks unavailable"}
+        focused_chunk = focused_chunks[0]
+        focused_source = focused_chunk.get("chunkSource")
+        if focused_source == "local_console_tail_fallback":
+            return {"chunks": [], "warning": "test failure summaries unavailable; focused chunk is console tail fallback"}
+        lines = str(focused_chunk.get("content") or "").splitlines()
+        starts = [idx for idx, line in enumerate(lines) if FAILURE_BLOCK_RE.match(line)]
+        if not starts:
+            return {"chunks": [], "warning": "test failure summaries unavailable; no mocha failure blocks found"}
+
+        chunk_source = _summary_source_for_focused_source(str(focused_source or ""))
+        chunks = []
+        for chunk_index, start in enumerate(starts[:max_chunks]):
+            end = starts[chunk_index + 1] if chunk_index + 1 < len(starts) else len(lines)
+            end = _trim_failure_block_end(lines, start, end)
+            block_lines = lines[start:end][:120]
+            content = "\n".join(block_lines)
+            if len(content) > 12000:
+                content = content[:12000]
+            signature = _extract_failure_signature(content)
+            start_line = (focused_chunk.get("startLine") or 1) + start
+            end_line = start_line + max(0, len(block_lines) - 1)
+            chunks.append(
+                {
+                    "chunkIndex": chunk_index,
+                    "schemaVersion": 3,
+                    "chunkSource": chunk_source,
+                    "stageName": focused_chunk.get("stageName"),
+                    "stepName": focused_chunk.get("stepName"),
+                    "anchorType": "mocha_failure_block",
+                    "startLine": start_line,
+                    "endLine": end_line,
+                    "score": 1.0,
+                    "content": content,
+                    "truncated": end - start > len(block_lines),
+                    "signature": signature,
+                    "signatureHash": _signature_hash(signature),
+                }
+            )
+        return {"chunks": chunks}
+
     def _focused_chunk(
         self,
         all_lines: list[str],
@@ -256,6 +319,101 @@ class TextLogProvider(LogProvider):
 
     def detect_final_status(self) -> FinalStatus:
         return log_detect_final_status(self._content())
+
+
+def _summary_source_for_focused_source(source: str) -> str:
+    if source == "local_make_docker_test_tail":
+        return "local_make_docker_test_failure_summary"
+    if source == "jenkins_test_stage_tail":
+        return "jenkins_test_failure_summary"
+    if source == "jenkins_failed_stage_log":
+        return "jenkins_failed_stage_failure_summary"
+    return "local_test_failure_summary"
+
+
+def _trim_failure_block_end(lines: list[str], start: int, end: int) -> int:
+    for idx in range(start + 1, end):
+        stripped = lines[idx].strip()
+        if any(stripped.startswith(term) for term in FOOTER_TERMS):
+            return idx
+    return end
+
+
+def _extract_failure_signature(content: str) -> dict:
+    lines = content.splitlines()
+    first = FAILURE_BLOCK_RE.match(lines[0] if lines else "")
+    title = first.group(2).strip() if first else ""
+    test_name, test_case = _split_test_title(title)
+    for line in lines[1:]:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if ERROR_LINE_RE.search(stripped):
+            break
+        if not stripped.startswith(("at ", "+", "-", "expected", "actual")):
+            test_case = test_case or stripped.rstrip(":")
+            break
+
+    error_type = None
+    error_message = ""
+    for line in lines:
+        match = ERROR_LINE_RE.search(line)
+        if match:
+            error_type = match.group(1)
+            error_message = match.group(2).strip()
+            break
+
+    files = []
+    for line in lines:
+        for match in PATH_RE.finditer(line.replace("\\", "/")):
+            path = _clean_stack_path(match.group(1))
+            if path not in files:
+                files.append(path)
+    test_file = next((path for path in files if path.startswith("test/") or "/test/" in path), None)
+    top_stack_file = files[0] if files else None
+    normalized_error = _stable_error_message(error_message)
+    signature_key = "|".join(
+        [
+            test_name or "",
+            test_case or "",
+            error_type or "",
+            normalized_error,
+            test_file or "",
+            top_stack_file or "",
+        ]
+    )
+    return {
+        "testName": test_name,
+        "testCase": test_case,
+        "errorType": error_type,
+        "errorMessage": normalized_error,
+        "testFile": test_file,
+        "topStackFile": top_stack_file,
+        "businessStackFiles": files,
+        "signatureKey": signature_key,
+    }
+
+
+def _split_test_title(title: str) -> tuple[str, str | None]:
+    cleaned = title.strip().rstrip(":")
+    parts = cleaned.split(maxsplit=1)
+    if len(parts) == 2 and (parts[0].endswith("Test") or parts[0].endswith("Spec")):
+        return parts[0], parts[1].rstrip(":")
+    return cleaned, None
+
+
+def _clean_stack_path(path: str) -> str:
+    return re.sub(r":\d+(?::\d+)?$", "", path.replace("\\", "/")).strip()
+
+
+def _stable_error_message(message: str) -> str:
+    from ci_owner_agent.services.failure_similarity import normalize_error_chunk
+
+    return normalize_error_chunk(message)[:200]
+
+
+def _signature_hash(signature: dict) -> str:
+    return hashlib.sha256(str(signature.get("signatureKey") or "").encode("utf-8")).hexdigest()
 
 
 class LocalFileLogProvider(TextLogProvider):

@@ -4,6 +4,8 @@ from ci_owner_agent.config import load_settings
 
 
 def main() -> int:
+    # Run manually after switching history chunks to schemaVersion=3 test_failure_summary data.
+    # This deletes old schemaVersion=2 focused tail chunks and earlier noisy windows.
     settings = load_settings()
     try:
         from pymongo import MongoClient

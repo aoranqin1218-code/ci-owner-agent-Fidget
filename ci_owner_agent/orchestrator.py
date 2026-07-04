@@ -181,9 +181,9 @@ def _save_history(
     if store is None:
         return
     try:
-        chunks = log_provider.find_focused_failure_chunks(
+        chunks = log_provider.find_test_failure_summaries(
             tail_lines=settings.failure_chunk_tail_lines,
-            max_chunks=3,
+            max_chunks=5,
         ).get("chunks", [])
         store.save_analysis(
             build_info=build_info,

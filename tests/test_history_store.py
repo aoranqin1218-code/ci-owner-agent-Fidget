@@ -83,17 +83,31 @@ def make_store():
     return MongoHistoryStore("mongodb://fake", "ci_owner_agent_test", client=FakeClient())
 
 
-def focused_chunk(text: str, source: str = "local_test_stage_tail") -> dict:
+def focused_chunk(text: str, source: str = "local_test_failure_summary", signature: dict | None = None) -> dict:
+    signature = signature or {
+        "testName": "getJsSdkConfig dingtalk ua",
+        "testCase": "dingtalk ua dingtalk corpId",
+        "errorType": "Error",
+        "errorMessage": "unknown",
+        "testFile": "test/server/services/integrate/integrate.service.test.ts",
+        "topStackFile": "node_modules/@fx/corp-core/src/errors/Factory.ts",
+        "businessStackFiles": ["test/server/services/integrate/integrate.service.test.ts"],
+        "signatureKey": "getJsSdkConfig dingtalk ua|dingtalk ua dingtalk corpId|Error|unknown|test/server/services/integrate/integrate.service.test.ts|node_modules/@fx/corp-core/src/errors/Factory.ts",
+    }
+    import hashlib
+
     return {
-        "schemaVersion": 2,
+        "schemaVersion": 3,
         "chunkSource": source,
         "stageName": "Test",
         "stepName": "make docker-test",
-        "anchorType": "jenkins_test_stage",
+        "anchorType": "mocha_failure_block",
         "startLine": 10,
         "endLine": 20,
         "score": 1.0,
         "content": text,
+        "signature": signature,
+        "signatureHash": hashlib.sha256(signature["signatureKey"].encode("utf-8")).hexdigest(),
     }
 
 
@@ -102,6 +116,9 @@ class FocusedProvider:
         self.text = text
 
     def find_focused_failure_chunks(self, tail_lines=500, max_chunks=3):
+        return {"chunks": [focused_chunk(self.text)]}
+
+    def find_test_failure_summaries(self, tail_lines=500, max_chunks=5):
         return {"chunks": [focused_chunk(self.text)]}
 
 
@@ -129,14 +146,15 @@ def test_mongo_history_store_upserts_build_notice_and_chunks(repo_cache, sample_
     assert len(store.notices.docs) == 1
     assert len(store.failure_chunks.docs) == 1
     assert store.failure_chunks.docs[0]["normalizedChunk"]
-    assert store.failure_chunks.docs[0]["schemaVersion"] == 2
-    assert store.failure_chunks.docs[0]["chunkSource"] == "local_test_stage_tail"
+    assert store.failure_chunks.docs[0]["schemaVersion"] == 3
+    assert store.failure_chunks.docs[0]["chunkSource"] == "local_test_failure_summary"
     assert store.failure_chunks.docs[0]["stageName"] == "Test"
     assert store.failure_chunks.docs[0]["stepName"] == "make docker-test"
-    assert store.failure_chunks.docs[0]["anchorType"] == "jenkins_test_stage"
+    assert store.failure_chunks.docs[0]["anchorType"] == "mocha_failure_block"
     assert store.failure_chunks.docs[0]["startLine"] == 10
     assert store.failure_chunks.docs[0]["endLine"] == 20
     assert store.failure_chunks.docs[0]["score"] == 1.0
+    assert store.failure_chunks.docs[0]["signatureHash"]
 
 
 def test_mongo_history_store_does_not_save_console_tail_fallback(repo_cache, sample_repo, logs):
@@ -228,7 +246,32 @@ def test_history_search_similar_failures_returns_likely_match(repo_cache, sample
     result = history_search_similar_failures(context, store=store)
     assert result["ok"] is True
     assert result["candidates"][0]["relationship"] == "very_likely_same_failure"
+    assert result["candidates"][0]["similarity"] == 1.0
+    assert result["candidates"][0]["matchType"] == "signature_exact"
     assert result["candidates"][0]["buildNumber"] == 5075
+
+
+def test_history_search_signature_structural_match(repo_cache, sample_repo, logs):
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    settings = replace(context.settings, history_enabled=True)
+    current_chunk = "FAIL getJsSdkConfig dingtalk ua\nError: UNKNOWN\nExpected: dingtalk\nActual: unknown"
+    context = replace(
+        context,
+        settings=settings,
+        build_number=5076,
+        last_successful_build_number=5068,
+        log_provider=FocusedProvider(current_chunk),
+    )
+    store = make_store()
+    from ci_owner_agent.schemas import CiResponsibilityNotice
+
+    notice = CiResponsibilityNotice.model_validate(high_confidence_payload(context))
+    build_info = BuildInfo(job=context.job, buildNumber=5075, result="FAILURE", buildUrl=context.build_url, branch=context.branch, commit=context.head_commit)
+    store.save_analysis(build_info, notice, context.base_commit, context.head_commit, 5068, context.base_commit, [focused_chunk(current_chunk + "\nnoise")])
+    store.failure_chunks.docs[0]["signatureHash"] = "different-hash"
+    result = history_search_similar_failures(context, store=store)
+    assert result["candidates"][0]["relationship"] == "very_likely_same_failure"
+    assert result["candidates"][0]["matchType"] == "signature_structural"
 
 
 def test_history_search_ignores_legacy_and_fallback_chunks(repo_cache, sample_repo, logs):
@@ -251,11 +294,12 @@ def test_history_search_ignores_legacy_and_fallback_chunks(repo_cache, sample_re
     key = {"job": context.job, "branch": context.branch, "buildNumber": 5074}
     store.builds.update_one(key, {"$set": {**key, "result": "FAILURE", "headCommit": context.head_commit}}, upsert=True)
     store.failure_chunks.docs.append({**key, "chunkIndex": 0, "chunkText": current_chunk})
-    store.failure_chunks.docs.append({**key, "chunkIndex": 1, "schemaVersion": 2, "chunkSource": "error_window_fallback", "chunkText": current_chunk})
-    store.failure_chunks.docs.append({**key, "chunkIndex": 2, "schemaVersion": 2, "chunkSource": "local_console_tail_fallback", "chunkText": current_chunk})
+    store.failure_chunks.docs.append({**key, "chunkIndex": 1, "schemaVersion": 2, "chunkSource": "local_test_stage_tail", "chunkText": current_chunk})
+    store.failure_chunks.docs.append({**key, "chunkIndex": 2, "schemaVersion": 3, "chunkSource": "error_window_fallback", "chunkText": current_chunk})
 
     result = history_search_similar_failures(context, store=store)
     assert [item["buildNumber"] for item in result["candidates"]] == [5075]
+    assert result["candidates"][0]["matchType"] == "signature_exact"
 
 
 def test_history_search_similar_failures_lookback_when_last_success_missing(repo_cache, sample_repo, logs):

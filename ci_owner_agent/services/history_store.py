@@ -8,12 +8,12 @@ from ci_owner_agent.config import Settings
 from ci_owner_agent.schemas import BuildInfo, CiResponsibilityNotice
 from ci_owner_agent.services.failure_similarity import hash_normalized_chunk, normalize_error_chunk
 
-HISTORY_CHUNK_SCHEMA_VERSION = 2
+HISTORY_CHUNK_SCHEMA_VERSION = 3
 ALLOWED_HISTORY_CHUNK_SOURCES = {
-    "local_test_stage_tail",
-    "local_make_docker_test_tail",
-    "jenkins_test_stage_tail",
-    "jenkins_failed_stage_log",
+    "local_test_failure_summary",
+    "local_make_docker_test_failure_summary",
+    "jenkins_test_failure_summary",
+    "jenkins_failed_stage_failure_summary",
     "notice_failure_summary",
 }
 DEFAULT_EXCLUDED_CHUNK_SOURCES = {"local_console_tail_fallback"}
@@ -116,6 +116,8 @@ class MongoHistoryStore:
                         "chunkText": text,
                         "normalizedChunk": normalized,
                         "chunkHash": hash_normalized_chunk(text),
+                        "signature": chunk.get("signature"),
+                        "signatureHash": chunk.get("signatureHash"),
                         "createdAt": now,
                     }
                 },
@@ -184,4 +186,3 @@ def _is_allowed_history_chunk(chunk: dict) -> bool:
         and chunk.get("chunkSource") not in DEFAULT_EXCLUDED_CHUNK_SOURCES
         and bool(str(chunk.get("content") or chunk.get("chunkText") or "").strip())
     )
-

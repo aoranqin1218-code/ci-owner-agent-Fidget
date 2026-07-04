@@ -10,10 +10,10 @@ from ci_owner_agent.services.failure_similarity import (
 from ci_owner_agent.services.history_store import MongoHistoryStore, get_history_store
 
 CURRENT_ALLOWED_CHUNK_SOURCES = {
-    "local_test_stage_tail",
-    "local_make_docker_test_tail",
-    "jenkins_test_stage_tail",
-    "jenkins_failed_stage_log",
+    "local_test_failure_summary",
+    "local_make_docker_test_failure_summary",
+    "jenkins_test_failure_summary",
+    "jenkins_failed_stage_failure_summary",
     "notice_failure_summary",
 }
 
@@ -31,14 +31,14 @@ def history_search_similar_failures(
         if history_store is None:
             return {"ok": False, "historyEnabled": False, "error": "history store disabled or unavailable"}
 
-        focused = context.log_provider.find_focused_failure_chunks(
+        summaries = context.log_provider.find_test_failure_summaries(
             tail_lines=context.settings.failure_chunk_tail_lines,
-            max_chunks=3,
+            max_chunks=5,
         )
         current_chunks_raw = [
             chunk
-            for chunk in focused.get("chunks", [])
-            if chunk.get("schemaVersion", 2) >= 2 and chunk.get("chunkSource") in CURRENT_ALLOWED_CHUNK_SOURCES
+            for chunk in summaries.get("chunks", [])
+            if chunk.get("schemaVersion", 3) >= 3 and chunk.get("chunkSource") in CURRENT_ALLOWED_CHUNK_SOURCES
         ]
         if not current_chunks_raw:
             return {
@@ -49,7 +49,7 @@ def history_search_similar_failures(
                 "lastSuccessfulBuildNumberMissing": context.last_successful_build_number is None,
                 "currentChunks": [],
                 "candidates": [],
-                "warning": "focused failure chunks unavailable; history similarity skipped",
+                "warning": "test failure summaries unavailable; history similarity skipped",
             }
         current_chunks = [
             {
@@ -58,6 +58,8 @@ def history_search_similar_failures(
                 "normalized": normalize_error_chunk(str(chunk.get("content") or "")),
                 "normalizedHash": hash_normalized_chunk(str(chunk.get("content") or "")),
                 "preview": str(chunk.get("content") or "")[:500],
+                "signature": chunk.get("signature") or {},
+                "signatureHash": chunk.get("signatureHash"),
             }
             for idx, chunk in enumerate(current_chunks_raw)
             if str(chunk.get("content") or "").strip()
@@ -74,7 +76,20 @@ def history_search_similar_failures(
         for current in current_chunks:
             for hist in historical:
                 hist_text = str(hist.get("chunkText") or "")
-                score = chunk_similarity(current["text"], hist_text)
+                hist_signature = hist.get("signature") or {}
+                hist_signature_hash = hist.get("signatureHash")
+                match_type = "text_similarity"
+                if current.get("signatureHash") and current.get("signatureHash") == hist_signature_hash:
+                    score = 1.0
+                    relationship = "very_likely_same_failure"
+                    match_type = "signature_exact"
+                elif _signature_structural_match(current.get("signature") or {}, hist_signature):
+                    score = 0.96
+                    relationship = "very_likely_same_failure"
+                    match_type = "signature_structural"
+                else:
+                    score = chunk_similarity(current["text"], hist_text)
+                    relationship = similarity_relationship(score)
                 if score < 0.75:
                     continue
                 notice_doc = hist.get("noticeDoc") or {}
@@ -85,7 +100,10 @@ def history_search_similar_failures(
                         "buildNumber": hist.get("buildNumber"),
                         "headCommit": build_doc.get("headCommit"),
                         "similarity": round(score, 4),
-                        "relationship": similarity_relationship(score),
+                        "relationship": relationship,
+                        "matchType": match_type,
+                        "signature": current.get("signature"),
+                        "historicalSignature": hist_signature,
                         "ownerType": notice_doc.get("ownerType"),
                         "ownerName": notice_doc.get("ownerName"),
                         "ownerCommit": notice_doc.get("ownerCommit"),
@@ -109,6 +127,7 @@ def history_search_similar_failures(
                     "chunkIndex": item["chunkIndex"],
                     "normalizedHash": item["normalizedHash"],
                     "preview": item["preview"],
+                    "signature": item["signature"],
                 }
                 for item in current_chunks
             ],
@@ -130,3 +149,14 @@ def history_search_similar_failures(
         }
     except Exception as exc:
         return {"ok": False, "historyEnabled": True, "error": str(exc), "candidates": []}
+
+
+def _signature_structural_match(current: dict, historical: dict) -> bool:
+    required = ["testName", "errorType", "testFile"]
+    if any(not current.get(key) or current.get(key) != historical.get(key) for key in required):
+        return False
+    left_message = str(current.get("errorMessage") or "")
+    right_message = str(historical.get("errorMessage") or "")
+    if not left_message and not right_message:
+        return True
+    return chunk_similarity(left_message, right_message) >= 0.9
