@@ -32,9 +32,9 @@ FAILURE_BLOCK_RE = re.compile(r"^\s*(\d+)\)\s+(.+?)\s*$")
 ERROR_LINE_RE = re.compile(r"\b(AssertionError|Error|TypeError|ReferenceError):\s*(.*)")
 PATH_RE = re.compile(r"((?:node_modules/|test/|server/)[^\s)]+?\.(?:ts|tsx|js|jsx))(?:[:]\d+(?::\d+)?)?")
 FOOTER_TERMS = [
-    "#",
     "------",
     "Dockerfile:",
+    "ERROR: process",
     "ERROR: failed to solve:",
     "exit status 1",
     "make: ***",
@@ -251,7 +251,8 @@ class TextLogProvider(LogProvider):
         focused_source = focused_chunk.get("chunkSource")
         if focused_source == "local_console_tail_fallback":
             return {"chunks": [], "warning": "test failure summaries unavailable; focused chunk is console tail fallback"}
-        lines = str(focused_chunk.get("content") or "").splitlines()
+        raw_lines = str(focused_chunk.get("content") or "").splitlines()
+        lines = [_strip_docker_log_prefix(line) for line in raw_lines]
         starts = [idx for idx, line in enumerate(lines) if FAILURE_BLOCK_RE.match(line)]
         if not starts:
             return {"chunks": [], "warning": "test failure summaries unavailable; no mocha failure blocks found"}
@@ -329,6 +330,11 @@ def _summary_source_for_focused_source(source: str) -> str:
     if source == "jenkins_failed_stage_log":
         return "jenkins_failed_stage_failure_summary"
     return "local_test_failure_summary"
+
+
+def _strip_docker_log_prefix(line: str) -> str:
+    match = re.match(r"^#\d+\s+(?:\d+(?:\.\d+)?\s+)?(.*)$", line)
+    return match.group(1) if match else line
 
 
 def _trim_failure_block_end(lines: list[str], start: int, end: int) -> int:

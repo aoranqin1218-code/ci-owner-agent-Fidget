@@ -89,3 +89,32 @@ def test_no_failure_summary_returns_empty_chunks(tmp_path):
     result = provider(tmp_path, ["all good", "5425 passing"]).find_test_failure_summaries(tail_lines=500, max_chunks=5)
     assert result["chunks"] == []
     assert "warning" in result
+
+
+def test_buildkit_prefixed_failure_summary_signature(tmp_path):
+    lines = [
+        "#28 973.7   1 failing",
+        "#28 973.7   1) getJsSdkConfig dingtalk ua",
+        "#28 973.7      dingtalk ua dingtalk corpId:",
+        "#28 973.7    Error: UNKNOWN",
+        "#28 973.7      at Object.Corp (node_modules/@fx/corp-core/src/errors/Factory.ts:260:36)",
+        "#28 973.7      at test/server/services/integrate/integrate.service.test.ts",
+        "#28 ERROR: process \"/bin/sh -c make docker-test\" did not complete successfully",
+        "------",
+        "Dockerfile:",
+        "ERROR: failed to solve:",
+        "make: *** [docker-test] Error 1",
+    ]
+    chunk = provider(tmp_path, lines).find_test_failure_summaries(tail_lines=500, max_chunks=5)["chunks"][0]
+    signature = chunk["signature"]
+    assert chunk["chunkSource"] == "local_test_failure_summary"
+    assert signature["testName"] == "getJsSdkConfig dingtalk ua"
+    assert signature["errorType"] == "Error"
+    assert "unknown" in signature["errorMessage"]
+    assert signature["testFile"] == "test/server/services/integrate/integrate.service.test.ts"
+    assert "Error: UNKNOWN" in chunk["content"]
+    assert "test/server/services/integrate/integrate.service.test.ts" in chunk["content"]
+    assert "#28" not in chunk["content"]
+    assert "ERROR: process" not in chunk["content"]
+    assert "Dockerfile:" not in chunk["content"]
+    assert "ERROR: failed to solve:" not in chunk["content"]
