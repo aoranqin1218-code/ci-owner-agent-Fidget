@@ -172,6 +172,21 @@ def filter_logs_by_build_range(logs: list[BuildLog], build_from: int | None, bui
     return [item for item in logs if in_build_range(item, build_from, build_to)]
 
 
+def cleanup_previous_outputs(paths: list[Path]) -> list[str]:
+    warnings: list[str] = []
+    for path in paths:
+        try:
+            if path.exists():
+                path.unlink()
+        except Exception as exc:
+            warnings.append(f"failed to remove {path}: {exc}")
+    return warnings
+
+
+def should_skip_for_resume(resume: bool, notice_path: Path) -> bool:
+    return resume and notice_path.exists()
+
+
 def extract_first_json_object(text: str) -> dict[str, Any] | None:
     decoder = json.JSONDecoder()
     for idx, ch in enumerate(text):
@@ -685,13 +700,17 @@ def main() -> int:
                 rows.append(record)
                 continue
 
-            if args.resume and notice_path.exists():
+            if should_skip_for_resume(args.resume, notice_path):
                 record["skipped"] = True
                 record["skipReason"] = "resume: notice already exists"
                 index_file.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
                 rows.append(record)
                 print(f"skip existing: {notice_path}")
                 continue
+
+            cleanup_warnings = cleanup_previous_outputs([notice_path, stdout_path, stderr_path, trace_path])
+            if cleanup_warnings:
+                record["cleanupWarning"] = "; ".join(cleanup_warnings)
 
             started_at = dt.datetime.now(dt.timezone.utc)
 
@@ -750,6 +769,12 @@ def main() -> int:
                 record["error"] = f"analyze-local timeout after {args.timeout_seconds}s"
                 stdout_path.write_text(exc.stdout or "", encoding="utf-8")
                 stderr_path.write_text(exc.stderr or "", encoding="utf-8")
+                cleanup_warnings = cleanup_previous_outputs([notice_path, trace_path])
+                if cleanup_warnings:
+                    existing = record.get("cleanupWarning")
+                    record["cleanupWarning"] = "; ".join(
+                        [str(existing)] + cleanup_warnings if existing else cleanup_warnings
+                    )
 
             except Exception as exc:
                 record["error"] = str(exc)
@@ -786,6 +811,7 @@ def main() -> int:
         "noticeFile",
         "traceFile",
         "failureReason",
+        "cleanupWarning",
         "error",
     ]
 

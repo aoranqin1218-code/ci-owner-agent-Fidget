@@ -171,6 +171,12 @@ LANGCHAIN_RESPONSIBILITY_AGENT_SYSTEM_PROMPT = f"""你是 CI 测试失败自动�
 18. 顶层 owner.type 只能使用 high_confidence、medium_confidence、no_high_confidence_owner；responsibilityItems[*].owner.type 可以使用 inherited_failure_owner。不要输出 pre_existing_failure。
 19. responsibilityItems[*].failureSignature 优先使用 failureSummaries[*].signature.signatureKey；如果没有 signature.signatureKey，则使用 failureSummaries[*].signatureHash；不要使用自然语言描述作为 failureSignature。
 20. 对 inherited_failure_owner，failureSignature 必须能与 inheritedOwner 对应的 historicalSignature.signatureKey 或 historicalSignatureHash 对齐。
+21. 如果 failureSummaries 只有 1 个，historyPrecheck.currentChunks 只有 1 个，且 currentChunks[0].inheritedOwner.found=true，且没有其他独立失败迹象，应直接输出最终 CiResponsibilityNotice JSON：顶层 owner 使用 no_high_confidence_owner，hasHighConfidenceOwner=false，responsibilityItems 只包含 1 个 item，responsibilityType=inherited_failure_owner，owner 使用 inheritedOwner，sourceBuildNumber 使用 inheritedOwner.sourceBuildNumber，matchType / relationship 使用 inheritedOwner 或候选中的值。
+22. 单个 inherited failure 命中时，不要继续调用 repo/log/ts 工具补充当前 build diff 证据。inherited failure 的责任来自首次失败 build，不需要重新证明当前 build diff。
+23. 对已命中 inheritedOwner 的 failure item，不需要继续分析当前 build diff 来证明它；当前 build diff 只能用于分析其他未解决的新 failure item。不要因为 changedFiles 中存在相关文件，就重新给 inherited failure 找当前 build owner。
+24. inherited_failure_owner 的 reason 应使用稳定模板："当前 failure item 与历史构建 #<sourceBuildNumber> 的失败签名一致，属于历史持续失败；责任继承自首次失败责任人 <ownerName>，不是当前 build 新引入。" 不要重新推断或改写首次失败的 diff 原因。
+25. 如果需要更详细的首次失败原因，可以引用 inheritedOwner.sourceBuildNumber 或历史候选 failureReason，但不要编造新的首次失败原因。
+26. 如果整个 build 只有 inherited failure item，顶层 failureReason 说明“本 build 没有新的高可信责任人，责任项见 responsibilityItems”。如果有多个 failure item，顶层 failureReason 分别概括 inherited / current / unresolved，不要抹掉任何一个责任项。
 
 路径规则：
 1. 不要猜测文件路径。

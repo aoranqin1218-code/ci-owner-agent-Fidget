@@ -4,11 +4,13 @@ import pytest
 
 from scripts.batch_analyze_company_logs import (
     build_analyze_command,
+    cleanup_previous_outputs,
     extract_history_stats_from_notice,
     extract_responsibility_stats_from_notice,
     filter_logs_by_build_range,
     load_logs,
     main,
+    should_skip_for_resume,
 )
 
 
@@ -17,6 +19,35 @@ def write_log(log_dir, build: int, commit: str, status: str) -> None:
         f"Checking out Revision {commit}\nAssertionError\nFinished: {status}\n",
         encoding="utf-8",
     )
+
+
+def test_cleanup_previous_outputs_removes_existing_files(tmp_path):
+    paths = [
+        tmp_path / "notice.json",
+        tmp_path / "stdout.txt",
+        tmp_path / "stderr.txt",
+        tmp_path / "trace.json",
+    ]
+    for path in paths:
+        path.write_text("old", encoding="utf-8")
+    warnings = cleanup_previous_outputs(paths)
+    assert warnings == []
+    assert all(not path.exists() for path in paths)
+
+
+def test_cleanup_previous_outputs_ignores_missing_files(tmp_path):
+    paths = [tmp_path / "missing.notice.json", tmp_path / "missing.trace.json"]
+    warnings = cleanup_previous_outputs(paths)
+    assert warnings == []
+    assert all(not path.exists() for path in paths)
+
+
+def test_resume_skip_decision_preserves_existing_notice(tmp_path):
+    notice_path = tmp_path / "build.notice.json"
+    notice_path.write_text("old notice", encoding="utf-8")
+    assert should_skip_for_resume(True, notice_path) is True
+    assert should_skip_for_resume(False, notice_path) is False
+    assert notice_path.exists()
 
 
 def test_batch_analyze_passes_last_success_build(tmp_path):

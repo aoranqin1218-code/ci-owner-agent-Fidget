@@ -576,6 +576,28 @@ def test_prompt_pre_existing_failure_keeps_schema_owner_type():
         assert text in LANGCHAIN_RESPONSIBILITY_AGENT_SYSTEM_PROMPT
 
 
+def test_prompt_fast_paths_single_inherited_failure():
+    for text in [
+        "failureSummaries 只有 1 个",
+        "inheritedOwner.found=true",
+        "不要继续调用 repo/log/ts 工具",
+        "顶层 owner 使用 no_high_confidence_owner",
+        "inherited failure 的责任来自首次失败 build",
+    ]:
+        assert text in LANGCHAIN_RESPONSIBILITY_AGENT_SYSTEM_PROMPT
+
+
+def test_prompt_uses_stable_inherited_reason_template():
+    for text in [
+        "稳定模板",
+        "责任继承自首次失败责任人",
+        "不是当前 build 新引入",
+        "不要重新推断或改写首次失败的 diff 原因",
+        "本 build 没有新的高可信责任人，责任项见 responsibilityItems",
+    ]:
+        assert text in LANGCHAIN_RESPONSIBILITY_AGENT_SYSTEM_PROMPT
+
+
 def test_schema_prompt_distinguishes_top_owner_from_item_owner_type():
     assert "顶层 owner" in CI_RESPONSIBILITY_NOTICE_JSON_SCHEMA_PROMPT
     assert "inherited_failure_owner 只能出现在 responsibilityItems" in CI_RESPONSIBILITY_NOTICE_JSON_SCHEMA_PROMPT
@@ -797,6 +819,10 @@ def test_initial_input_includes_compact_history_precheck(repo_cache, sample_repo
     assert "responsibilityType=inherited_failure_owner" in instruction
     assert "owner 使用 inheritedOwner" in instruction
     assert "顶层 owner" in instruction
+    assert "failureSummaries 只有 1 个" in instruction
+    assert "inheritedOwner.found=true" in instruction
+    assert "不要继续调用 repo/log/ts 工具" in instruction
+    assert "顶层 owner 使用 no_high_confidence_owner" in instruction
     assert "matchedHistoricalChunk" not in candidate
     assert "matchedCurrentChunk" not in candidate
     assert "notice" not in candidate

@@ -239,6 +239,14 @@ class LangChainResponsibilityAgent:
                 "如果 inheritedOwner.found=true，应在 responsibilityItems 中输出 responsibilityType=inherited_failure_owner，"
                 "owner 使用 inheritedOwner；顶层 owner 不要因为 inherited owner 而输出 high_confidence，"
                 "顶层 owner 通常保持 no_high_confidence_owner。"
+                "如果 failureSummaries 只有 1 个，historyPrecheck.currentChunks 只有 1 个，"
+                "且 currentChunks[0].inheritedOwner.found=true，且没有其他独立失败迹象，"
+                "应直接输出最终 CiResponsibilityNotice JSON：顶层 owner 使用 no_high_confidence_owner，"
+                "hasHighConfidenceOwner=false，responsibilityItems 只包含 1 个 item，"
+                "responsibilityType=inherited_failure_owner，owner 使用 inheritedOwner，"
+                "sourceBuildNumber 使用 inheritedOwner.sourceBuildNumber，matchType / relationship 使用 inheritedOwner 或候选中的值。"
+                "不要继续调用 repo/log/ts 工具补充当前 build diff 证据；"
+                "inherited failure 的责任来自首次失败 build，不需要重新证明当前 build diff。"
                 "如果还有其他独立新失败，应继续分别分析并生成独立 responsibilityItems。"
             ),
         }
