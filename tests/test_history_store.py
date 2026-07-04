@@ -274,6 +274,34 @@ def test_history_search_signature_structural_match(repo_cache, sample_repo, logs
     assert result["candidates"][0]["matchType"] == "signature_structural"
 
 
+def test_history_search_candidates_sort_by_similarity_then_recent_build(repo_cache, sample_repo, logs):
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    settings = replace(context.settings, history_enabled=True)
+    current_chunk = "FAIL getJsSdkConfig dingtalk ua\nError: UNKNOWN\nExpected: dingtalk\nActual: unknown"
+    context = replace(
+        context,
+        settings=settings,
+        build_number=5112,
+        last_successful_build_number=5103,
+        log_provider=FocusedProvider(current_chunk),
+    )
+    store = make_store()
+    from ci_owner_agent.schemas import CiResponsibilityNotice
+
+    notice = CiResponsibilityNotice.model_validate(high_confidence_payload(context))
+    for build in [5104, 5111, 5108]:
+        build_info = BuildInfo(job=context.job, buildNumber=build, result="FAILURE", buildUrl=context.build_url, branch=context.branch, commit=context.head_commit)
+        store.save_analysis(build_info, notice, context.base_commit, context.head_commit, 5103, context.base_commit, [focused_chunk(current_chunk)])
+    lower_build = BuildInfo(job=context.job, buildNumber=5110, result="FAILURE", buildUrl=context.build_url, branch=context.branch, commit=context.head_commit)
+    lower_chunk = focused_chunk(current_chunk + "\nextra")
+    lower_chunk["signatureHash"] = "different-hash"
+    store.save_analysis(lower_build, notice, context.base_commit, context.head_commit, 5103, context.base_commit, [lower_chunk])
+
+    result = history_search_similar_failures(context, maxCandidates=4, store=store)
+    assert [item["buildNumber"] for item in result["candidates"][:3]] == [5111, 5108, 5104]
+    assert result["candidates"][3]["buildNumber"] == 5110
+
+
 def test_history_search_ignores_legacy_and_fallback_chunks(repo_cache, sample_repo, logs):
     context = make_lc_context(repo_cache, sample_repo, logs)
     settings = replace(context.settings, history_enabled=True)

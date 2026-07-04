@@ -114,7 +114,13 @@ def history_search_similar_failures(
                         "notice": notice,
                     }
                 )
-        candidates.sort(key=lambda item: item["similarity"], reverse=True)
+        candidates.sort(
+            key=lambda item: (
+                item.get("similarity") or 0,
+                item.get("buildNumber") or 0,
+            ),
+            reverse=True,
+        )
         max_candidates = max(1, min(maxCandidates or context.settings.history_max_candidates, 50))
         return {
             "ok": True,

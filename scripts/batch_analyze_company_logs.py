@@ -186,6 +186,78 @@ def extract_first_json_object(text: str) -> dict[str, Any] | None:
     return None
 
 
+def extract_history_stats_from_notice(notice: dict[str, Any]) -> dict[str, Any]:
+    empty = {
+        "historicalMatchCount": None,
+        "topHistoricalMatchBuild": None,
+        "topHistoricalMatchSimilarity": None,
+        "topHistoricalMatchType": None,
+        "topHistoricalRelationship": None,
+    }
+    history = notice.get("history_search_similar_failures")
+    if isinstance(history, dict):
+        return _history_stats_from_result(history, empty)
+    for key in ["historySearchSimilarFailures", "history"]:
+        value = notice.get(key)
+        if isinstance(value, dict) and "candidates" in value:
+            return _history_stats_from_result(value, empty)
+
+    for evidence in notice.get("evidence") or []:
+        if not isinstance(evidence, dict):
+            continue
+        if evidence.get("source") != "history_search_similar_failures":
+            continue
+        structured = evidence.get("history_search_similar_failures") or evidence.get("result")
+        if isinstance(structured, dict):
+            return _history_stats_from_result(structured, empty)
+        parsed = _history_stats_from_text(" ".join(str(evidence.get(field) or "") for field in ["summary", "detail"]))
+        if parsed is not None:
+            return {**empty, **parsed}
+    return empty
+
+
+def _history_stats_from_result(result: dict[str, Any], empty: dict[str, Any]) -> dict[str, Any]:
+    if result.get("warning") or result.get("ok") is False:
+        return {**empty, "historicalMatchCount": 0}
+    candidates = result.get("candidates")
+    if not isinstance(candidates, list):
+        return empty
+    if not candidates:
+        return {**empty, "historicalMatchCount": 0}
+    top = candidates[0] if isinstance(candidates[0], dict) else {}
+    return {
+        "historicalMatchCount": len(candidates),
+        "topHistoricalMatchBuild": top.get("buildNumber"),
+        "topHistoricalMatchSimilarity": top.get("similarity"),
+        "topHistoricalMatchType": top.get("matchType"),
+        "topHistoricalRelationship": top.get("relationship"),
+    }
+
+
+def _history_stats_from_text(text: str) -> dict[str, Any] | None:
+    if "history_search_similar_failures" not in text:
+        return None
+    result: dict[str, Any] = {}
+    count_match = re.search(r"(?:返回|returned)\s*(\d+)\s*(?:个)?候选|(\d+)\s+candidates", text, re.I)
+    if count_match:
+        result["historicalMatchCount"] = int(next(group for group in count_match.groups() if group))
+    elif "warning" in text.lower():
+        result["historicalMatchCount"] = 0
+    build_match = re.search(r"(?:top\s*)?build(?:Number)?\s*[=: ]\s*(\d+)|build\s+(\d+)", text, re.I)
+    if build_match:
+        result["topHistoricalMatchBuild"] = int(next(group for group in build_match.groups() if group))
+    similarity_match = re.search(r"similarity\s*[=: ]\s*([0-9]+(?:\.[0-9]+)?)", text, re.I)
+    if similarity_match:
+        result["topHistoricalMatchSimilarity"] = float(similarity_match.group(1))
+    match_type = re.search(r"matchType\s*[=: ]\s*([A-Za-z_]+)", text)
+    if match_type:
+        result["topHistoricalMatchType"] = match_type.group(1)
+    relationship = re.search(r"relationship\s*[=: ]\s*([A-Za-z_]+)", text)
+    if relationship:
+        result["topHistoricalRelationship"] = relationship.group(1)
+    return result or None
+
+
 def to_jsonable(obj: Any) -> Any:
     if obj is None or isinstance(obj, (str, int, float, bool)):
         return obj
@@ -601,6 +673,7 @@ def main() -> int:
                     )
                     record["failureReason"] = notice.get("failureReason")
                     record["historyEnabled"] = os.environ.get("CI_AGENT_HISTORY_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
+                    record.update(extract_history_stats_from_notice(notice))
                 else:
                     record["noticeParseError"] = True
 
@@ -640,6 +713,8 @@ def main() -> int:
         "historicalMatchCount",
         "topHistoricalMatchBuild",
         "topHistoricalMatchSimilarity",
+        "topHistoricalMatchType",
+        "topHistoricalRelationship",
         "returnCode",
         "ownerType",
         "ownerName",
