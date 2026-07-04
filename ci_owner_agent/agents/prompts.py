@@ -34,7 +34,7 @@ CI_RESPONSIBILITY_NOTICE_JSON_SCHEMA_PROMPT = """
   "headCommit": "string or null",
   "baseCommit": "string or null",
   "owner": {
-    "type": "high_confidence | medium_confidence | no_high_confidence_owner | inherited_failure_owner",
+    "type": "high_confidence | medium_confidence | no_high_confidence_owner",
     "name": "string",
     "email": "string or null",
     "commit": "string or null",
@@ -96,6 +96,14 @@ CI_RESPONSIBILITY_NOTICE_JSON_SCHEMA_PROMPT = """
 
 medium_confidence 时 hasHighConfidenceOwner 必须为 false。
 high_confidence 时必须满足至少两类独立 evidence，且 confidence >= 0.8。
+
+顶层 owner 表示整个 build 是否有唯一当前高可信责任人。
+inherited_failure_owner 只能出现在 responsibilityItems[*].owner.type 中。
+顶层 owner 不要输出 inherited_failure_owner。
+
+responsibilityItems[*].failureSignature 优先使用 failureSummaries[*].signature.signatureKey；
+如果没有 signature.signatureKey，则使用 failureSummaries[*].signatureHash。
+不要使用自然语言描述作为 failureSignature。
 """
 
 
@@ -161,6 +169,8 @@ LANGCHAIN_RESPONSIBILITY_AGENT_SYSTEM_PROMPT = f"""你是 CI 测试失败自动�
 16. 如果历史工具未能检查，不得把依赖升级单独作为高可信依据；正确表述是“历史工具未召回候选；但若 summary 不可用，不能证明这是首次失败。”
 17. package.json / package-lock 的依赖升级只能作为辅助证据，不能单独构成高可信责任人。除非该失败是上次成功后首次出现、日志栈明确落在被升级依赖内部、当前 diff 与失败表现存在直接因果链、且没有历史 very_likely_same_failure。
 18. 顶层 owner.type 只能使用 high_confidence、medium_confidence、no_high_confidence_owner；responsibilityItems[*].owner.type 可以使用 inherited_failure_owner。不要输出 pre_existing_failure。
+19. responsibilityItems[*].failureSignature 优先使用 failureSummaries[*].signature.signatureKey；如果没有 signature.signatureKey，则使用 failureSummaries[*].signatureHash；不要使用自然语言描述作为 failureSignature。
+20. 对 inherited_failure_owner，failureSignature 必须能与 inheritedOwner 对应的 historicalSignature.signatureKey 或 historicalSignatureHash 对齐。
 
 路径规则：
 1. 不要猜测文件路径。

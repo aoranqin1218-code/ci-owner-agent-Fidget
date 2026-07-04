@@ -234,8 +234,12 @@ class LangChainResponsibilityAgent:
             ],
             "candidates": [],
             "instruction": (
-                "如果 candidates 中存在 signature_exact 或 signature_structural，relationship=very_likely_same_failure，"
-                "且 buildNumber 小于当前 build，则当前失败属于 pre-existing failure，必须输出 no_high_confidence_owner。"
+                "如果 candidates 或 currentChunks 中存在 signature_exact / signature_structural + very_likely_same_failure，"
+                "且历史 buildNumber 小于当前 build，则当前 failure item 属于历史持续失败。"
+                "如果 inheritedOwner.found=true，应在 responsibilityItems 中输出 responsibilityType=inherited_failure_owner，"
+                "owner 使用 inheritedOwner；顶层 owner 不要因为 inherited owner 而输出 high_confidence，"
+                "顶层 owner 通常保持 no_high_confidence_owner。"
+                "如果还有其他独立新失败，应继续分别分析并生成独立 responsibilityItems。"
             ),
         }
         for candidate in (precheck.get("candidates") or [])[:5]:

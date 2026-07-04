@@ -576,6 +576,27 @@ def test_prompt_pre_existing_failure_keeps_schema_owner_type():
         assert text in LANGCHAIN_RESPONSIBILITY_AGENT_SYSTEM_PROMPT
 
 
+def test_schema_prompt_distinguishes_top_owner_from_item_owner_type():
+    assert "顶层 owner" in CI_RESPONSIBILITY_NOTICE_JSON_SCHEMA_PROMPT
+    assert "inherited_failure_owner 只能出现在 responsibilityItems" in CI_RESPONSIBILITY_NOTICE_JSON_SCHEMA_PROMPT
+    assert "顶层 owner 不要输出 inherited_failure_owner" in CI_RESPONSIBILITY_NOTICE_JSON_SCHEMA_PROMPT
+    assert '"type": "high_confidence | medium_confidence | no_high_confidence_owner",' in CI_RESPONSIBILITY_NOTICE_JSON_SCHEMA_PROMPT
+    top_owner_block = CI_RESPONSIBILITY_NOTICE_JSON_SCHEMA_PROMPT.split('"failureReason"', 1)[0]
+    assert "inherited_failure_owner" not in top_owner_block
+    assert '"type": "high_confidence | medium_confidence | no_high_confidence_owner | inherited_failure_owner"' in CI_RESPONSIBILITY_NOTICE_JSON_SCHEMA_PROMPT
+
+
+def test_prompt_describes_failure_signature_alignment_rule():
+    for text in [
+        "failureSignature",
+        "signature.signatureKey",
+        "signatureHash",
+        "不要使用自然语言描述",
+    ]:
+        assert text in CI_RESPONSIBILITY_NOTICE_JSON_SCHEMA_PROMPT
+        assert text in LANGCHAIN_RESPONSIBILITY_AGENT_SYSTEM_PROMPT
+
+
 def test_prompt_and_tool_docs_describe_literal_log_search_and_direct_log_paths(repo_cache, sample_repo, logs):
     for text in [
         "log_search 是字面字符串搜索",
@@ -771,6 +792,11 @@ def test_initial_input_includes_compact_history_precheck(repo_cache, sample_repo
     assert candidate["inheritedOwner"]["found"] is True
     assert candidate["inheritedOwner"]["sourceBuildNumber"] == 5104
     assert candidate["inheritedOwner"]["ownerName"] == "Tang.Tangerine-唐嘉伟"
+    instruction = payload["historyPrecheck"]["instruction"]
+    assert "必须输出 no_high_confidence_owner" not in instruction
+    assert "responsibilityType=inherited_failure_owner" in instruction
+    assert "owner 使用 inheritedOwner" in instruction
+    assert "顶层 owner" in instruction
     assert "matchedHistoricalChunk" not in candidate
     assert "matchedCurrentChunk" not in candidate
     assert "notice" not in candidate
