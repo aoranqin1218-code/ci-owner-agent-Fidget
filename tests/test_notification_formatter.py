@@ -1,8 +1,14 @@
 from __future__ import annotations
 
+import json
+from dataclasses import replace
+
 from ci_owner_agent.schemas import CiResponsibilityNotice
-from ci_owner_agent.main import main
+from ci_owner_agent.config import load_settings
+from ci_owner_agent.main import _maybe_notify_notice, _notify_notice, main
+from ci_owner_agent.services.history_store import notice_hash
 from ci_owner_agent.services.notification_formatter import collect_responsible_display_names, format_wecom_markdown_notice
+from tests.test_history_store import make_store
 
 
 def notice_payload(items):
@@ -158,3 +164,95 @@ def test_analyze_notify_dry_run_stdout_stays_json(monkeypatch, capsys):
     parsed = __import__("json").loads(out)
     assert parsed["buildNumber"] == 5099
     assert "### 单测失败" not in out
+
+
+def test_maybe_notify_filters_no_owner_by_responsibility_items(monkeypatch):
+    calls = []
+    no_owner = item("无高可信责任人", "no_high_confidence_owner", "no_high_confidence_owner", "证据不足。")
+    notice = CiResponsibilityNotice.model_validate(notice_payload([no_owner]))
+    settings = replace(load_settings(), wecom_notify_on_no_owner=False)
+    monkeypatch.setattr("ci_owner_agent.main._notify_notice", lambda *args, **kwargs: calls.append(kwargs) or {"ok": True})
+
+    _maybe_notify_notice(notice, settings, cli_notify=True, cli_dry_run=True, force=False)
+
+    assert calls == []
+
+
+def test_maybe_notify_allows_item_owner_when_no_owner_notify_disabled(monkeypatch):
+    calls = []
+    notice = CiResponsibilityNotice.model_validate(notice_payload([item()]))
+    settings = replace(load_settings(), wecom_notify_on_no_owner=False)
+    monkeypatch.setattr("ci_owner_agent.main._notify_notice", lambda *args, **kwargs: calls.append(kwargs) or {"ok": True})
+
+    _maybe_notify_notice(notice, settings, cli_notify=True, cli_dry_run=True, force=False)
+
+    assert len(calls) == 1
+
+
+def test_notify_dedup_does_not_overwrite_sent(monkeypatch):
+    store = make_store()
+    notice = CiResponsibilityNotice.model_validate(notice_payload([item()]))
+    digest = notice_hash(notice)
+    store.save_notification(notice=notice, notice_hash=digest, channel="wecom", status="sent", message="old")
+    settings = replace(load_settings(), notification_dedup_enabled=True)
+    monkeypatch.setattr("ci_owner_agent.main.get_history_store", lambda settings: store)
+
+    result = _notify_notice(notice, settings, dry_run=True, force=False, feedback_base_url=None)
+
+    assert result["status"] == "skipped"
+    assert len(store.notifications.docs) == 1
+    assert store.notifications.docs[0]["status"] == "sent"
+
+
+def test_notify_force_bypasses_dedup(monkeypatch):
+    store = make_store()
+    notice = CiResponsibilityNotice.model_validate(notice_payload([item()]))
+    digest = notice_hash(notice)
+    store.save_notification(notice=notice, notice_hash=digest, channel="wecom", status="sent", message="old")
+    settings = replace(load_settings(), notification_dedup_enabled=True, wecom_webhook_url="https://secret-webhook")
+    monkeypatch.setattr("ci_owner_agent.main.get_history_store", lambda settings: store)
+    monkeypatch.setattr("ci_owner_agent.main.send_wecom_markdown", lambda url, markdown: {"ok": True, "statusCode": 200, "response": "ok", "error": None})
+
+    result = _notify_notice(notice, settings, dry_run=False, force=True, feedback_base_url=None)
+
+    assert result["ok"] is True
+    assert result.get("status") != "skipped"
+    assert store.notifications.docs[0]["status"] == "sent"
+
+
+def test_analyze_notify_exception_stays_json(monkeypatch, capsys):
+    notice = CiResponsibilityNotice.model_validate(notice_payload([item()]))
+    monkeypatch.setenv("CI_AGENT_MODEL_PROVIDER", "fake")
+    monkeypatch.setattr("ci_owner_agent.main.analyze_local", lambda **kwargs: notice)
+
+    def raise_notify(*args, **kwargs):
+        raise RuntimeError("mongo down")
+
+    monkeypatch.setattr("ci_owner_agent.main._notify_notice", raise_notify)
+    rc = main(
+        [
+            "analyze-local",
+            "--repo",
+            "repo",
+            "--job",
+            "services/fx-code-unittest",
+            "--build",
+            "5099",
+            "--base-commit",
+            "b",
+            "--head-commit",
+            "h",
+            "--console-file",
+            "console.log",
+            "--build-url",
+            "local://job/5099",
+            "--notify",
+        ]
+    )
+    captured = capsys.readouterr()
+    parsed = json.loads(captured.out)
+    assert rc == 0
+    assert parsed["buildNumber"] == 5099
+    assert "WARNING" not in captured.out
+    assert "### 单测失败" not in captured.out
+    assert "WARNING: notify failed unexpectedly: mongo down" in captured.err

@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 
 from ci_owner_agent.schemas import BuildInfo
-from ci_owner_agent.services.history_store import MongoHistoryStore
+from ci_owner_agent.services.history_store import MongoHistoryStore, notice_hash
 from ci_owner_agent.tools.history_tools import history_search_similar_failures
 from tests.test_langchain_agent import high_confidence_payload, make_lc_context
 
@@ -26,9 +26,12 @@ class FakeCollection:
 
     def update_one(self, key, update, upsert=False):
         doc = self.find_one(key)
+        is_insert = doc is None
         if doc is None:
             doc = dict(key)
             self.docs.append(doc)
+        if is_insert:
+            doc.update(update.get("$setOnInsert", {}))
         doc.update(update.get("$set", {}))
 
     def find_one(self, query):
@@ -610,3 +613,20 @@ def test_history_search_similar_failures_lookback_when_last_success_missing(repo
     result = history_search_similar_failures(context, store=store)
     assert result["ok"] is True
     assert result["lastSuccessfulBuildNumberMissing"] is True
+
+
+def test_save_notification_preserves_created_at(repo_cache, sample_repo, logs):
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    store = make_store()
+    from ci_owner_agent.schemas import CiResponsibilityNotice
+
+    notice = CiResponsibilityNotice.model_validate(high_confidence_payload(context))
+    digest = notice_hash(notice)
+    store.save_notification(notice=notice, notice_hash=digest, channel="wecom", status="sent", message="first")
+    first_doc = dict(store.notifications.docs[0])
+    store.save_notification(notice=notice, notice_hash=digest, channel="wecom", status="failed", message="second", error="boom")
+    second_doc = store.notifications.docs[0]
+
+    assert second_doc["createdAt"] == first_doc["createdAt"]
+    assert second_doc["updatedAt"] != first_doc["updatedAt"]
+    assert second_doc["status"] == "failed"

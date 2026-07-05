@@ -211,7 +211,7 @@ def _find_inherited_owner_for_chunk(candidates: list[dict], current_build_number
         source = _high_confidence_source_from_candidate(candidate)
         if source is None:
             continue
-        return {
+        inherited_owner = {
             "found": True,
             "sourceBuildNumber": source.get("sourceBuildNumber") or candidate.get("buildNumber"),
             "sourceBuildUrl": source.get("sourceBuildUrl") or candidate.get("buildUrl"),
@@ -223,6 +223,11 @@ def _find_inherited_owner_for_chunk(candidates: list[dict], current_build_number
             "matchType": candidate.get("matchType"),
             "relationship": candidate.get("relationship"),
         }
+        if source.get("feedbackVerified"):
+            inherited_owner["feedbackVerified"] = True
+        if source.get("feedbackOverride"):
+            inherited_owner["feedbackOverride"] = True
+        return inherited_owner
     return {"found": False}
 
 
@@ -234,6 +239,8 @@ def _high_confidence_source_from_candidate(candidate: dict) -> dict | None:
             candidate["feedbackSuppressed"] = True
             candidate["feedbackReason"] = action
             return None
+        if action == "confirm_owner":
+            candidate["feedbackVerified"] = True
         if action == "correct_owner" and isinstance(feedback.get("correctedOwner"), dict):
             owner = feedback["correctedOwner"]
             return {
@@ -255,15 +262,18 @@ def _high_confidence_source_from_candidate(candidate: dict) -> dict | None:
                 continue
             owner = item.get("owner") if isinstance(item.get("owner"), dict) else {}
             if item.get("responsibilityType") == "current_build_owner" and owner.get("type") == "high_confidence":
-                return {
+                source = {
                     "ownerType": owner.get("type"),
                     "ownerName": owner.get("name"),
                     "ownerEmail": owner.get("email"),
                     "ownerCommit": owner.get("commit"),
                     "confidence": item.get("confidence") or owner.get("confidence"),
                 }
+                if candidate.get("feedbackVerified"):
+                    source["feedbackVerified"] = True
+                return source
             if item.get("responsibilityType") == "inherited_failure_owner" and owner.get("type") == "inherited_failure_owner":
-                return {
+                source = {
                     "ownerType": owner.get("type"),
                     "ownerName": owner.get("name"),
                     "ownerEmail": owner.get("email"),
@@ -272,16 +282,22 @@ def _high_confidence_source_from_candidate(candidate: dict) -> dict | None:
                     "sourceBuildNumber": item.get("sourceBuildNumber"),
                     "sourceBuildUrl": item.get("sourceBuildUrl"),
                 }
+                if candidate.get("feedbackVerified"):
+                    source["feedbackVerified"] = True
+                return source
         return None
 
     if notice_doc.get("ownerType") == "high_confidence" and _allow_legacy_top_owner_fallback(candidate):
-        return {
+        source = {
             "ownerType": notice_doc.get("ownerType"),
             "ownerName": notice_doc.get("ownerName"),
             "ownerEmail": notice_doc.get("ownerEmail"),
             "ownerCommit": notice_doc.get("ownerCommit"),
             "confidence": _top_owner_confidence(notice),
         }
+        if candidate.get("feedbackVerified"):
+            source["feedbackVerified"] = True
+        return source
     return None
 
 

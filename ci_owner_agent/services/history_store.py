@@ -189,7 +189,7 @@ class MongoHistoryStore:
 
     def notification_sent(self, *, job: str, branch: str | None, build_number: int, notice_hash: str, channel: str = "wecom") -> bool:
         return self.notifications.find_one(
-            {"job": job, "branch": branch, "buildNumber": build_number, "noticeHash": notice_hash, "channel": channel, "status": {"$in": ["sent", "skipped"]}}
+            {"job": job, "branch": branch, "buildNumber": build_number, "noticeHash": notice_hash, "channel": channel, "status": "sent"}
         ) is not None
 
     def save_notification(self, *, notice: CiResponsibilityNotice, notice_hash: str, channel: str, status: str, message: str, error: str | None = None) -> dict:
@@ -208,7 +208,7 @@ class MongoHistoryStore:
             "error": error,
             "updatedAt": now,
         }
-        self.notifications.update_one(key, {"$set": {**doc, "createdAt": now}}, upsert=True)
+        self.notifications.update_one(key, {"$set": doc, "$setOnInsert": {"createdAt": now}}, upsert=True)
         return {"ok": True, **doc}
 
 

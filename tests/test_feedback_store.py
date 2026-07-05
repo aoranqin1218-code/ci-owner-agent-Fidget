@@ -61,6 +61,20 @@ def test_correct_owner_requires_owner_name(repo_cache, sample_repo, logs):
         feedback.apply_feedback(job="job", build_number=1, failure_id="failure-x", failure_signature=None, action="correct_owner")
 
 
+def test_correct_owner_rejects_invalid_owner_type(repo_cache, sample_repo, logs):
+    feedback = FeedbackStore(make_store())
+    with pytest.raises(ValueError, match="owner-type for correct_owner"):
+        feedback.apply_feedback(
+            job="job",
+            build_number=1,
+            failure_id="failure-x",
+            failure_signature=None,
+            action="correct_owner",
+            owner_name="Li Si",
+            owner_type="no_high_confidence_owner",
+        )
+
+
 def test_mark_flaky_does_not_require_owner_name(repo_cache, sample_repo, logs):
     result = FeedbackStore(make_store()).apply_feedback(job="job", build_number=1, failure_id="failure-x", failure_signature=None, action="mark_flaky")
     assert result["ok"] is True
@@ -122,6 +136,28 @@ def test_history_overlay_mark_flaky_suppresses_inherited_owner(repo_cache, sampl
     assert result["currentChunks"][0]["inheritedOwner"]["found"] is False
 
 
+def test_history_overlay_confirm_owner_marks_inherited_owner_verified(repo_cache, sample_repo, logs):
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    chunk = focused_chunk("FAIL same\nError: UNKNOWN")
+    context = replace(context, settings=replace(context.settings, history_enabled=True), build_number=5100, failure_summaries={"chunks": [chunk]})
+    store = make_store()
+    notice = notice_with_item(context, owner_name="Zhang San", failure_signature=chunk["signature"]["signatureKey"])
+    save_history_build(store, context, 5099, notice, chunk)
+    FeedbackStore(store).apply_feedback(
+        job=context.job,
+        build_number=5099,
+        failure_id=notice.responsibilityItems[0].failureId,
+        failure_signature=None,
+        action="confirm_owner",
+    )
+
+    result = history_search_similar_failures(context, store=store)
+
+    inherited_owner = result["currentChunks"][0]["inheritedOwner"]
+    assert inherited_owner["ownerName"] == "Zhang San"
+    assert inherited_owner["feedbackVerified"] is True
+
+
 def test_feedback_apply_cli_writes_store(monkeypatch, capsys):
     store = make_store()
     monkeypatch.setenv("CI_AGENT_MODEL_PROVIDER", "fake")
@@ -147,3 +183,29 @@ def test_feedback_apply_cli_writes_store(monkeypatch, capsys):
     assert rc == 0
     assert "Henry.Zeng-曾纪龙" in out
     assert store.feedback.docs[0]["correctedOwner"]["name"] == "Henry.Zeng-曾纪龙"
+
+
+def test_feedback_apply_cli_rejects_bad_owner_type(monkeypatch, capsys):
+    monkeypatch.setenv("CI_AGENT_MODEL_PROVIDER", "fake")
+    rc = main(
+        [
+            "feedback",
+            "apply",
+            "--job",
+            "services/fx-code-unittest",
+            "--build",
+            "5099",
+            "--failure-id",
+            "failure-xxx",
+            "--action",
+            "correct_owner",
+            "--owner-name",
+            "Henry.Zeng-曾纪龙",
+            "--owner-type",
+            "no_high_confidence_owner",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "invalid choice" in captured.err
+    assert "Traceback" not in captured.err

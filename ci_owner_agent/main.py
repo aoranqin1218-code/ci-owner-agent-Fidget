@@ -10,7 +10,7 @@ from ci_owner_agent.orchestrator import analyze_jenkins, analyze_local, failure_
 from ci_owner_agent.schemas import BuildInfo, CiResponsibilityNotice
 from ci_owner_agent.services.feedback_store import FeedbackStore
 from ci_owner_agent.services.git_client import GitClient
-from ci_owner_agent.services.history_store import MongoHistoryStore, get_history_store, notice_hash
+from ci_owner_agent.services.history_store import get_history_store, notice_hash
 from ci_owner_agent.services.jenkins_client import JenkinsClient
 from ci_owner_agent.services.notification_formatter import format_wecom_markdown_notice
 from ci_owner_agent.services.wecom_notifier import send_wecom_markdown
@@ -78,7 +78,7 @@ def build_parser() -> argparse.ArgumentParser:
     apply.add_argument("--action", required=True)
     apply.add_argument("--owner-name", default=None)
     apply.add_argument("--owner-email", default=None)
-    apply.add_argument("--owner-type", default="high_confidence")
+    apply.add_argument("--owner-type", choices=["high_confidence", "medium_confidence"], default="high_confidence")
     apply.add_argument("--owner-commit", default=None)
     apply.add_argument("--source-build-number", type=int, default=None)
     apply.add_argument("--reviewer", default=None)
@@ -92,7 +92,10 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     settings = load_settings()
     parser = build_parser()
-    args = parser.parse_args(argv)
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit as exc:
+        return int(exc.code or 0)
     if args.command == "analyze-local":
         git_client = GitClient(settings.repo_cache_dir, max_output_chars=settings.max_tool_output_chars)
         try:
@@ -224,11 +227,23 @@ def _maybe_notify_notice(notice: CiResponsibilityNotice, settings, cli_notify: b
         return
     if notice.result == "SUCCESS" and not settings.wecom_notify_on_success:
         return
-    if notice.owner.type == "no_high_confidence_owner" and not settings.wecom_notify_on_no_owner and not notice.responsibilityItems:
+    if not settings.wecom_notify_on_no_owner and not _has_responsible_item_owner(notice):
         return
-    result = _notify_notice(notice, settings, dry_run=cli_dry_run or settings.wecom_notify_dry_run, force=force, feedback_base_url=settings.feedback_base_url)
+    try:
+        result = _notify_notice(notice, settings, dry_run=cli_dry_run or settings.wecom_notify_dry_run, force=force, feedback_base_url=settings.feedback_base_url)
+    except Exception as exc:
+        print(f"WARNING: notify failed unexpectedly: {exc}", file=sys.stderr)
+        return
     if not result.get("ok"):
         print(f"WARNING: notify failed: {result.get('error')}", file=sys.stderr)
+
+
+def _has_responsible_item_owner(notice: CiResponsibilityNotice) -> bool:
+    for item in notice.responsibilityItems:
+        owner = item.owner
+        if owner.type != "no_high_confidence_owner" and owner.name and owner.name != "无高可信责任人":
+            return True
+    return False
 
 
 def _notify_notice(notice: CiResponsibilityNotice, settings, *, dry_run: bool, force: bool, feedback_base_url: str | None) -> dict:
@@ -238,7 +253,6 @@ def _notify_notice(notice: CiResponsibilityNotice, settings, *, dry_run: bool, f
     if store and settings.notification_dedup_enabled and not force and store.notification_sent(
         job=notice.job, branch=notice.branch, build_number=notice.buildNumber, notice_hash=digest
     ):
-        store.save_notification(notice=notice, notice_hash=digest, channel="wecom", status="skipped", message=markdown, error="deduplicated")
         return {"ok": True, "status": "skipped", "markdown": markdown}
     if dry_run:
         if store:

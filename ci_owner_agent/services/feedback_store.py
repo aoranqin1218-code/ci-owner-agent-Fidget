@@ -7,6 +7,7 @@ from ci_owner_agent.schemas import Owner
 from ci_owner_agent.services.history_store import MongoHistoryStore
 
 FEEDBACK_ACTIONS = {"confirm_owner", "correct_owner", "mark_flaky", "mark_no_owner"}
+CORRECT_OWNER_TYPES = {"high_confidence", "medium_confidence"}
 
 
 class FeedbackStore:
@@ -38,6 +39,8 @@ class FeedbackStore:
             raise ValueError("failure-id and failure-signature require at least one")
         if action == "correct_owner" and not owner_name:
             raise ValueError("owner-name is required for correct_owner")
+        if action == "correct_owner" and owner_type not in CORRECT_OWNER_TYPES:
+            raise ValueError("owner-type for correct_owner must be high_confidence or medium_confidence")
 
         notice_doc, item = self._find_notice_item(job, build_number, failure_id, failure_signature)
         if item:
