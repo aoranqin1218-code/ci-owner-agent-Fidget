@@ -176,13 +176,17 @@ def main(argv: list[str] | None = None) -> int:
             print(f"ERROR: invalid notice schema: {exc}", file=sys.stderr)
             return 2
         dry_run = args.dry_run or settings.wecom_notify_dry_run
-        result = _notify_notice(
-            notice,
-            settings,
-            dry_run=dry_run,
-            force=args.force,
-            feedback_base_url=args.feedback_base_url or settings.feedback_base_url,
-        )
+        try:
+            result = _notify_notice(
+                notice,
+                settings,
+                dry_run=dry_run,
+                force=args.force,
+                feedback_base_url=args.feedback_base_url or settings.feedback_base_url,
+            )
+        except Exception as exc:
+            print(f"ERROR: notify failed unexpectedly: {exc}", file=sys.stderr)
+            return 2
         if dry_run:
             print(result["markdown"])
         elif not result.get("ok"):

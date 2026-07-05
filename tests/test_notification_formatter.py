@@ -134,6 +134,26 @@ def test_notify_notice_missing_file_returns_error_without_traceback(tmp_path, ca
     assert captured.out == ""
 
 
+def test_notify_notice_unexpected_error_returns_2_without_traceback(tmp_path, capsys, monkeypatch):
+    notice = CiResponsibilityNotice.model_validate(notice_payload([item()]))
+    notice_file = tmp_path / "notice.json"
+    notice_file.write_text(notice.model_dump_json(), encoding="utf-8")
+    monkeypatch.setenv("CI_AGENT_MODEL_PROVIDER", "fake")
+
+    def raise_notify(*args, **kwargs):
+        raise RuntimeError("mongo down")
+
+    monkeypatch.setattr("ci_owner_agent.main._notify_notice", raise_notify)
+
+    rc = main(["notify-notice", "--notice-file", str(notice_file), "--dry-run"])
+    captured = capsys.readouterr()
+
+    assert rc == 2
+    assert "ERROR: notify failed unexpectedly: mongo down" in captured.err
+    assert "Traceback" not in captured.err
+    assert captured.out == ""
+
+
 def test_analyze_notify_dry_run_stdout_stays_json(monkeypatch, capsys):
     notice = CiResponsibilityNotice.model_validate(notice_payload([item()]))
     monkeypatch.setenv("CI_AGENT_MODEL_PROVIDER", "fake")
