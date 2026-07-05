@@ -91,6 +91,61 @@ def test_no_failure_summary_returns_empty_chunks(tmp_path):
     assert "warning" in result
 
 
+def test_xfail_timeout_summary_signature_webhook(tmp_path):
+    lines = [
+        "✖ Webhook触发",
+        "",
+        "Run",
+        "AwaitFunc",
+        "Timeout!",
+        "",
+        "at Timeout.<anonymous> modules/automation/tests/venv.ts:834",
+    ]
+    chunk = provider(tmp_path, lines).find_test_failure_summaries(tail_lines=500, max_chunks=5)["chunks"][0]
+    signature = chunk["signature"]
+    assert chunk["anchorType"] == "japa_failure_block"
+    assert signature["testName"] == "Webhook触发"
+    assert signature["errorType"] == "Timeout"
+    assert "run awaitfunc timeout" in signature["errorMessage"]
+    assert signature["testFile"] == "modules/automation/tests/venv.ts"
+    assert signature["signatureKey"]
+    assert chunk["signatureHash"]
+
+
+def test_xfail_multiple_timeout_blocks(tmp_path):
+    lines = [
+        "✖ 大模型-自定义提示词-接收回调-执行成功",
+        "Run",
+        "AwaitFunc",
+        "Timeout!",
+        "✖ 多模态大模型-自定义提示词-接收回调-解析失败",
+        "Run",
+        "AwaitFunc",
+        "Timeout!",
+    ]
+    chunks = provider(tmp_path, lines).find_test_failure_summaries(tail_lines=500, max_chunks=5)["chunks"]
+    assert len(chunks) == 2
+    assert [chunk["chunkIndex"] for chunk in chunks] == [0, 1]
+    assert chunks[0]["signature"]["testName"].startswith("大模型")
+    assert chunks[1]["signature"]["testName"].startswith("多模态大模型")
+    assert chunks[0]["signature"]["signatureKey"] != chunks[1]["signature"]["signatureKey"]
+
+
+def test_fatal_error_unsupported_dir_import_signature(tmp_path):
+    lines = [
+        "✖ ERROR: Error: Directory import '/var/app/server/components' is not supported resolving ES modules imported from /var/app/test/init.ts",
+        "code: 'ERR_UNSUPPORTED_DIR_IMPORT'",
+        "url: 'file:///var/app/server/components'",
+    ]
+    chunk = provider(tmp_path, lines).find_test_failure_summaries(tail_lines=500, max_chunks=5)["chunks"][0]
+    signature = chunk["signature"]
+    assert chunk["anchorType"] == "fatal_error_block"
+    assert signature["testName"] == "test initialization"
+    assert "err_unsupported_dir_import" in signature["errorMessage"]
+    assert signature["testFile"] == "test/init.ts"
+    assert signature["signatureKey"]
+
+
 def test_buildkit_prefixed_failure_summary_signature(tmp_path):
     lines = [
         "#28 973.7   1 failing",

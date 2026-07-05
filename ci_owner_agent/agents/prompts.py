@@ -52,7 +52,7 @@ CI_RESPONSIBILITY_NOTICE_JSON_SCHEMA_PROMPT = """
   ],
   "responsibilityItems": [
     {
-      "failureId": "string",
+      "failureId": "auto",
       "failureTitle": "string",
       "failureSignature": "string or null",
       "failureSummary": "string or null",
@@ -64,7 +64,7 @@ CI_RESPONSIBILITY_NOTICE_JSON_SCHEMA_PROMPT = """
         "confidence": 0.0
       },
       "responsibilityType": "current_build_owner | inherited_failure_owner | no_high_confidence_owner | unknown",
-      "sourceBuildNumber": 0,
+      "sourceBuildNumber": "integer or null",
       "sourceBuildUrl": "string or null",
       "sourceCommit": "string or null",
       "matchType": "string or null",
@@ -104,6 +104,11 @@ inherited_failure_owner 只能出现在 responsibilityItems[*].owner.type 中。
 responsibilityItems[*].failureSignature 优先使用 failureSummaries[*].signature.signatureKey；
 如果没有 signature.signatureKey，则使用 failureSummaries[*].signatureHash。
 不要使用自然语言描述作为 failureSignature。
+failureId 可临时输出 "auto"，系统会按 failureSignature 归一化；不要输出 F1/F2/chunk-0/failure-2。
+sourceBuildNumber 无 source build 时必须输出 null，不要输出 0。
+current_build_owner 可以省略 sourceBuildNumber 或输出当前 buildNumber，代码会归一化。
+inherited_failure_owner 必须输出 inheritedOwner.sourceBuildNumber。
+no_high_confidence_owner / unknown 必须输出 null。
 """
 
 

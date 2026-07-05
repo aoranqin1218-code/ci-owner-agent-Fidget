@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import re
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -144,6 +146,8 @@ class CiResponsibilityNotice(StrictModel):
 
     @model_validator(mode="after")
     def enforce_owner_consistency(self) -> "CiResponsibilityNotice":
+        for item in self.responsibilityItems:
+            _normalize_responsibility_item(item, self)
         responsible_owners = {
             (
                 item.owner.name,
@@ -180,3 +184,68 @@ class CiResponsibilityNotice(StrictModel):
             )
             self.hasHighConfidenceOwner = False
         return self
+
+
+NO_OWNER_NAME = "无高可信责任人"
+
+
+def _no_owner() -> Owner:
+    return Owner(type="no_high_confidence_owner", name=NO_OWNER_NAME, email=None, commit=None, confidence=0)
+
+
+def stable_failure_id(item: ResponsibilityItem) -> str:
+    basis = item.failureSignature or f"{item.failureTitle}\n{item.failureSummary or ''}"
+    normalized = _normalize_identifier_basis(basis)
+    return "failure-" + hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:12]
+
+
+def _fallback_failure_signature(item: ResponsibilityItem) -> str:
+    basis = _normalize_identifier_basis(f"{item.failureTitle}\n{item.failureSummary or ''}")
+    return "manual:" + hashlib.sha256(basis.encode("utf-8")).hexdigest()[:16]
+
+
+def _normalize_identifier_basis(value: str) -> str:
+    return re.sub(r"\s+", " ", value or "").strip().lower()
+
+
+def _normalize_responsibility_item(item: ResponsibilityItem, notice: CiResponsibilityNotice) -> None:
+    if not item.failureSignature or not item.failureSignature.strip():
+        item.failureSignature = _fallback_failure_signature(item)
+    item.failureId = stable_failure_id(item)
+    item.confidence = max(0, min(float(item.confidence or 0), 1))
+    if item.sourceBuildNumber == 0:
+        item.sourceBuildNumber = None
+
+    if item.responsibilityType == "inherited_failure_owner":
+        valid_inherited = (
+            item.owner.type == "inherited_failure_owner"
+            and bool(item.owner.name)
+            and item.owner.name != NO_OWNER_NAME
+            and bool(item.sourceBuildNumber and item.sourceBuildNumber > 0)
+        )
+        if not valid_inherited:
+            _downgrade_item(item, "历史持续失败未找到可继承责任人，降级为无高可信责任人。")
+        return
+
+    if item.responsibilityType == "current_build_owner":
+        if item.owner.type == "no_high_confidence_owner" or not item.owner.name or item.owner.name == NO_OWNER_NAME:
+            _downgrade_item(item, "当前失败未找到高可信责任人，降级为无高可信责任人。")
+            return
+        if not item.sourceBuildNumber:
+            item.sourceBuildNumber = notice.buildNumber
+        if not item.sourceCommit:
+            item.sourceCommit = item.owner.commit or notice.headCommit
+        return
+
+    if item.responsibilityType in {"no_high_confidence_owner", "unknown"}:
+        _downgrade_item(item, item.reason or "证据不足，无法确定高可信责任人。")
+
+
+def _downgrade_item(item: ResponsibilityItem, reason: str) -> None:
+    item.responsibilityType = "no_high_confidence_owner"
+    item.owner = _no_owner()
+    item.sourceBuildNumber = None
+    item.sourceBuildUrl = None
+    item.sourceCommit = None
+    item.confidence = 0
+    item.reason = reason

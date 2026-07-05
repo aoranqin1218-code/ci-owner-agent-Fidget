@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 import types
 from dataclasses import replace
@@ -218,6 +219,148 @@ def test_old_notice_without_responsibility_items_still_parses(repo_cache, sample
     notice = CiResponsibilityNotice.model_validate(payload)
     assert notice.responsibilityItems == []
     assert notice.owner.type == "high_confidence"
+
+
+def test_failure_id_is_stable_from_failure_signature(repo_cache, sample_repo, logs):
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    payload_a = high_confidence_payload(context)
+    payload_b = high_confidence_payload(context)
+    item = {
+        "failureId": "F2",
+        "failureTitle": "same failure",
+        "failureSignature": "sig-same",
+        "failureSummary": "summary",
+        "owner": payload_a["owner"],
+        "responsibilityType": "current_build_owner",
+        "confidence": 0.9,
+        "reason": "same",
+    }
+    payload_a["responsibilityItems"] = [item]
+    payload_b["responsibilityItems"] = [{**item, "failureId": "chunk-1"}]
+    notice_a = CiResponsibilityNotice.model_validate(payload_a)
+    notice_b = CiResponsibilityNotice.model_validate(payload_b)
+    assert notice_a.responsibilityItems[0].failureId == notice_b.responsibilityItems[0].failureId
+    assert re.fullmatch(r"failure-[0-9a-f]{12}", notice_a.responsibilityItems[0].failureId)
+
+
+def test_failure_id_differs_for_different_failure_signatures(repo_cache, sample_repo, logs):
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    payload = high_confidence_payload(context)
+    payload["responsibilityItems"] = [
+        {
+            "failureId": "F1",
+            "failureTitle": "first",
+            "failureSignature": "sig-one",
+            "owner": payload["owner"],
+            "responsibilityType": "current_build_owner",
+            "confidence": 0.9,
+            "reason": "first",
+        },
+        {
+            "failureId": "F2",
+            "failureTitle": "second",
+            "failureSignature": "sig-two",
+            "owner": payload["owner"],
+            "responsibilityType": "current_build_owner",
+            "confidence": 0.9,
+            "reason": "second",
+        },
+    ]
+    notice = CiResponsibilityNotice.model_validate(payload)
+    assert notice.responsibilityItems[0].failureId != notice.responsibilityItems[1].failureId
+
+
+def test_missing_failure_signature_gets_manual_fallback_and_stable_id(repo_cache, sample_repo, logs):
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    payload = high_confidence_payload(context)
+    payload["responsibilityItems"] = [
+        {
+            "failureId": "F1",
+            "failureTitle": "Webhook触发",
+            "failureSignature": None,
+            "failureSummary": "Run AwaitFunc Timeout",
+            "owner": payload["owner"],
+            "responsibilityType": "current_build_owner",
+            "confidence": 0.9,
+            "reason": "timeout",
+        }
+    ]
+    notice = CiResponsibilityNotice.model_validate(payload)
+    item = notice.responsibilityItems[0]
+    assert item.failureSignature.startswith("manual:")
+    assert re.fullmatch(r"failure-[0-9a-f]{12}", item.failureId)
+
+
+def test_invalid_inherited_item_downgrades_to_no_owner(repo_cache, sample_repo, logs):
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    payload = high_confidence_payload(context)
+    payload["owner"] = {"type": "no_high_confidence_owner", "name": "无高可信责任人", "email": None, "commit": None, "confidence": 0}
+    payload["hasHighConfidenceOwner"] = False
+    payload["responsibilityItems"] = [
+        {
+            "failureId": "F1",
+            "failureTitle": "historical failure",
+            "failureSignature": "sig-historical",
+            "owner": {"type": "no_high_confidence_owner", "name": "无高可信责任人", "email": None, "commit": None, "confidence": 0},
+            "responsibilityType": "inherited_failure_owner",
+            "sourceBuildNumber": 5104,
+            "confidence": 0.9,
+            "reason": "bad inherited",
+        }
+    ]
+    item = CiResponsibilityNotice.model_validate(payload).responsibilityItems[0]
+    assert item.responsibilityType == "no_high_confidence_owner"
+    assert item.owner.type == "no_high_confidence_owner"
+    assert item.sourceBuildNumber is None
+    assert item.confidence == 0
+    assert "历史持续失败未找到可继承责任人" in item.reason
+
+
+def test_current_build_owner_fills_source_build_and_commit(repo_cache, sample_repo, logs):
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    payload = high_confidence_payload(context)
+    payload["responsibilityItems"] = [
+        {
+            "failureId": "F1",
+            "failureTitle": "current failure",
+            "failureSignature": "sig-current-build",
+            "owner": payload["owner"],
+            "responsibilityType": "current_build_owner",
+            "sourceBuildNumber": None,
+            "sourceCommit": None,
+            "confidence": 1.5,
+            "reason": "current",
+        }
+    ]
+    item = CiResponsibilityNotice.model_validate(payload).responsibilityItems[0]
+    assert item.sourceBuildNumber == context.build_number
+    assert item.sourceCommit == context.head_commit
+    assert item.confidence == 1
+
+
+def test_no_high_confidence_item_clears_zero_source_build(repo_cache, sample_repo, logs):
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    payload = high_confidence_payload(context)
+    payload["owner"] = {"type": "no_high_confidence_owner", "name": "无高可信责任人", "email": None, "commit": None, "confidence": 0}
+    payload["hasHighConfidenceOwner"] = False
+    payload["responsibilityItems"] = [
+        {
+            "failureId": "F1",
+            "failureTitle": "unknown failure",
+            "failureSignature": "sig-unknown",
+            "owner": payload["owner"],
+            "responsibilityType": "no_high_confidence_owner",
+            "sourceBuildNumber": 0,
+            "sourceCommit": context.head_commit,
+            "confidence": 0.5,
+            "reason": "unknown",
+        }
+    ]
+    item = CiResponsibilityNotice.model_validate(payload).responsibilityItems[0]
+    assert item.owner.type == "no_high_confidence_owner"
+    assert item.sourceBuildNumber is None
+    assert item.sourceCommit is None
+    assert item.confidence == 0
 
 
 def test_langchain_agent_valid_json_high_confidence(monkeypatch, repo_cache, sample_repo, logs):
@@ -606,6 +749,14 @@ def test_schema_prompt_distinguishes_top_owner_from_item_owner_type():
     top_owner_block = CI_RESPONSIBILITY_NOTICE_JSON_SCHEMA_PROMPT.split('"failureReason"', 1)[0]
     assert "inherited_failure_owner" not in top_owner_block
     assert '"type": "high_confidence | medium_confidence | no_high_confidence_owner | inherited_failure_owner"' in CI_RESPONSIBILITY_NOTICE_JSON_SCHEMA_PROMPT
+
+
+def test_schema_prompt_describes_source_build_number_and_auto_failure_id():
+    assert '"sourceBuildNumber": 0' not in CI_RESPONSIBILITY_NOTICE_JSON_SCHEMA_PROMPT
+    assert '"sourceBuildNumber": "integer or null"' in CI_RESPONSIBILITY_NOTICE_JSON_SCHEMA_PROMPT
+    assert '"failureId": "auto"' in CI_RESPONSIBILITY_NOTICE_JSON_SCHEMA_PROMPT
+    assert "不要输出 0" in CI_RESPONSIBILITY_NOTICE_JSON_SCHEMA_PROMPT
+    assert "不要输出 F1/F2/chunk-0/failure-2" in CI_RESPONSIBILITY_NOTICE_JSON_SCHEMA_PROMPT
 
 
 def test_prompt_describes_failure_signature_alignment_rule():

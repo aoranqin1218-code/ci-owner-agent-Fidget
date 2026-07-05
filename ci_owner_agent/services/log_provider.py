@@ -30,8 +30,13 @@ ERROR_TERMS = [
     "stack trace",
 ]
 FAILURE_BLOCK_RE = re.compile(r"^\s*(\d+)\)\s+(.+?)\s*$")
+XFAIL_BLOCK_RE = re.compile(r"^\s*✖\s+(.+?)\s*$")
+FATAL_ERROR_RE = re.compile(r"(?:✖\s+ERROR:|\bERROR:|\bError\s+\[ERR_|\bERR_[A-Z0-9_]+)")
+ERROR_CODE_RE = re.compile(r"\b(ERR_[A-Z0-9_]+)\b")
 ERROR_LINE_RE = re.compile(r"\b(AssertionError|Error|TypeError|ReferenceError):\s*(.*)")
-PATH_RE = re.compile(r"((?:node_modules/|test/|server/)[^\s)]+?\.(?:ts|tsx|js|jsx))(?:[:]\d+(?::\d+)?)?")
+PATH_RE = re.compile(
+    r"((?:(?:[A-Za-z]:)?/?(?:var/app/)?)?(?:node_modules/|test/|server/|modules/|packages/)[^\s)'\",]+?\.(?:ts|tsx|js|jsx))(?:[:]\d+(?::\d+)?)?"
+)
 FOOTER_TERMS = [
     "------",
     "Dockerfile:",
@@ -255,39 +260,125 @@ class TextLogProvider(LogProvider):
         raw_lines = str(focused_chunk.get("content") or "").splitlines()
         lines = [_semantic_log_line(line) for line in raw_lines]
         starts = [idx for idx, line in enumerate(lines) if FAILURE_BLOCK_RE.match(line)]
-        if not starts:
-            return {"chunks": [], "warning": "test failure summaries unavailable; no mocha failure blocks found"}
-
         chunk_source = _summary_source_for_focused_source(str(focused_source or ""))
+        if starts:
+            return {
+                "chunks": self._build_summary_chunks(
+                    lines=lines,
+                    starts=starts,
+                    max_chunks=max_chunks,
+                    focused_chunk=focused_chunk,
+                    chunk_source=chunk_source,
+                    anchor_type="mocha_failure_block",
+                    signature_extractor=_extract_failure_signature,
+                    score=1.0,
+                )
+            }
+
+        xfail_starts = [idx for idx, line in enumerate(lines) if XFAIL_BLOCK_RE.match(line) and "ERROR:" not in line]
+        if xfail_starts:
+            return {
+                "chunks": self._build_summary_chunks(
+                    lines=lines,
+                    starts=xfail_starts,
+                    max_chunks=max_chunks,
+                    focused_chunk=focused_chunk,
+                    chunk_source=chunk_source,
+                    anchor_type="japa_failure_block",
+                    signature_extractor=_extract_xfail_signature,
+                    score=0.9,
+                )
+            }
+
+        fatal_start = next((idx for idx, line in enumerate(lines) if FATAL_ERROR_RE.search(line)), None)
+        if fatal_start is not None:
+            end = _trim_failure_block_end(lines, fatal_start, len(lines))
+            return {
+                "chunks": [
+                    self._summary_chunk(
+                        chunk_index=0,
+                        lines=lines,
+                        start=fatal_start,
+                        end=end,
+                        focused_chunk=focused_chunk,
+                        chunk_source=chunk_source,
+                        anchor_type="fatal_error_block",
+                        signature_extractor=_extract_fatal_error_signature,
+                        score=0.9,
+                    )
+                ]
+            }
+
+        return {"chunks": [], "warning": "test failure summaries unavailable; no supported failure blocks found"}
+
+    def _build_summary_chunks(
+        self,
+        *,
+        lines: list[str],
+        starts: list[int],
+        max_chunks: int,
+        focused_chunk: dict,
+        chunk_source: str,
+        anchor_type: str,
+        signature_extractor,
+        score: float,
+    ) -> list[dict]:
         chunks = []
         for chunk_index, start in enumerate(starts[:max_chunks]):
             end = starts[chunk_index + 1] if chunk_index + 1 < len(starts) else len(lines)
-            end = _trim_failure_block_end(lines, start, end)
-            block_lines = lines[start:end][:120]
-            content = "\n".join(block_lines)
-            if len(content) > 12000:
-                content = content[:12000]
-            signature = _extract_failure_signature(content)
-            start_line = (focused_chunk.get("startLine") or 1) + start
-            end_line = start_line + max(0, len(block_lines) - 1)
             chunks.append(
-                {
-                    "chunkIndex": chunk_index,
-                    "schemaVersion": 3,
-                    "chunkSource": chunk_source,
-                    "stageName": focused_chunk.get("stageName"),
-                    "stepName": focused_chunk.get("stepName"),
-                    "anchorType": "mocha_failure_block",
-                    "startLine": start_line,
-                    "endLine": end_line,
-                    "score": 1.0,
-                    "content": content,
-                    "truncated": end - start > len(block_lines),
-                    "signature": signature,
-                    "signatureHash": _signature_hash(signature),
-                }
+                self._summary_chunk(
+                    chunk_index=chunk_index,
+                    lines=lines,
+                    start=start,
+                    end=end,
+                    focused_chunk=focused_chunk,
+                    chunk_source=chunk_source,
+                    anchor_type=anchor_type,
+                    signature_extractor=signature_extractor,
+                    score=score,
+                )
             )
-        return {"chunks": chunks}
+        return chunks
+
+    def _summary_chunk(
+        self,
+        *,
+        chunk_index: int,
+        lines: list[str],
+        start: int,
+        end: int,
+        focused_chunk: dict,
+        chunk_source: str,
+        anchor_type: str,
+        signature_extractor,
+        score: float,
+    ) -> dict:
+        end = _trim_failure_block_end(lines, start, end)
+        block_lines = lines[start:end][:120]
+        content = "\n".join(block_lines)
+        truncated = end - start > len(block_lines)
+        if len(content) > 12000:
+            content = content[:12000]
+            truncated = True
+        signature = signature_extractor(content)
+        start_line = (focused_chunk.get("startLine") or 1) + start
+        end_line = start_line + max(0, len(block_lines) - 1)
+        return {
+            "chunkIndex": chunk_index,
+            "schemaVersion": 3,
+            "chunkSource": chunk_source,
+            "stageName": focused_chunk.get("stageName"),
+            "stepName": focused_chunk.get("stepName"),
+            "anchorType": anchor_type,
+            "startLine": start_line,
+            "endLine": end_line,
+            "score": score,
+            "content": content,
+            "truncated": truncated,
+            "signature": signature,
+            "signatureHash": _signature_hash(signature),
+        }
 
     def _focused_chunk(
         self,
@@ -407,6 +498,95 @@ def _extract_failure_signature(content: str) -> dict:
     }
 
 
+def _extract_xfail_signature(content: str) -> dict:
+    lines = content.splitlines()
+    first = XFAIL_BLOCK_RE.match(lines[0] if lines else "")
+    title = first.group(1).strip() if first else ""
+    error_type = "Error"
+    error_message = ""
+    joined = "\n".join(lines).lower()
+    if "run" in joined and "awaitfunc" in joined and "timeout" in joined:
+        error_type = "Timeout"
+        error_message = "run awaitfunc timeout"
+    else:
+        for line in lines:
+            match = ERROR_LINE_RE.search(line)
+            if match:
+                error_type = match.group(1)
+                error_message = match.group(2).strip()
+                break
+        if not error_message:
+            error_message = _first_meaningful_error_line(lines[1:]) or "error"
+
+    files = _extract_stack_paths(lines)
+    test_file = _pick_test_file(files)
+    top_stack_file = files[0] if files else None
+    normalized_error = _stable_error_message(error_message)
+    signature_key = "|".join(["xfail", title, error_type, normalized_error, test_file or "", top_stack_file or ""])
+    return {
+        "testName": title,
+        "testCase": title,
+        "errorType": error_type,
+        "errorMessage": normalized_error,
+        "testFile": test_file,
+        "topStackFile": top_stack_file,
+        "businessStackFiles": files,
+        "signatureKey": signature_key,
+    }
+
+
+def _extract_fatal_error_signature(content: str) -> dict:
+    lines = content.splitlines()
+    text = "\n".join(lines)
+    code_match = ERROR_CODE_RE.search(text)
+    error_code = code_match.group(1) if code_match else "fatal error"
+    message = ""
+    for line in lines:
+        if "Directory import" in line or ERROR_LINE_RE.search(line) or error_code in line:
+            message = line
+            break
+    if error_code and error_code not in message:
+        message = f"{error_code} {message}".strip()
+    files = _extract_stack_paths(lines)
+    test_file = _pick_test_file(files)
+    top_stack_file = test_file or (files[0] if files else None)
+    normalized_error = _stable_error_message(message or error_code)
+    signature_key = "|".join(["fatal", error_code, normalized_error, test_file or "", top_stack_file or ""])
+    return {
+        "testName": "test initialization",
+        "testCase": error_code,
+        "errorType": "Error",
+        "errorMessage": normalized_error,
+        "testFile": test_file,
+        "topStackFile": top_stack_file,
+        "businessStackFiles": files,
+        "signatureKey": signature_key,
+    }
+
+
+def _extract_stack_paths(lines: list[str]) -> list[str]:
+    files = []
+    for line in lines:
+        for match in PATH_RE.finditer(line.replace("\\", "/")):
+            path = _clean_stack_path(match.group(1))
+            if path not in files:
+                files.append(path)
+    return files
+
+
+def _pick_test_file(files: list[str]) -> str | None:
+    return next((path for path in files if path.startswith("test/") or "/test/" in path or "/tests/" in path), None)
+
+
+def _first_meaningful_error_line(lines: list[str]) -> str | None:
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith(("at ", "+", "-")):
+            continue
+        return stripped
+    return None
+
+
 def _split_test_title(title: str) -> tuple[str, str | None]:
     cleaned = title.strip().rstrip(":")
     parts = cleaned.split(maxsplit=1)
@@ -416,7 +596,12 @@ def _split_test_title(title: str) -> tuple[str, str | None]:
 
 
 def _clean_stack_path(path: str) -> str:
-    return re.sub(r":\d+(?::\d+)?$", "", path.replace("\\", "/")).strip()
+    cleaned = re.sub(r":\d+(?::\d+)?$", "", path.replace("\\", "/")).strip()
+    cleaned = re.sub(r"^[A-Za-z]:/", "", cleaned)
+    cleaned = cleaned.lstrip("/")
+    if cleaned.startswith("var/app/"):
+        cleaned = cleaned[len("var/app/") :]
+    return cleaned
 
 
 def _stable_error_message(message: str) -> str:
