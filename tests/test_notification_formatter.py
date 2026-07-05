@@ -116,6 +116,18 @@ def test_notify_notice_dry_run_outputs_markdown(tmp_path, capsys, monkeypatch):
     assert "#### 反馈链接" in out
 
 
+def test_notify_notice_missing_file_returns_error_without_traceback(tmp_path, capsys, monkeypatch):
+    missing = tmp_path / "missing.json"
+    monkeypatch.setenv("CI_AGENT_MODEL_PROVIDER", "fake")
+    rc = main(["notify-notice", "--notice-file", str(missing), "--dry-run"])
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "ERROR: notice file not found:" in captured.err
+    assert str(missing) in captured.err
+    assert "Traceback" not in captured.err
+    assert captured.out == ""
+
+
 def test_analyze_notify_dry_run_stdout_stays_json(monkeypatch, capsys):
     notice = CiResponsibilityNotice.model_validate(notice_payload([item()]))
     monkeypatch.setenv("CI_AGENT_MODEL_PROVIDER", "fake")

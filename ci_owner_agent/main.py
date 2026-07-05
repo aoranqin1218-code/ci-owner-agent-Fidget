@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from pathlib import Path
 
 from ci_owner_agent.config import load_settings
 from ci_owner_agent.orchestrator import analyze_jenkins, analyze_local, failure_without_context
@@ -157,8 +158,20 @@ def main(argv: list[str] | None = None) -> int:
         _maybe_notify_notice(notice, settings, args.notify, args.notify_dry_run, args.force_notify)
         return 0
     if args.command == "notify-notice":
-        data = json.loads(open(args.notice_file, encoding="utf-8").read())
-        notice = CiResponsibilityNotice.model_validate(data)
+        notice_path = Path(args.notice_file)
+        if not notice_path.exists():
+            print(f"ERROR: notice file not found: {notice_path}", file=sys.stderr)
+            return 2
+        try:
+            data = json.loads(notice_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            print(f"ERROR: invalid notice json: {exc}", file=sys.stderr)
+            return 2
+        try:
+            notice = CiResponsibilityNotice.model_validate(data)
+        except Exception as exc:
+            print(f"ERROR: invalid notice schema: {exc}", file=sys.stderr)
+            return 2
         dry_run = args.dry_run or settings.wecom_notify_dry_run
         result = _notify_notice(
             notice,
