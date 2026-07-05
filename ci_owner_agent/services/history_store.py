@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
+import json
 import sys
 from typing import Any
 
@@ -32,6 +34,8 @@ class MongoHistoryStore:
         self.builds = self.db["ci_builds"]
         self.notices = self.db["ci_notices"]
         self.failure_chunks = self.db["ci_failure_chunks"]
+        self.notifications = self.db["ci_notifications"]
+        self.feedback = self.db["ci_feedback"]
         self.ensure_indexes()
 
     @classmethod
@@ -46,6 +50,9 @@ class MongoHistoryStore:
         self.notices.create_index([("job", 1), ("branch", 1), ("buildNumber", 1)], unique=True)
         self.failure_chunks.create_index([("job", 1), ("branch", 1), ("buildNumber", 1)])
         self.failure_chunks.create_index([("job", 1), ("branch", 1), ("chunkHash", 1)])
+        self.notifications.create_index([("job", 1), ("branch", 1), ("buildNumber", 1), ("noticeHash", 1), ("channel", 1)])
+        self.feedback.create_index([("job", 1), ("branch", 1), ("buildNumber", 1), ("failureId", 1)])
+        self.feedback.create_index([("job", 1), ("branch", 1), ("failureSignature", 1), ("isActive", 1)])
 
     def save_analysis(
         self,
@@ -164,11 +171,45 @@ class MongoHistoryStore:
             notice_query["branch"] = {"$in": [branch, None]}
         notices = {item.get("buildNumber"): item for item in self.notices.find(notice_query)}
         build_by_number = {item.get("buildNumber"): item for item in builds}
+        feedback_docs = _active_feedback_docs(self, job, branch)
         for chunk in chunks:
             build_number = chunk.get("buildNumber")
             chunk["build"] = build_by_number.get(build_number, {})
             chunk["noticeDoc"] = notices.get(build_number, {})
+            chunk["feedbackOverride"] = _find_feedback_override(
+                feedback_docs,
+                job=job,
+                branch=chunk.get("branch"),
+                build_number=build_number,
+                signature_hash=chunk.get("signatureHash"),
+                signature=chunk.get("signature") or {},
+                notice_doc=chunk.get("noticeDoc") or {},
+            )
         return chunks
+
+    def notification_sent(self, *, job: str, branch: str | None, build_number: int, notice_hash: str, channel: str = "wecom") -> bool:
+        return self.notifications.find_one(
+            {"job": job, "branch": branch, "buildNumber": build_number, "noticeHash": notice_hash, "channel": channel, "status": {"$in": ["sent", "skipped"]}}
+        ) is not None
+
+    def save_notification(self, *, notice: CiResponsibilityNotice, notice_hash: str, channel: str, status: str, message: str, error: str | None = None) -> dict:
+        now = dt.datetime.now(dt.timezone.utc)
+        key = {
+            "job": notice.job,
+            "branch": notice.branch,
+            "buildNumber": notice.buildNumber,
+            "noticeHash": notice_hash,
+            "channel": channel,
+        }
+        doc = {
+            **key,
+            "status": status,
+            "messagePreview": message[:1000],
+            "error": error,
+            "updatedAt": now,
+        }
+        self.notifications.update_one(key, {"$set": {**doc, "createdAt": now}}, upsert=True)
+        return {"ok": True, **doc}
 
 
 def get_history_store(settings: Settings) -> MongoHistoryStore | None:
@@ -216,3 +257,45 @@ def _responsibility_item_summary(items: list[dict]) -> dict[str, Any]:
         "inheritedOwnerCount": inherited_count,
         "currentBuildOwnerCount": current_count,
     }
+
+
+def notice_hash(notice: CiResponsibilityNotice) -> str:
+    payload = json.dumps(notice.model_dump(mode="json"), ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _active_feedback_docs(store: MongoHistoryStore, job: str, branch: str | None) -> list[dict]:
+    query: dict[str, Any] = {"job": job, "isActive": True}
+    docs = list(store.feedback.find(query))
+    if branch is None:
+        return docs
+    return [doc for doc in docs if doc.get("branch") in {branch, None}]
+
+
+def _find_feedback_override(
+    feedback_docs: list[dict],
+    *,
+    job: str,
+    branch: str | None,
+    build_number: int | None,
+    signature_hash: str | None,
+    signature: dict,
+    notice_doc: dict,
+) -> dict | None:
+    possible_signatures = {signature_hash, signature.get("signatureKey"), signature.get("signatureHash")}
+    notice = notice_doc.get("notice") if isinstance(notice_doc, dict) else None
+    failure_ids: set[str] = set()
+    for item in (notice.get("responsibilityItems") if isinstance(notice, dict) else []) or []:
+        if item.get("failureSignature") in possible_signatures and item.get("failureId"):
+            failure_ids.add(item.get("failureId"))
+    for doc in feedback_docs:
+        if doc.get("job") != job:
+            continue
+        if branch is not None and doc.get("branch") not in {branch, None}:
+            continue
+        if doc.get("failureSignature") and doc.get("failureSignature") in possible_signatures:
+            return doc
+    for doc in feedback_docs:
+        if doc.get("job") == job and doc.get("buildNumber") == build_number and doc.get("failureId") in failure_ids:
+            return doc
+    return None

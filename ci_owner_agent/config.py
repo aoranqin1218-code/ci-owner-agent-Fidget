@@ -37,6 +37,13 @@ class Settings:
     history_mongo_db: str
     history_max_candidates: int
     failure_chunk_tail_lines: int
+    wecom_notify_enabled: bool
+    wecom_webhook_url: str | None
+    wecom_notify_dry_run: bool
+    wecom_notify_on_success: bool
+    wecom_notify_on_no_owner: bool
+    feedback_base_url: str | None
+    notification_dedup_enabled: bool
 
 
 def _int_env(name: str, default: int) -> int:
@@ -108,6 +115,13 @@ def load_settings(env_file: str | Path | None = None) -> Settings:
         history_mongo_db=os.getenv("CI_AGENT_HISTORY_MONGO_DB", "ci_owner_agent"),
         history_max_candidates=_int_env_or_default("CI_AGENT_HISTORY_MAX_CANDIDATES", 5),
         failure_chunk_tail_lines=_int_env_min_or_default("CI_AGENT_FAILURE_CHUNK_TAIL_LINES", 500, 50),
+        wecom_notify_enabled=_bool_env("CI_AGENT_WECOM_NOTIFY_ENABLED", False),
+        wecom_webhook_url=os.getenv("CI_AGENT_WECOM_WEBHOOK_URL") or None,
+        wecom_notify_dry_run=_bool_env("CI_AGENT_WECOM_NOTIFY_DRY_RUN", True),
+        wecom_notify_on_success=_bool_env("CI_AGENT_WECOM_NOTIFY_ON_SUCCESS", False),
+        wecom_notify_on_no_owner=_bool_env("CI_AGENT_WECOM_NOTIFY_ON_NO_OWNER", True),
+        feedback_base_url=os.getenv("CI_AGENT_FEEDBACK_BASE_URL") or None,
+        notification_dedup_enabled=_bool_env("CI_AGENT_NOTIFICATION_DEDUP_ENABLED", True),
     )
 
 
@@ -131,6 +145,7 @@ def public_settings(settings: Settings) -> dict[str, object]:
     data["jenkins_token"] = "***" if settings.jenkins_token else None
     data["api_key"] = "***" if settings.api_key else None
     data["langsmith_api_key"] = "***" if settings.langsmith_api_key else None
+    data["wecom_webhook_url"] = "***" if settings.wecom_webhook_url else None
     data["repo_cache_dir"] = str(settings.repo_cache_dir)
     data["ts_analyzer_dir"] = str(settings.ts_analyzer_dir)
     return data

@@ -6,9 +6,13 @@ import sys
 
 from ci_owner_agent.config import load_settings
 from ci_owner_agent.orchestrator import analyze_jenkins, analyze_local, failure_without_context
-from ci_owner_agent.schemas import BuildInfo
+from ci_owner_agent.schemas import BuildInfo, CiResponsibilityNotice
+from ci_owner_agent.services.feedback_store import FeedbackStore
 from ci_owner_agent.services.git_client import GitClient
+from ci_owner_agent.services.history_store import MongoHistoryStore, get_history_store, notice_hash
 from ci_owner_agent.services.jenkins_client import JenkinsClient
+from ci_owner_agent.services.notification_formatter import format_wecom_markdown_notice
+from ci_owner_agent.services.wecom_notifier import send_wecom_markdown
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -36,6 +40,9 @@ def build_parser() -> argparse.ArgumentParser:
     analyze.add_argument("--build", type=int, required=True)
     analyze.add_argument("--repo", required=True)
     analyze.add_argument("--log-tail-lines", type=int, default=None)
+    analyze.add_argument("--notify", action="store_true")
+    analyze.add_argument("--notify-dry-run", action="store_true")
+    analyze.add_argument("--force-notify", action="store_true")
 
     local = subparsers.add_parser("analyze-local", help="Analyze a local console log and local Git cache")
     local.add_argument("--repo", required=True)
@@ -50,6 +57,34 @@ def build_parser() -> argparse.ArgumentParser:
     local.add_argument("--result", choices=["SUCCESS", "FAILURE", "UNSTABLE", "ABORTED", "UNKNOWN"], default=None)
     local.add_argument("--ignore-checkout-commit-mismatch", action="store_true")
     local.add_argument("--last-success-build", type=int, default=None)
+    local.add_argument("--notify", action="store_true")
+    local.add_argument("--notify-dry-run", action="store_true")
+    local.add_argument("--force-notify", action="store_true")
+
+    notify = subparsers.add_parser("notify-notice", help="Send or preview a WeCom markdown notice")
+    notify.add_argument("--notice-file", required=True)
+    notify.add_argument("--dry-run", action="store_true")
+    notify.add_argument("--force", action="store_true")
+    notify.add_argument("--feedback-base-url", default=None)
+
+    feedback = subparsers.add_parser("feedback", help="Manage manual feedback")
+    feedback_sub = feedback.add_subparsers(dest="feedback_command", required=True)
+    apply = feedback_sub.add_parser("apply")
+    apply.add_argument("--job", required=True)
+    apply.add_argument("--build", type=int, required=True)
+    apply.add_argument("--failure-id", default=None)
+    apply.add_argument("--failure-signature", default=None)
+    apply.add_argument("--action", required=True)
+    apply.add_argument("--owner-name", default=None)
+    apply.add_argument("--owner-email", default=None)
+    apply.add_argument("--owner-type", default="high_confidence")
+    apply.add_argument("--owner-commit", default=None)
+    apply.add_argument("--source-build-number", type=int, default=None)
+    apply.add_argument("--reviewer", default=None)
+    apply.add_argument("--note", default=None)
+    list_cmd = feedback_sub.add_parser("list")
+    list_cmd.add_argument("--job", required=True)
+    list_cmd.add_argument("--build", type=int, required=True)
     return parser
 
 
@@ -81,6 +116,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"ERROR: {exc}", file=sys.stderr)
             return 2
         _print_json(notice)
+        _maybe_notify_notice(notice, settings, args.notify, args.notify_dry_run, args.force_notify)
         return 0
     if args.command == "analyze":
         if not settings.jenkins_url:
@@ -99,6 +135,7 @@ def main(argv: list[str] | None = None) -> int:
                 "JENKINS_URL 未配置，无法访问 Jenkins 获取构建信息。",
             )
             _print_json(notice)
+            _maybe_notify_notice(notice, settings, args.notify, args.notify_dry_run, args.force_notify)
             return 0
         git_client = GitClient(settings.repo_cache_dir, max_output_chars=settings.max_tool_output_chars)
         jenkins_client = JenkinsClient(
@@ -117,9 +154,98 @@ def main(argv: list[str] | None = None) -> int:
             settings=settings,
         )
         _print_json(notice)
+        _maybe_notify_notice(notice, settings, args.notify, args.notify_dry_run, args.force_notify)
         return 0
+    if args.command == "notify-notice":
+        data = json.loads(open(args.notice_file, encoding="utf-8").read())
+        notice = CiResponsibilityNotice.model_validate(data)
+        dry_run = args.dry_run or settings.wecom_notify_dry_run
+        result = _notify_notice(
+            notice,
+            settings,
+            dry_run=dry_run,
+            force=args.force,
+            feedback_base_url=args.feedback_base_url or settings.feedback_base_url,
+        )
+        if dry_run:
+            print(result["markdown"])
+        elif not result.get("ok"):
+            print(f"WARNING: notify failed: {result.get('error')}", file=sys.stderr)
+        return 0
+    if args.command == "feedback":
+        store = get_history_store(settings)
+        if store is None:
+            print("ERROR: history store disabled or unavailable", file=sys.stderr)
+            return 2
+        feedback_store = FeedbackStore(store)
+        if args.feedback_command == "apply":
+            try:
+                result = feedback_store.apply_feedback(
+                    job=args.job,
+                    build_number=args.build,
+                    failure_id=args.failure_id,
+                    failure_signature=args.failure_signature,
+                    action=args.action,
+                    owner_name=args.owner_name,
+                    owner_email=args.owner_email,
+                    owner_type=args.owner_type,
+                    owner_commit=args.owner_commit,
+                    source_build_number=args.source_build_number,
+                    reviewer=args.reviewer,
+                    note=args.note,
+                )
+            except ValueError as exc:
+                print(f"ERROR: {exc}", file=sys.stderr)
+                return 2
+            print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+            return 0
+        if args.feedback_command == "list":
+            print(json.dumps(feedback_store.list_feedback(job=args.job, build_number=args.build), ensure_ascii=False, indent=2, default=str))
+            return 0
     parser.print_help()
     return 2
+
+
+def _maybe_notify_notice(notice: CiResponsibilityNotice, settings, cli_notify: bool, cli_dry_run: bool, force: bool) -> None:
+    if not (cli_notify or settings.wecom_notify_enabled):
+        return
+    if notice.result == "SUCCESS" and not settings.wecom_notify_on_success:
+        return
+    if notice.owner.type == "no_high_confidence_owner" and not settings.wecom_notify_on_no_owner and not notice.responsibilityItems:
+        return
+    result = _notify_notice(notice, settings, dry_run=cli_dry_run or settings.wecom_notify_dry_run, force=force, feedback_base_url=settings.feedback_base_url)
+    if not result.get("ok"):
+        print(f"WARNING: notify failed: {result.get('error')}", file=sys.stderr)
+
+
+def _notify_notice(notice: CiResponsibilityNotice, settings, *, dry_run: bool, force: bool, feedback_base_url: str | None) -> dict:
+    markdown = format_wecom_markdown_notice(notice, feedback_base_url=feedback_base_url)
+    store = get_history_store(settings)
+    digest = notice_hash(notice)
+    if store and settings.notification_dedup_enabled and not force and store.notification_sent(
+        job=notice.job, branch=notice.branch, build_number=notice.buildNumber, notice_hash=digest
+    ):
+        store.save_notification(notice=notice, notice_hash=digest, channel="wecom", status="skipped", message=markdown, error="deduplicated")
+        return {"ok": True, "status": "skipped", "markdown": markdown}
+    if dry_run:
+        if store:
+            store.save_notification(notice=notice, notice_hash=digest, channel="wecom", status="dry_run", message=markdown)
+        return {"ok": True, "status": "dry_run", "markdown": markdown}
+    if not settings.wecom_webhook_url:
+        if store:
+            store.save_notification(notice=notice, notice_hash=digest, channel="wecom", status="failed", message=markdown, error="CI_AGENT_WECOM_WEBHOOK_URL is not configured")
+        return {"ok": False, "error": "CI_AGENT_WECOM_WEBHOOK_URL is not configured", "markdown": markdown}
+    send_result = send_wecom_markdown(settings.wecom_webhook_url, markdown)
+    if store:
+        store.save_notification(
+            notice=notice,
+            notice_hash=digest,
+            channel="wecom",
+            status="sent" if send_result.get("ok") else "failed",
+            message=markdown,
+            error=send_result.get("error"),
+        )
+    return {**send_result, "markdown": markdown}
 
 
 if __name__ == "__main__":

@@ -125,6 +125,7 @@ def history_search_similar_failures(
                     "matchedHistoricalChunk": hist_text[:1000],
                     "matchedCurrentChunk": current["text"][:1000],
                     "notice": notice,
+                    "feedbackOverride": hist.get("feedbackOverride"),
                     "_noticeDoc": notice_doc,
                 }
                 candidates.append(candidate)
@@ -226,6 +227,25 @@ def _find_inherited_owner_for_chunk(candidates: list[dict], current_build_number
 
 
 def _high_confidence_source_from_candidate(candidate: dict) -> dict | None:
+    feedback = candidate.get("feedbackOverride")
+    if isinstance(feedback, dict):
+        action = feedback.get("action")
+        if action in {"mark_flaky", "mark_no_owner"}:
+            candidate["feedbackSuppressed"] = True
+            candidate["feedbackReason"] = action
+            return None
+        if action == "correct_owner" and isinstance(feedback.get("correctedOwner"), dict):
+            owner = feedback["correctedOwner"]
+            return {
+                "ownerType": owner.get("type"),
+                "ownerName": owner.get("name"),
+                "ownerEmail": owner.get("email"),
+                "ownerCommit": owner.get("commit"),
+                "confidence": owner.get("confidence"),
+                "sourceBuildNumber": feedback.get("sourceBuildNumber") or candidate.get("buildNumber"),
+                "sourceBuildUrl": feedback.get("buildUrl") or candidate.get("buildUrl"),
+                "feedbackOverride": True,
+            }
     notice_doc = candidate.get("_noticeDoc") or {}
     notice = notice_doc.get("notice")
     items = notice.get("responsibilityItems") if isinstance(notice, dict) else None
