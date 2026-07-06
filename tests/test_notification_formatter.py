@@ -219,6 +219,21 @@ def test_maybe_notify_allows_item_owner_when_no_owner_notify_disabled(monkeypatc
     assert len(calls) == 1
 
 
+def test_env_enabled_notify_skips_success_by_default(monkeypatch):
+    calls = []
+    payload = notice_payload([item()])
+    payload["result"] = "SUCCESS"
+    notice = CiResponsibilityNotice.model_validate(payload)
+    monkeypatch.setenv("CI_AGENT_WECOM_NOTIFY_ENABLED", "true")
+    monkeypatch.setenv("CI_AGENT_WECOM_NOTIFY_ON_SUCCESS", "false")
+    settings = load_settings()
+    monkeypatch.setattr("ci_owner_agent.main._notify_notice", lambda *args, **kwargs: calls.append(kwargs) or {"ok": True})
+
+    _maybe_notify_notice(notice, settings, cli_notify=False, cli_dry_run=False, force=False)
+
+    assert calls == []
+
+
 def test_notify_dedup_does_not_overwrite_sent(monkeypatch):
     store = make_store()
     notice = CiResponsibilityNotice.model_validate(notice_payload([item()]))

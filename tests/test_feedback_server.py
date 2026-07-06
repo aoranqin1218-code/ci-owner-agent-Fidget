@@ -136,7 +136,7 @@ def test_feedback_html_escapes_notice_text():
 
 
 def test_feedback_notice_not_found():
-    client = TestClient(create_app(settings=replace(load_settings(), history_enabled=True), history_store=make_store()))
+    client = TestClient(create_app(settings=replace(load_settings(), history_enabled=True, feedback_shared_token=None), history_store=make_store()))
 
     response = client.get("/feedback", params={"job": "missing", "build": 1})
 
