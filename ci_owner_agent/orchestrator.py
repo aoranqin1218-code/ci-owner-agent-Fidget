@@ -14,6 +14,7 @@ from ci_owner_agent.services.history_store import get_history_store
 from ci_owner_agent.services.jenkins_client import JenkinsClient
 from ci_owner_agent.services.log_provider import JenkinsLogProvider, LocalFileLogProvider, LogProvider, detect_checkout_revision_from_console_log
 from ci_owner_agent.services.scorer import no_owner, validate_notice
+from ci_owner_agent.tools.ai_history_tools import history_search_similar_failure_facts
 from ci_owner_agent.tools.history_tools import history_search_similar_failures
 from ci_owner_agent.tools.jenkins_tools import jenkins_get_build_info, jenkins_get_last_successful_build_info
 
@@ -228,7 +229,29 @@ def _with_precomputed_failure_context(context: AgentRuntimeContext) -> AgentRunt
             "stage": "orchestrator_history_precheck",
             "candidates": [],
         }
-    return replace(enriched, history_precheck=history_precheck)
+    enriched = replace(enriched, history_precheck=history_precheck)
+
+    summaries_exist = bool(failure_summaries.get("chunks")) if isinstance(failure_summaries, dict) else False
+    facts_exist = bool((enriched.failure_facts or {}).get("facts")) if isinstance(enriched.failure_facts, dict) else False
+    if (
+        not summaries_exist
+        and facts_exist
+        and enriched.settings.history_enabled
+        and enriched.settings.ai_history_compare_enabled
+    ):
+        try:
+            ai_history_precheck = history_search_similar_failure_facts(enriched)
+        except Exception as exc:
+            ai_history_precheck = {
+                "ok": False,
+                "historyEnabled": enriched.settings.history_enabled,
+                "mode": "ai_failure_facts",
+                "error": str(exc),
+                "candidates": [],
+                "currentFacts": [],
+            }
+        enriched = replace(enriched, ai_history_precheck=ai_history_precheck)
+    return enriched
 
 
 def _save_history(

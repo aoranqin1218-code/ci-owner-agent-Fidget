@@ -29,3 +29,4 @@ class AgentRuntimeContext:
     failure_summaries: dict[str, Any] | None = None
     failure_facts: dict[str, Any] | None = None
     history_precheck: dict[str, Any] | None = None
+    ai_history_precheck: dict[str, Any] | None = None

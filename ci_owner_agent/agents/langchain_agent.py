@@ -149,6 +149,7 @@ class LangChainResponsibilityAgent:
             "failureFacts": self._compact_failure_facts(self.context.failure_facts),
             "logTailMeta": self._log_tail_meta(log_tail),
             "historyPrecheck": self._compact_history_precheck(self.context.history_precheck),
+            "aiHistoryPrecheck": self._compact_ai_history_precheck(self.context.ai_history_precheck),
             "instruction": (
                 "必须基于工具证据。证据不足输出 no_high_confidence_owner。最终只输出 JSON。"
                 "如需更多 changed files 或 commits，请调用 repo_get_diff_files / repo_get_commits_between。"
@@ -158,6 +159,18 @@ class LangChainResponsibilityAgent:
                 "如果 failureFacts[*].historyEligible=false 或 isGenericWrapper=true，不得基于它输出 inherited_failure_owner。"
                 "如果 responsibilityItems 对应某个 failureFact，failureSignature 优先使用 failureFact.signatureKey，便于后续历史事实比对。"
                 "当前版本 AI failureFacts 只辅助当前 build 定责，不代表历史继承结论。"
+                "aiHistoryPrecheck 是 AI failure facts 历史语义比对结果。"
+                "只有 aiHistoryPrecheck.currentFacts[*].inheritedOwner.found=true，且 matchType=\"ai_fact_semantic\"，"
+                "且 relationship=\"same_root_cause\"，才允许基于 AI facts 输出 inherited_failure_owner。"
+                "输出 inherited_failure_owner 时，responsibilityType=\"inherited_failure_owner\"，owner.type=\"inherited_failure_owner\"，"
+                "owner.name/email/commit 使用 inheritedOwner 中的 ownerName/ownerEmail/ownerCommit，owner.confidence 使用 inheritedOwner.confidence，"
+                "sourceBuildNumber/sourceBuildUrl 使用 inheritedOwner.sourceBuildNumber/sourceBuildUrl，matchType=\"ai_fact_semantic\"，"
+                "relationship=\"same_root_cause\"，failureSignature 使用当前 currentFact.signatureKey。"
+                "如果 aiHistoryPrecheck 没有 inheritedOwner.found=true，不得因为 historical facts 存在就继承。"
+                "如果 currentFact.blockedReason 存在，不得继承；如果 feedbackOverride 是 mark_flaky 或 mark_no_owner，不得继承。"
+                "Docker/Jenkins/BuildKit/shell wrapper 永远不能作为历史继承依据。"
+                "deterministic historyPrecheck 和 aiHistoryPrecheck 都存在时，优先使用 deterministic historyPrecheck；"
+                "AI history 只用于非 Mocha/Japa failure facts。"
                 "如需更多日志，再调用 log_read_range / log_search / log_read_tail。"
                 "不要仅凭 changedFiles 或 package.json 依赖升级输出 high_confidence。"
             ),
@@ -212,6 +225,52 @@ class LangChainResponsibilityAgent:
                 }
                 for fact in (facts_result.get("facts") or [])[:5]
                 if isinstance(fact, dict)
+            ],
+        }
+
+    def _compact_ai_history_precheck(self, precheck: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not isinstance(precheck, dict):
+            return None
+        return {
+            "ok": precheck.get("ok"),
+            "mode": precheck.get("mode"),
+            "threshold": precheck.get("threshold"),
+            "warning": precheck.get("warning"),
+            "error": precheck.get("error"),
+            "currentFacts": [
+                {
+                    "factId": item.get("factId"),
+                    "signatureKey": item.get("signatureKey"),
+                    "failureKind": item.get("failureKind"),
+                    "errorCode": item.get("errorCode"),
+                    "packageName": item.get("packageName"),
+                    "filePath": item.get("filePath"),
+                    "symbol": item.get("symbol"),
+                    "confidence": item.get("confidence"),
+                    "blockedReason": item.get("blockedReason"),
+                    "inheritedOwner": self._compact_inherited_owner(item.get("inheritedOwner")),
+                }
+                for item in (precheck.get("currentFacts") or [])[:5]
+                if isinstance(item, dict)
+            ],
+            "candidates": [
+                {
+                    "currentFactId": item.get("currentFactId"),
+                    "historicalFactId": item.get("historicalFactId"),
+                    "buildNumber": item.get("buildNumber"),
+                    "buildUrl": item.get("buildUrl"),
+                    "sameFailure": item.get("sameFailure"),
+                    "confidence": item.get("confidence"),
+                    "relationship": item.get("relationship"),
+                    "matchType": item.get("matchType"),
+                    "reason": item.get("reason"),
+                    "ownerName": item.get("ownerName"),
+                    "ownerEmail": item.get("ownerEmail"),
+                    "ownerCommit": item.get("ownerCommit"),
+                    "feedbackOverride": self._compact_feedback_override(item.get("feedbackOverride")),
+                }
+                for item in (precheck.get("candidates") or [])[:5]
+                if isinstance(item, dict)
             ],
         }
 
@@ -307,6 +366,18 @@ class LangChainResponsibilityAgent:
             "confidence": value.get("confidence"),
             "matchType": value.get("matchType"),
             "relationship": value.get("relationship"),
+            "feedbackVerified": value.get("feedbackVerified"),
+            "feedbackCorrected": value.get("feedbackCorrected"),
+        }
+
+    def _compact_feedback_override(self, value: Any) -> dict[str, Any] | None:
+        if not isinstance(value, dict):
+            return None
+        return {
+            "action": value.get("action"),
+            "reviewer": value.get("reviewer"),
+            "note": value.get("note"),
+            "correctedOwner": value.get("correctedOwner"),
         }
 
     def _metadata(self) -> dict[str, Any]:

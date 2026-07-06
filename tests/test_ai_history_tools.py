@@ -253,6 +253,31 @@ def test_ai_history_feedback_correct_owner_overrides_owner(monkeypatch, repo_cac
     assert inherited["feedbackCorrected"] is True
 
 
+def test_ai_history_feedback_correct_owner_medium_confidence_can_inherit(monkeypatch, repo_cache, sample_repo, logs):
+    monkeypatch.setattr("ci_owner_agent.tools.ai_history_tools.compare_failure_facts_with_ai", lambda **kwargs: _same())
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    store = make_store()
+    fact = make_fact()
+    _save_fact(store, context, build=7, fact=fact, owner_name="test")
+    FeedbackStore(store).apply_feedback(
+        job=context.job,
+        build_number=7,
+        failure_id=None,
+        failure_signature=fact.signatureKey,
+        action="correct_owner",
+        owner_name="lisi",
+        owner_email="lisi@test.com",
+        owner_type="medium_confidence",
+    )
+    result = history_search_similar_failure_facts(_context(context, facts=[fact]), store=store)
+    inherited = result["currentFacts"][0]["inheritedOwner"]
+    assert inherited["found"] is True
+    assert inherited["ownerName"] == "lisi"
+    assert inherited["ownerType"] == "medium_confidence"
+    assert inherited["confidence"] > 0
+    assert inherited["feedbackCorrected"] is True
+
+
 def test_ai_history_feedback_confirm_owner_marks_verified(monkeypatch, repo_cache, sample_repo, logs):
     monkeypatch.setattr("ci_owner_agent.tools.ai_history_tools.compare_failure_facts_with_ai", lambda **kwargs: _same())
     context = make_lc_context(repo_cache, sample_repo, logs)

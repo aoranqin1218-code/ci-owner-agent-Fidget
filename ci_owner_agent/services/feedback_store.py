@@ -56,7 +56,7 @@ class FeedbackStore:
                 name=owner_name or "",
                 email=owner_email,
                 commit=owner_commit,
-                confidence=1 if owner_type == "high_confidence" else 0,
+                confidence=1 if owner_type == "high_confidence" else 0.7,
             ).model_dump(mode="json")
 
         now = dt.datetime.now(dt.timezone.utc)

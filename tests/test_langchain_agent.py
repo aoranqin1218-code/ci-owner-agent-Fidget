@@ -1024,6 +1024,109 @@ def test_initial_input_includes_failure_facts(repo_cache, sample_repo, logs):
     assert "inherited_failure_owner" in payload["instruction"]
 
 
+def _ai_history_precheck_payload(count: int = 1) -> dict:
+    return {
+        "ok": True,
+        "mode": "ai_failure_facts",
+        "threshold": 0.9,
+        "warning": None,
+        "currentFacts": [
+            {
+                "factId": f"fact-{idx}",
+                "signatureKey": f"typescript_compile_error|TS2305|src/{idx}.ts|symbol",
+                "failureKind": "typescript_compile_error",
+                "errorCode": "TS2305",
+                "packageName": "@fx/ai",
+                "filePath": f"src/{idx}.ts",
+                "symbol": "classifyErrorMessage",
+                "confidence": 0.95,
+                "blockedReason": None,
+                "notice": {"large": "should be omitted"},
+                "evidence": ["should be omitted"],
+                "inheritedOwner": {
+                    "found": True,
+                    "sourceBuildNumber": 7,
+                    "sourceBuildUrl": "local://services/fx-code-unittest/7",
+                    "ownerType": "high_confidence",
+                    "ownerName": "test",
+                    "ownerEmail": "test@test.com",
+                    "ownerCommit": "commit-7",
+                    "confidence": 0.95,
+                    "matchType": "ai_fact_semantic",
+                    "relationship": "same_root_cause",
+                    "feedbackVerified": False,
+                    "feedbackCorrected": False,
+                },
+            }
+            for idx in range(count)
+        ],
+        "candidates": [
+            {
+                "currentFactId": f"fact-{idx}",
+                "historicalFactId": f"hist-{idx}",
+                "buildNumber": 7,
+                "buildUrl": "local://services/fx-code-unittest/7",
+                "sameFailure": True,
+                "confidence": 0.95,
+                "relationship": "same_root_cause",
+                "matchType": "ai_fact_semantic",
+                "reason": "same root cause",
+                "ownerName": "test",
+                "ownerEmail": "test@test.com",
+                "ownerCommit": "commit-7",
+                "notice": {"large": "should be omitted"},
+                "evidence": ["should be omitted"],
+                "feedbackOverride": {"action": "confirm_owner", "reviewer": "qa", "note": "verified"},
+            }
+            for idx in range(count)
+        ],
+    }
+
+
+def test_initial_input_includes_ai_history_precheck(repo_cache, sample_repo, logs):
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    context = replace(context, ai_history_precheck=_ai_history_precheck_payload())
+
+    payload = json.loads(LangChainResponsibilityAgent(context.settings, context, [])._initial_input())
+
+    precheck = payload["aiHistoryPrecheck"]
+    assert precheck["mode"] == "ai_failure_facts"
+    assert precheck["currentFacts"][0]["inheritedOwner"]["found"] is True
+    assert precheck["currentFacts"][0]["inheritedOwner"]["matchType"] == "ai_fact_semantic"
+    assert precheck["candidates"][0]["matchType"] == "ai_fact_semantic"
+
+
+def test_initial_input_ai_history_precheck_is_compacted(repo_cache, sample_repo, logs):
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    context = replace(context, ai_history_precheck=_ai_history_precheck_payload(8))
+
+    raw = LangChainResponsibilityAgent(context.settings, context, [])._initial_input()
+    payload = json.loads(raw)
+
+    precheck = payload["aiHistoryPrecheck"]
+    assert len(precheck["currentFacts"]) == 5
+    assert len(precheck["candidates"]) == 5
+    assert "notice" not in precheck["currentFacts"][0]
+    assert "evidence" not in precheck["currentFacts"][0]
+    assert "notice" not in precheck["candidates"][0]
+    assert "evidence" not in precheck["candidates"][0]
+    assert "should be omitted" not in raw
+
+
+def test_instruction_mentions_ai_fact_semantic_inherited_owner(repo_cache, sample_repo, logs):
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    payload = json.loads(LangChainResponsibilityAgent(context.settings, context, [])._initial_input())
+    instruction = payload["instruction"]
+    for text in [
+        "aiHistoryPrecheck",
+        "ai_fact_semantic",
+        "inherited_failure_owner",
+        "same_root_cause",
+        "blockedReason",
+    ]:
+        assert text in instruction
+
+
 def test_load_settings_reads_model_timeout_and_retries(monkeypatch):
     monkeypatch.setenv("CI_AGENT_MODEL_TIMEOUT_SECONDS", "180")
     monkeypatch.setenv("CI_AGENT_MODEL_MAX_RETRIES", "2")
