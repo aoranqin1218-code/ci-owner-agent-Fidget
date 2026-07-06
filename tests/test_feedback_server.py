@@ -81,6 +81,46 @@ def test_feedback_token_required():
     assert client.get("/feedback", params={"job": notice.job, "build": notice.buildNumber, "token": "secret"}).status_code == 200
 
 
+def test_feedback_post_requires_token():
+    client, store, notice = _client_with_notice(token="secret")
+
+    response = client.post(
+        "/feedback",
+        data={
+            "job": notice.job,
+            "build": str(notice.buildNumber),
+            "failureId": notice.responsibilityItems[0].failureId,
+            "action": "confirm_owner",
+        },
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 403
+    assert store.feedback.docs == []
+
+
+def test_feedback_post_accepts_valid_token():
+    client, store, notice = _client_with_notice(token="secret")
+
+    response = client.post(
+        "/feedback",
+        data={
+            "job": notice.job,
+            "build": str(notice.buildNumber),
+            "failureId": notice.responsibilityItems[0].failureId,
+            "action": "confirm_owner",
+            "token": "secret",
+            "reviewer": "qa",
+        },
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    active = [doc for doc in store.feedback.docs if doc.get("isActive")]
+    assert len(active) == 1
+    assert active[0]["action"] == "confirm_owner"
+
+
 def test_feedback_html_escapes_notice_text():
     payload = notice_payload([item()])
     payload["responsibilityItems"][0]["failureTitle"] = "<script>alert(1)</script>"

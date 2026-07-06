@@ -23,6 +23,10 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
   "pytest>=8,<9",
+  "fastapi>=0.115,<1",
+  "uvicorn>=0.30,<1",
+  "python-multipart>=0.0.9,<1",
+  "httpx>=0.27,<1",
 ]
 llm = [
   "langchain>=1.3,<2",
