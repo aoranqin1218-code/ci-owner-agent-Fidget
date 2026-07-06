@@ -131,19 +131,15 @@ def test_xfail_multiple_timeout_blocks(tmp_path):
     assert chunks[0]["signature"]["signatureKey"] != chunks[1]["signature"]["signatureKey"]
 
 
-def test_fatal_error_unsupported_dir_import_signature(tmp_path):
+def test_fatal_error_unsupported_dir_import_no_longer_generates_summary(tmp_path):
     lines = [
         "✖ ERROR: Error: Directory import '/var/app/server/components' is not supported resolving ES modules imported from /var/app/test/init.ts",
         "code: 'ERR_UNSUPPORTED_DIR_IMPORT'",
         "url: 'file:///var/app/server/components'",
     ]
-    chunk = provider(tmp_path, lines).find_test_failure_summaries(tail_lines=500, max_chunks=5)["chunks"][0]
-    signature = chunk["signature"]
-    assert chunk["anchorType"] == "fatal_error_block"
-    assert signature["testName"] == "test initialization"
-    assert "err_unsupported_dir_import" in signature["errorMessage"]
-    assert signature["testFile"] == "test/init.ts"
-    assert signature["signatureKey"]
+    result = provider(tmp_path, lines).find_test_failure_summaries(tail_lines=500, max_chunks=5)
+    assert result["chunks"] == []
+    assert "no Mocha/Japa failure block found" in result["warning"]
 
 
 def test_buildkit_prefixed_failure_summary_signature(tmp_path):
@@ -195,3 +191,27 @@ def test_ansi_and_buildkit_prefixed_failure_summary_signature(tmp_path):
     assert "\x1b[" not in chunk["content"]
     assert "#28" not in chunk["content"]
     assert "Error: UNKNOWN" in chunk["content"]
+
+
+def test_ts2305_docker_wrapper_does_not_generate_summary_chunk(tmp_path):
+    lines = [
+        "src/index.ts(10,27): error TS2305: Module '\"./errors\"' has no exported member 'classifyErrorMessage'.",
+        'ERROR: process "/bin/sh -c npm run nx:build && npm run test" did not complete successfully: exit code: 130',
+    ]
+    result = provider(tmp_path, lines).find_test_failure_summaries(tail_lines=500, max_chunks=5)
+    assert result["chunks"] == []
+    assert "no Mocha/Japa failure block found" in result["warning"]
+    assert "fatal_error_block" not in str(result)
+    assert "fatal|fatal error|fatal error||" not in str(result)
+
+
+def test_npm_etarget_docker_wrapper_does_not_generate_summary_chunk(tmp_path):
+    lines = [
+        "npm error code ETARGET",
+        "npm error notarget No matching version found for @ai-sdk/provider@99.0.0-nonexistent.",
+        'ERROR: process "/bin/sh -c npm install --production" did not complete successfully: exit code: 1',
+    ]
+    result = provider(tmp_path, lines).find_test_failure_summaries(tail_lines=500, max_chunks=5)
+    assert result["chunks"] == []
+    assert "no Mocha/Japa failure block found" in result["warning"]
+    assert "fatal_error_block" not in str(result)

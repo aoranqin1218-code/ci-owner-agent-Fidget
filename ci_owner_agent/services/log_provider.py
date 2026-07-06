@@ -290,26 +290,14 @@ class TextLogProvider(LogProvider):
                 )
             }
 
-        fatal_start = next((idx for idx, line in enumerate(lines) if FATAL_ERROR_RE.search(line)), None)
-        if fatal_start is not None:
-            end = _trim_failure_block_end(lines, fatal_start, len(lines))
-            return {
-                "chunks": [
-                    self._summary_chunk(
-                        chunk_index=0,
-                        lines=lines,
-                        start=fatal_start,
-                        end=end,
-                        focused_chunk=focused_chunk,
-                        chunk_source=chunk_source,
-                        anchor_type="fatal_error_block",
-                        signature_extractor=_extract_fatal_error_signature,
-                        score=0.9,
-                    )
-                ]
-            }
-
-        return {"chunks": [], "warning": "test failure summaries unavailable; no supported failure blocks found"}
+        # Do not treat Docker / BuildKit / Jenkins / shell wrapper failures as stable
+        # deterministic history signatures. Current deterministic similarity is only
+        # for structured Mocha/Japa test failures; non-structured build failures are
+        # analyzed by the agent from the current log and diff context.
+        return {
+            "chunks": [],
+            "warning": "test failure summaries unavailable; no Mocha/Japa failure block found; history similarity skipped",
+        }
 
     def _build_summary_chunks(
         self,

@@ -280,6 +280,59 @@ def test_mongo_history_store_does_not_save_console_tail_fallback(repo_cache, sam
     assert store.failure_chunks.docs == []
 
 
+def test_save_analysis_empty_chunks_deletes_old_fatal_chunks(repo_cache, sample_repo, logs):
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    from ci_owner_agent.schemas import CiResponsibilityNotice
+
+    store = make_store()
+    build_info = BuildInfo(job=context.job, buildNumber=7, result="FAILURE", buildUrl=context.build_url, branch=context.branch, commit=context.head_commit)
+    notice = CiResponsibilityNotice.model_validate(high_confidence_payload(context))
+    old_chunk = focused_chunk("ERROR: process wrapper")
+    old_chunk["anchorType"] = "fatal_error_block"
+    old_chunk["signature"] = {
+        "testName": "test initialization",
+        "testCase": "fatal error",
+        "errorType": "Error",
+        "errorMessage": "fatal error",
+        "testFile": "",
+        "topStackFile": "",
+        "businessStackFiles": [],
+        "signatureKey": "fatal|fatal error|fatal error||",
+    }
+    old_chunk["signatureHash"] = "old-bad-hash"
+
+    store.save_analysis(build_info, notice, context.base_commit, context.head_commit, 6, context.base_commit, [old_chunk])
+    assert len(store.failure_chunks.docs) == 1
+    assert store.failure_chunks.docs[0]["anchorType"] == "fatal_error_block"
+
+    store.save_analysis(build_info, notice, context.base_commit, context.head_commit, 6, context.base_commit, [])
+
+    assert store.failure_chunks.docs == []
+
+
+def test_non_structured_build_failures_without_summaries_do_not_inherit_owner(repo_cache, sample_repo, logs):
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    from ci_owner_agent.schemas import CiResponsibilityNotice
+
+    settings = replace(context.settings, history_enabled=True)
+    store = make_store()
+    notice = CiResponsibilityNotice.model_validate(high_confidence_payload(context))
+    build_7 = BuildInfo(job=context.job, buildNumber=7, result="FAILURE", buildUrl="local://job/7", branch=context.branch, commit=context.head_commit)
+    store.save_analysis(build_7, notice, context.base_commit, context.head_commit, 6, context.base_commit, [])
+
+    build_8_context = replace(
+        context,
+        settings=settings,
+        build_number=8,
+        last_successful_build_number=6,
+        failure_summaries={"chunks": []},
+    )
+    result = history_search_similar_failures(build_8_context, store=store)
+
+    assert result["currentChunks"] == []
+    assert result["candidates"] == []
+
+
 def test_mongo_history_store_queries_by_last_successful_build(repo_cache, sample_repo, logs):
     context = make_lc_context(repo_cache, sample_repo, logs)
     from ci_owner_agent.schemas import CiResponsibilityNotice
