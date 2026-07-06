@@ -367,6 +367,29 @@ def _active_feedback_docs(store: MongoHistoryStore, job: str, branch: str | None
     return [doc for doc in docs if doc.get("branch") in {branch, None}]
 
 
+def find_feedback_override_for_failure_signature(
+    store: MongoHistoryStore,
+    *,
+    job: str,
+    branch: str | None,
+    build_number: int | None,
+    failure_signature: str | None,
+    notice_doc: dict | None,
+) -> dict | None:
+    if not failure_signature:
+        return None
+    feedback_docs = _active_feedback_docs(store, job, branch)
+    return _find_feedback_override(
+        feedback_docs,
+        job=job,
+        branch=branch,
+        build_number=build_number,
+        signature_hash=None,
+        signature={"signatureKey": failure_signature},
+        notice_doc=notice_doc or {},
+    )
+
+
 def _find_feedback_override(
     feedback_docs: list[dict],
     *,
