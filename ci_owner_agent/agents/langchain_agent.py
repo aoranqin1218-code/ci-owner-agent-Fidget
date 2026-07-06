@@ -12,6 +12,7 @@ from ci_owner_agent.agents.prompts import (
 )
 from ci_owner_agent.config import Settings, validate_model_settings
 from ci_owner_agent.schemas import CiResponsibilityNotice
+from ci_owner_agent.services.llm_client import build_chat_model
 from ci_owner_agent.services.scorer import downgrade_to_no_high_confidence, validate_notice
 
 
@@ -46,25 +47,7 @@ class LangChainResponsibilityAgent:
             os.environ["LANGSMITH_ENDPOINT"] = self.settings.langsmith_endpoint
 
     def _model(self):
-        try:
-            from langchain_openai import ChatOpenAI
-        except Exception as exc:
-            raise RuntimeError(f"langchain-openai is not installed: {exc}") from exc
-        kwargs: dict[str, Any] = {
-            "model": self.settings.model_name,
-            "api_key": self.settings.api_key,
-            "temperature": 0,
-            "timeout": self.settings.model_timeout_seconds,
-            "max_retries": self.settings.model_max_retries,
-        }
-        if self.settings.model_base_url:
-            kwargs["base_url"] = self.settings.model_base_url
-        try:
-            return ChatOpenAI(**kwargs)
-        except TypeError:
-            if "base_url" in kwargs:
-                kwargs["openai_api_base"] = kwargs.pop("base_url")
-            return ChatOpenAI(**kwargs)
+        return build_chat_model(self.settings)
 
     def _invoke_agent(self) -> str:
         agent = self._create_v1_agent(self._model())
@@ -163,12 +146,18 @@ class LangChainResponsibilityAgent:
             "commitsTruncated": len(self.context.commits) > 20,
             "failureSummaries": self._compact_failure_summaries(failure_summaries),
             "failureSummaryWarning": failure_summaries.get("warning") if isinstance(failure_summaries, dict) else None,
+            "failureFacts": self._compact_failure_facts(self.context.failure_facts),
             "logTailMeta": self._log_tail_meta(log_tail),
             "historyPrecheck": self._compact_history_precheck(self.context.history_precheck),
             "instruction": (
                 "必须基于工具证据。证据不足输出 no_high_confidence_owner。最终只输出 JSON。"
                 "如需更多 changed files 或 commits，请调用 repo_get_diff_files / repo_get_commits_between。"
                 "failureSummaries 是当前构建最重要的失败摘要；如果存在，优先基于它判断失败测试名、错误类型、测试文件和栈。"
+                "failureFacts 是 AI 从非结构化日志中提取的内层失败事实；如果 failureSummaries 为空但 failureFacts 非空，"
+                "优先基于 failureFacts + log/diff 工具判断当前责任。Docker/Jenkins/BuildKit/shell wrapper 不能单独作为责任依据。"
+                "如果 failureFacts[*].historyEligible=false 或 isGenericWrapper=true，不得基于它输出 inherited_failure_owner。"
+                "如果 responsibilityItems 对应某个 failureFact，failureSignature 优先使用 failureFact.signatureKey，便于后续历史事实比对。"
+                "当前版本 AI failureFacts 只辅助当前 build 定责，不代表历史继承结论。"
                 "如需更多日志，再调用 log_read_range / log_search / log_read_tail。"
                 "不要仅凭 changedFiles 或 package.json 依赖升级输出 high_confidence。"
             ),
@@ -196,6 +185,35 @@ class LangChainResponsibilityAgent:
         if len(content) <= limit:
             return content
         return content[:limit] + "\n...[truncated]"
+
+    def _compact_failure_facts(self, facts_result: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not isinstance(facts_result, dict):
+            return None
+        return {
+            "ok": facts_result.get("ok"),
+            "warning": facts_result.get("warning"),
+            "facts": [
+                {
+                    "factId": fact.get("factId"),
+                    "signatureKey": fact.get("signatureKey"),
+                    "historyEligible": fact.get("historyEligible"),
+                    "isGenericWrapper": fact.get("isGenericWrapper"),
+                    "failureKind": fact.get("failureKind"),
+                    "phase": fact.get("phase"),
+                    "command": fact.get("command"),
+                    "errorCode": fact.get("errorCode"),
+                    "errorType": fact.get("errorType"),
+                    "packageName": fact.get("packageName"),
+                    "filePath": fact.get("filePath"),
+                    "symbol": fact.get("symbol"),
+                    "message": fact.get("message"),
+                    "rootCauseSummary": fact.get("rootCauseSummary"),
+                    "confidence": fact.get("confidence"),
+                }
+                for fact in (facts_result.get("facts") or [])[:5]
+                if isinstance(fact, dict)
+            ],
+        }
 
     def _log_tail_meta(self, log_tail: Any | None) -> dict[str, Any] | None:
         if log_tail is None:

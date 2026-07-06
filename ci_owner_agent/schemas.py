@@ -129,6 +129,44 @@ class ResponsibilityItem(StrictModel):
     evidenceIds: list[str] = Field(default_factory=list)
 
 
+class FailureFact(StrictModel):
+    schemaVersion: int = 1
+    factId: str | None = None
+    signatureKey: str
+    historyEligible: bool
+    isGenericWrapper: bool = False
+    failureKind: str
+    phase: str | None = None
+    command: str | None = None
+    errorCode: str | None = None
+    errorType: str | None = None
+    packageName: str | None = None
+    filePath: str | None = None
+    symbol: str | None = None
+    message: str
+    rootCauseSummary: str
+    evidenceLines: list[str] = Field(default_factory=list)
+    startLine: int | None = None
+    endLine: int | None = None
+    confidence: float
+
+    @model_validator(mode="after")
+    def normalize_fact(self) -> "FailureFact":
+        self.confidence = max(0, min(float(self.confidence or 0), 1))
+        self.signatureKey = str(self.signatureKey or "").strip()
+        if self.historyEligible and not self.signatureKey:
+            raise ValueError("signatureKey is required when historyEligible=true")
+        if not self.factId:
+            self.factId = stable_failure_fact_id(self)
+        return self
+
+
+class FailureFactExtractionResult(StrictModel):
+    ok: bool
+    facts: list[FailureFact] = Field(default_factory=list)
+    warning: str | None = None
+
+
 class CiResponsibilityNotice(StrictModel):
     job: str
     buildNumber: int
@@ -197,6 +235,11 @@ def stable_failure_id(item: ResponsibilityItem) -> str:
     basis = item.failureSignature or f"{item.failureTitle}\n{item.failureSummary or ''}"
     normalized = _normalize_identifier_basis(basis)
     return "failure-" + hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:12]
+
+
+def stable_failure_fact_id(fact: FailureFact) -> str:
+    normalized = _normalize_identifier_basis(fact.signatureKey)
+    return "fact-" + hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:12]
 
 
 def _fallback_failure_signature(item: ResponsibilityItem) -> str:

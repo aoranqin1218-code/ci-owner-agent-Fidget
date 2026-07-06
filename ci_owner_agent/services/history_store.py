@@ -7,7 +7,7 @@ import sys
 from typing import Any
 
 from ci_owner_agent.config import Settings
-from ci_owner_agent.schemas import BuildInfo, CiResponsibilityNotice
+from ci_owner_agent.schemas import BuildInfo, CiResponsibilityNotice, FailureFact
 from ci_owner_agent.services.failure_similarity import hash_normalized_chunk, normalize_error_chunk
 
 HISTORY_CHUNK_SCHEMA_VERSION = 3
@@ -34,6 +34,7 @@ class MongoHistoryStore:
         self.builds = self.db["ci_builds"]
         self.notices = self.db["ci_notices"]
         self.failure_chunks = self.db["ci_failure_chunks"]
+        self.failure_facts = self.db["ci_failure_facts"]
         self.notifications = self.db["ci_notifications"]
         self.feedback = self.db["ci_feedback"]
         self.ensure_indexes()
@@ -50,6 +51,10 @@ class MongoHistoryStore:
         self.notices.create_index([("job", 1), ("branch", 1), ("buildNumber", 1)], unique=True)
         self.failure_chunks.create_index([("job", 1), ("branch", 1), ("buildNumber", 1)])
         self.failure_chunks.create_index([("job", 1), ("branch", 1), ("chunkHash", 1)])
+        self.failure_facts.create_index([("job", 1), ("branch", 1), ("buildNumber", 1)])
+        self.failure_facts.create_index([("job", 1), ("branch", 1), ("factId", 1)])
+        self.failure_facts.create_index([("job", 1), ("branch", 1), ("signatureKey", 1)])
+        self.failure_facts.create_index([("job", 1), ("branch", 1), ("historyEligible", 1), ("buildNumber", 1)])
         self.notifications.create_index([("job", 1), ("branch", 1), ("buildNumber", 1), ("noticeHash", 1), ("channel", 1)])
         self.feedback.create_index([("job", 1), ("branch", 1), ("buildNumber", 1), ("failureId", 1)])
         self.feedback.create_index([("job", 1), ("branch", 1), ("failureSignature", 1), ("isActive", 1)])
@@ -133,6 +138,48 @@ class MongoHistoryStore:
                 upsert=True,
             )
         return {"ok": True, "chunksSaved": len(chunks_to_save), "inputChunks": len(error_chunks)}
+
+    def save_failure_facts(
+        self,
+        *,
+        build_info: BuildInfo,
+        notice: CiResponsibilityNotice,
+        facts: list[FailureFact],
+    ) -> dict:
+        now = dt.datetime.now(dt.timezone.utc)
+        key = {"job": build_info.job, "branch": build_info.branch, "buildNumber": build_info.buildNumber}
+        self.failure_facts.delete_many(key)
+        notice_doc = notice.model_dump(mode="json")
+        for idx, fact in enumerate(facts):
+            fact_doc = fact.model_dump(mode="json")
+            fact_owner = _fact_owner_for_notice(fact, notice_doc)
+            self.failure_facts.update_one(
+                {**key, "factIndex": idx},
+                {
+                    "$set": {
+                        **key,
+                        "factIndex": idx,
+                        "buildUrl": build_info.buildUrl,
+                        "headCommit": notice.headCommit or build_info.commit,
+                        "factId": fact.factId,
+                        "signatureKey": fact.signatureKey,
+                        "historyEligible": fact.historyEligible,
+                        "isGenericWrapper": fact.isGenericWrapper,
+                        "failureKind": fact.failureKind,
+                        "fact": fact_doc,
+                        "notice": notice_doc,
+                        "ownerType": notice.owner.type,
+                        "ownerName": notice.owner.name,
+                        "ownerEmail": notice.owner.email,
+                        "ownerCommit": notice.owner.commit,
+                        "hasHighConfidenceOwner": notice.hasHighConfidenceOwner,
+                        "factOwner": fact_owner,
+                        "createdAt": now,
+                    }
+                },
+                upsert=True,
+            )
+        return {"ok": True, "factsSaved": len(facts)}
 
     def find_historical_failure_chunks(
         self,
@@ -257,6 +304,17 @@ def _responsibility_item_summary(items: list[dict]) -> dict[str, Any]:
         "inheritedOwnerCount": inherited_count,
         "currentBuildOwnerCount": current_count,
     }
+
+
+def _fact_owner_for_notice(fact: FailureFact, notice_doc: dict) -> dict[str, Any] | None:
+    for item in notice_doc.get("responsibilityItems") or []:
+        if not isinstance(item, dict):
+            continue
+        if item.get("failureSignature") == fact.signatureKey:
+            owner = item.get("owner")
+            return owner if isinstance(owner, dict) else None
+    owner = notice_doc.get("owner")
+    return owner if isinstance(owner, dict) else None
 
 
 def notice_hash(notice: CiResponsibilityNotice) -> str:

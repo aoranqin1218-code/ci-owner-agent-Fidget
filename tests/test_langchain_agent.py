@@ -980,6 +980,50 @@ def test_initial_input_includes_compact_history_precheck(repo_cache, sample_repo
     assert long_text not in raw
 
 
+def test_initial_input_includes_failure_facts(repo_cache, sample_repo, logs):
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    context = replace(
+        context,
+        failure_summaries={"chunks": [], "warning": "no Mocha/Japa failure block found"},
+        failure_facts={
+            "ok": True,
+            "warning": None,
+            "facts": [
+                {
+                    "factId": "fact-123",
+                    "signatureKey": "typescript_compile_error|TS2305|packages/fxp-ai/src/index.ts|classifyErrorMessage",
+                    "historyEligible": True,
+                    "isGenericWrapper": False,
+                    "failureKind": "typescript_compile_error",
+                    "phase": "nx:build",
+                    "command": "npm run nx:build",
+                    "errorCode": "TS2305",
+                    "errorType": "TypeScriptCompileError",
+                    "packageName": "@fx/ai",
+                    "filePath": "packages/fxp-ai/src/index.ts",
+                    "symbol": "classifyErrorMessage",
+                    "message": "Module './errors' has no exported member 'classifyErrorMessage'",
+                    "rootCauseSummary": "missing export",
+                    "confidence": 0.92,
+                    "evidenceLines": ["large evidence omitted from compact input"],
+                }
+            ],
+        },
+    )
+
+    raw = LangChainResponsibilityAgent(context.settings, context, [])._initial_input()
+    payload = json.loads(raw)
+
+    assert payload["failureFacts"]["ok"] is True
+    fact = payload["failureFacts"]["facts"][0]
+    assert fact["factId"] == "fact-123"
+    assert fact["errorCode"] == "TS2305"
+    assert "evidenceLines" not in fact
+    assert "failureFacts" in payload["instruction"]
+    assert "wrapper" in payload["instruction"]
+    assert "inherited_failure_owner" in payload["instruction"]
+
+
 def test_load_settings_reads_model_timeout_and_retries(monkeypatch):
     monkeypatch.setenv("CI_AGENT_MODEL_TIMEOUT_SECONDS", "180")
     monkeypatch.setenv("CI_AGENT_MODEL_MAX_RETRIES", "2")

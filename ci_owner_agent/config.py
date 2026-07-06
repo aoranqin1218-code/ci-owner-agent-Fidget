@@ -37,6 +37,9 @@ class Settings:
     history_mongo_db: str
     history_max_candidates: int
     failure_chunk_tail_lines: int
+    ai_failure_facts_enabled: bool
+    ai_failure_fact_min_confidence: float
+    ai_failure_fact_max_log_chars: int
     wecom_notify_enabled: bool
     wecom_webhook_url: str | None
     wecom_notify_dry_run: bool
@@ -86,6 +89,16 @@ def _int_env_min_or_default(name: str, default: int, minimum: int) -> int:
     return value if value >= minimum else default
 
 
+def _float_env_or_default(name: str, default: float) -> float:
+    value = os.getenv(name)
+    if value is None or value == "":
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        return default
+
+
 def load_settings(env_file: str | Path | None = None) -> Settings:
     if load_dotenv is not None:
         load_dotenv(dotenv_path=env_file, override=False)
@@ -118,6 +131,9 @@ def load_settings(env_file: str | Path | None = None) -> Settings:
         history_mongo_db=os.getenv("CI_AGENT_HISTORY_MONGO_DB", "ci_owner_agent"),
         history_max_candidates=_int_env_or_default("CI_AGENT_HISTORY_MAX_CANDIDATES", 5),
         failure_chunk_tail_lines=_int_env_min_or_default("CI_AGENT_FAILURE_CHUNK_TAIL_LINES", 500, 50),
+        ai_failure_facts_enabled=_bool_env("CI_AGENT_AI_FAILURE_FACTS_ENABLED", False),
+        ai_failure_fact_min_confidence=max(0, min(_float_env_or_default("CI_AGENT_AI_FAILURE_FACT_MIN_CONFIDENCE", 0.70), 1)),
+        ai_failure_fact_max_log_chars=_int_env_or_default("CI_AGENT_AI_FAILURE_FACT_MAX_LOG_CHARS", 12000),
         wecom_notify_enabled=_bool_env("CI_AGENT_WECOM_NOTIFY_ENABLED", False),
         wecom_webhook_url=os.getenv("CI_AGENT_WECOM_WEBHOOK_URL") or None,
         wecom_notify_dry_run=_bool_env("CI_AGENT_WECOM_NOTIFY_DRY_RUN", True),

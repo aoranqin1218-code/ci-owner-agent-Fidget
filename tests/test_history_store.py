@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from ci_owner_agent.schemas import BuildInfo
+from ci_owner_agent.schemas import BuildInfo, FailureFact
 from ci_owner_agent.services.history_store import MongoHistoryStore, notice_hash
 from ci_owner_agent.tools.history_tools import history_search_similar_failures
 from tests.test_langchain_agent import high_confidence_payload, make_lc_context
@@ -683,3 +683,66 @@ def test_save_notification_preserves_created_at(repo_cache, sample_repo, logs):
     assert second_doc["createdAt"] == first_doc["createdAt"]
     assert second_doc["updatedAt"] != first_doc["updatedAt"]
     assert second_doc["status"] == "failed"
+
+
+def test_save_failure_facts_insert_and_delete(repo_cache, sample_repo, logs):
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    from ci_owner_agent.schemas import CiResponsibilityNotice
+
+    store = make_store()
+    notice = CiResponsibilityNotice.model_validate(high_confidence_payload(context))
+    build_info = BuildInfo(job=context.job, buildNumber=5099, result="FAILURE", buildUrl=context.build_url, branch=context.branch, commit=context.head_commit)
+    fact = FailureFact(
+        signatureKey="typescript_compile_error|TS2305|packages/fxp-ai/src/index.ts|classifyErrorMessage",
+        historyEligible=True,
+        failureKind="typescript_compile_error",
+        errorCode="TS2305",
+        message="Module './errors' has no exported member 'classifyErrorMessage'",
+        rootCauseSummary="missing export",
+        confidence=0.9,
+    )
+
+    result = store.save_failure_facts(build_info=build_info, notice=notice, facts=[fact])
+    assert result["factsSaved"] == 1
+    assert len(store.failure_facts.docs) == 1
+    assert store.failure_facts.docs[0]["factId"].startswith("fact-")
+
+    result = store.save_failure_facts(build_info=build_info, notice=notice, facts=[])
+    assert result["factsSaved"] == 0
+    assert store.failure_facts.docs == []
+
+
+def test_save_failure_facts_uses_matching_responsibility_item_owner(repo_cache, sample_repo, logs):
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    from ci_owner_agent.schemas import CiResponsibilityNotice
+
+    signature = "npm_dependency_resolution_error|ETARGET|@ai-sdk/provider|99.0.0-nonexistent"
+    payload = high_confidence_payload(context)
+    payload["responsibilityItems"] = [
+        current_owner_item(
+            failure_id="auto",
+            failure_title="npm ETARGET",
+            failure_signature=signature,
+            owner_name="Li Si",
+            owner_email="lisi@example.com",
+            owner_commit=context.head_commit,
+        )
+    ]
+    notice = CiResponsibilityNotice.model_validate(payload)
+    build_info = BuildInfo(job=context.job, buildNumber=5099, result="FAILURE", buildUrl=context.build_url, branch=context.branch, commit=context.head_commit)
+    store = make_store()
+    fact = FailureFact(
+        signatureKey=signature,
+        historyEligible=True,
+        failureKind="npm_dependency_resolution_error",
+        errorCode="ETARGET",
+        packageName="@ai-sdk/provider",
+        message="No matching version found",
+        rootCauseSummary="bad dependency version",
+        confidence=0.95,
+    )
+
+    store.save_failure_facts(build_info=build_info, notice=notice, facts=[fact])
+
+    assert store.failure_facts.docs[0]["factOwner"]["name"] == "Li Si"
+    assert store.failure_facts.docs[0]["factOwner"]["email"] == "lisi@example.com"

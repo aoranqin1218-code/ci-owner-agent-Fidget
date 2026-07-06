@@ -7,7 +7,8 @@ from ci_owner_agent.agents.factory import AgentConfigurationError, create_respon
 from ci_owner_agent.agents.langchain_agent import LangChainResponsibilityAgent
 from ci_owner_agent.agents.responsibility_agent import AgentContext
 from ci_owner_agent.config import Settings, load_settings
-from ci_owner_agent.schemas import BuildInfo, ChangedFile, CiResponsibilityNotice, CommitInfo, EvidenceItem
+from ci_owner_agent.schemas import BuildInfo, ChangedFile, CiResponsibilityNotice, CommitInfo, EvidenceItem, FailureFact
+from ci_owner_agent.services.failure_fact_ai import extract_failure_facts_with_ai
 from ci_owner_agent.services.git_client import GitClient
 from ci_owner_agent.services.history_store import get_history_store
 from ci_owner_agent.services.jenkins_client import JenkinsClient
@@ -177,6 +178,7 @@ def analyze_failed_build(
         head_commit,
         last_successful_build_number,
         runtime_context.failure_summaries,
+        runtime_context.failure_facts,
     )
     return notice
 
@@ -190,6 +192,29 @@ def _with_precomputed_failure_context(context: AgentRuntimeContext) -> AgentRunt
     except Exception as exc:
         failure_summaries = {"chunks": [], "warning": f"failure summary extraction failed: {exc}"}
     enriched = replace(context, failure_summaries=failure_summaries)
+    if not (failure_summaries.get("chunks") if isinstance(failure_summaries, dict) else None) and context.settings.ai_failure_facts_enabled:
+        try:
+            focused = context.log_provider.find_focused_failure_chunks(
+                tail_lines=context.settings.failure_chunk_tail_lines,
+                max_chunks=1,
+            )
+            chunks = focused.get("chunks", []) if isinstance(focused, dict) else []
+            log_excerpt = str(chunks[0].get("content") or "") if chunks else ""
+            if len(log_excerpt) > context.settings.ai_failure_fact_max_log_chars:
+                log_excerpt = log_excerpt[-context.settings.ai_failure_fact_max_log_chars :]
+            facts_result = extract_failure_facts_with_ai(
+                settings=context.settings,
+                job=context.job,
+                build_number=context.build_number,
+                build_url=context.build_url,
+                branch=context.branch,
+                log_excerpt=log_excerpt,
+                changed_files=context.changed_files,
+                commits=context.commits,
+            )
+            enriched = replace(enriched, failure_facts=facts_result.model_dump(mode="json"))
+        except Exception as exc:
+            enriched = replace(enriched, failure_facts={"ok": False, "facts": [], "warning": f"AI failure facts extraction failed: {exc}"})
     try:
         history_precheck = history_search_similar_failures(
             enriched,
@@ -215,6 +240,7 @@ def _save_history(
     head_commit: str | None,
     last_successful_build_number: int | None,
     failure_summaries: dict | None = None,
+    failure_facts: dict | None = None,
 ) -> None:
     store = get_history_store(settings)
     if store is None:
@@ -236,6 +262,12 @@ def _save_history(
             last_successful_commit=base_commit,
             error_chunks=chunks,
         )
+        if failure_facts is not None or settings.ai_failure_facts_enabled:
+            facts = [
+                fact if isinstance(fact, FailureFact) else FailureFact.model_validate(fact)
+                for fact in ((failure_facts or {}).get("facts") or [])
+            ]
+            store.save_failure_facts(build_info=build_info, notice=notice, facts=facts)
     except Exception as exc:
         build_info.warnings.append(f"history save failed: {exc}")
 
