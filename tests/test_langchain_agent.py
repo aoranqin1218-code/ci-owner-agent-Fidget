@@ -1127,6 +1127,19 @@ def test_instruction_mentions_ai_fact_semantic_inherited_owner(repo_cache, sampl
         assert text in instruction
 
 
+def test_instruction_tells_failure_facts_should_be_log_evidence(repo_cache, sample_repo, logs):
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    payload = json.loads(LangChainResponsibilityAgent(context.settings, context, [])._initial_input())
+    instruction = payload["instruction"]
+    for text in [
+        "failureFacts",
+        "evidence.type",
+        "log",
+        "build_info 只用于 metadata",
+    ]:
+        assert text in instruction
+
+
 def test_load_settings_reads_model_timeout_and_retries(monkeypatch):
     monkeypatch.setenv("CI_AGENT_MODEL_TIMEOUT_SECONDS", "180")
     monkeypatch.setenv("CI_AGENT_MODEL_MAX_RETRIES", "2")

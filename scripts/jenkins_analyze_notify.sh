@@ -40,6 +40,11 @@ if [[ -z "$JOB" || -z "$BUILD" || -z "$REPO" ]]; then
   exit 2
 fi
 
+# AI failure facts history inheritance acceptance example:
+# export CI_AGENT_AI_FAILURE_FACTS_ENABLED=true
+# export CI_AGENT_AI_HISTORY_COMPARE_ENABLED=true
+# export CI_AGENT_AI_HISTORY_COMPARE_THRESHOLD=0.90
+
 python -m ci_owner_agent analyze \
   --job "$JOB" \
   --build "$BUILD" \
