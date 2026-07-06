@@ -43,6 +43,9 @@ class Settings:
     wecom_notify_on_success: bool
     wecom_notify_on_no_owner: bool
     feedback_base_url: str | None
+    feedback_server_host: str
+    feedback_server_port: int
+    feedback_shared_token: str | None
     notification_dedup_enabled: bool
 
 
@@ -121,6 +124,9 @@ def load_settings(env_file: str | Path | None = None) -> Settings:
         wecom_notify_on_success=_bool_env("CI_AGENT_WECOM_NOTIFY_ON_SUCCESS", False),
         wecom_notify_on_no_owner=_bool_env("CI_AGENT_WECOM_NOTIFY_ON_NO_OWNER", True),
         feedback_base_url=os.getenv("CI_AGENT_FEEDBACK_BASE_URL") or None,
+        feedback_server_host=os.getenv("CI_AGENT_FEEDBACK_SERVER_HOST", "127.0.0.1"),
+        feedback_server_port=_int_env_or_default("CI_AGENT_FEEDBACK_SERVER_PORT", 8765),
+        feedback_shared_token=os.getenv("CI_AGENT_FEEDBACK_SHARED_TOKEN") or None,
         notification_dedup_enabled=_bool_env("CI_AGENT_NOTIFICATION_DEDUP_ENABLED", True),
     )
 
@@ -146,6 +152,7 @@ def public_settings(settings: Settings) -> dict[str, object]:
     data["api_key"] = "***" if settings.api_key else None
     data["langsmith_api_key"] = "***" if settings.langsmith_api_key else None
     data["wecom_webhook_url"] = "***" if settings.wecom_webhook_url else None
+    data["feedback_shared_token"] = "***" if settings.feedback_shared_token else None
     data["repo_cache_dir"] = str(settings.repo_cache_dir)
     data["ts_analyzer_dir"] = str(settings.ts_analyzer_dir)
     return data

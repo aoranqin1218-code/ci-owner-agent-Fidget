@@ -9,6 +9,7 @@ from ci_owner_agent.schemas import CiResponsibilityNotice, EvidenceItem, Respons
 def format_wecom_markdown_notice(
     notice: CiResponsibilityNotice,
     feedback_base_url: str | None = None,
+    feedback_token: str | None = None,
     max_reason_chars: int = 800,
     max_evidence_chars: int = 500,
 ) -> str:
@@ -39,7 +40,7 @@ def format_wecom_markdown_notice(
         lines.extend(["1. 未识别到独立责任项", "   - 类型：unknown", "   - 责任人：无高可信责任人", "   - 来源：-", "   - 证据：证据不足，详见分析结果 JSON。", ""])
 
     lines.extend(["#### 构建链接", f"[查看 Jenkins 构建]({notice.buildUrl})" if notice.buildUrl else "无", "", "#### 反馈链接"])
-    feedback_url = build_feedback_url(feedback_base_url, notice)
+    feedback_url = build_feedback_url(feedback_base_url, notice, feedback_token)
     lines.append(f"[提交反馈]({feedback_url})" if feedback_url else "未配置")
     return "\n".join(lines)
 
@@ -83,10 +84,13 @@ def format_item_evidence(item: ResponsibilityItem, evidence_by_id: dict[str, Evi
     return public_single_line("；".join(snippets), max_chars) if snippets else "证据不足，详见分析结果 JSON。"
 
 
-def build_feedback_url(base_url: str | None, notice: CiResponsibilityNotice) -> str | None:
+def build_feedback_url(base_url: str | None, notice: CiResponsibilityNotice, token: str | None = None) -> str | None:
     if not base_url:
         return None
-    query = urlencode({"job": notice.job, "build": notice.buildNumber})
+    query_params = {"job": notice.job, "build": notice.buildNumber}
+    if token:
+        query_params["token"] = token
+    query = urlencode(query_params)
     sep = "&" if "?" in base_url else "?"
     return f"{base_url}{sep}{query}"
 

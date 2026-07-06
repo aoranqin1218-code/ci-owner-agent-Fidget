@@ -68,6 +68,11 @@ def build_parser() -> argparse.ArgumentParser:
     notify.add_argument("--force", action="store_true")
     notify.add_argument("--feedback-base-url", default=None)
 
+    serve = subparsers.add_parser("serve-feedback", help="Start the feedback web server")
+    serve.add_argument("--host", default=None)
+    serve.add_argument("--port", type=int, default=None)
+    serve.add_argument("--reload", action="store_true")
+
     feedback = subparsers.add_parser("feedback", help="Manage manual feedback")
     feedback_sub = feedback.add_subparsers(dest="feedback_command", required=True)
     apply = feedback_sub.add_parser("apply")
@@ -222,6 +227,19 @@ def main(argv: list[str] | None = None) -> int:
         if args.feedback_command == "list":
             print(json.dumps(feedback_store.list_feedback(job=args.job, build_number=args.build), ensure_ascii=False, indent=2, default=str))
             return 0
+    if args.command == "serve-feedback":
+        try:
+            import uvicorn
+        except Exception as exc:
+            print(f"ERROR: uvicorn is required for serve-feedback: {exc}", file=sys.stderr)
+            return 2
+        uvicorn.run(
+            "ci_owner_agent.server:app",
+            host=args.host or settings.feedback_server_host,
+            port=args.port or settings.feedback_server_port,
+            reload=args.reload,
+        )
+        return 0
     parser.print_help()
     return 2
 
@@ -251,7 +269,11 @@ def _has_responsible_item_owner(notice: CiResponsibilityNotice) -> bool:
 
 
 def _notify_notice(notice: CiResponsibilityNotice, settings, *, dry_run: bool, force: bool, feedback_base_url: str | None) -> dict:
-    markdown = format_wecom_markdown_notice(notice, feedback_base_url=feedback_base_url)
+    markdown = format_wecom_markdown_notice(
+        notice,
+        feedback_base_url=feedback_base_url,
+        feedback_token=settings.feedback_shared_token,
+    )
     store = get_history_store(settings)
     digest = notice_hash(notice)
     if store and settings.notification_dedup_enabled and not force and store.notification_sent(

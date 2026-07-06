@@ -110,6 +110,16 @@ def test_build_and_feedback_links():
     assert "未配置" in format_wecom_markdown_notice(notice, feedback_base_url=None)
 
 
+def test_feedback_link_can_include_shared_token():
+    notice = CiResponsibilityNotice.model_validate(notice_payload([item()]))
+    markdown = format_wecom_markdown_notice(
+        notice,
+        feedback_base_url="http://ci-agent.xxx/feedback",
+        feedback_token="dev-token",
+    )
+    assert "token=dev-token" in markdown
+
+
 def test_notify_notice_dry_run_outputs_markdown(tmp_path, capsys, monkeypatch):
     notice = CiResponsibilityNotice.model_validate(notice_payload([item()]))
     notice_file = tmp_path / "notice.json"
