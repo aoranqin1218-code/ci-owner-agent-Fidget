@@ -244,6 +244,25 @@ class MongoHistoryStore:
         lookback_builds: int = 20,
         max_facts: int = 20,
     ) -> list[dict]:
+        return self.find_historical_failure_facts_with_diagnostics(
+            job=job,
+            branch=branch,
+            current_build_number=current_build_number,
+            last_successful_build_number=last_successful_build_number,
+            lookback_builds=lookback_builds,
+            max_facts=max_facts,
+        )["facts"]
+
+    def find_historical_failure_facts_with_diagnostics(
+        self,
+        *,
+        job: str,
+        branch: str | None,
+        current_build_number: int,
+        last_successful_build_number: int | None,
+        lookback_builds: int = 20,
+        max_facts: int = 20,
+    ) -> dict:
         build_query: dict[str, Any] = {
             "job": job,
             "buildNumber": {"$lt": current_build_number},
@@ -256,8 +275,16 @@ class MongoHistoryStore:
 
         builds = list(self.builds.find(build_query).sort("buildNumber", -1).limit(max(1, lookback_builds)))
         build_numbers = [item.get("buildNumber") for item in builds if item.get("buildNumber") is not None]
+        diagnostics: dict[str, Any] = {
+            "buildQuery": build_query,
+            "historicalBuildsCount": len(builds),
+            "historicalBuildNumbers": build_numbers[:20],
+            "factQuery": None,
+            "historicalFactsCount": 0,
+            "queryStage": "build_query" if not build_numbers else "fact_query",
+        }
         if not build_numbers:
-            return []
+            return {"facts": [], "diagnostics": diagnostics}
 
         fact_query: dict[str, Any] = {
             "job": job,
@@ -269,7 +296,11 @@ class MongoHistoryStore:
             fact_query["branch"] = {"$in": [branch, None]}
         facts = list(self.failure_facts.find(fact_query))
         facts.sort(key=lambda item: (item.get("buildNumber") or 0, item.get("factIndex") or 0), reverse=True)
-        return facts[: max(1, max_facts)]
+        diagnostics["factQuery"] = fact_query
+        diagnostics["historicalFactsCount"] = len(facts)
+        diagnostics["historicalFactBuildNumbers"] = [item.get("buildNumber") for item in facts[:20]]
+        diagnostics["queryStage"] = "ok" if facts else "fact_query"
+        return {"facts": facts[: max(1, max_facts)], "diagnostics": diagnostics}
 
     def notification_sent(self, *, job: str, branch: str | None, build_number: int, notice_hash: str, channel: str = "wecom") -> bool:
         return self.notifications.find_one(

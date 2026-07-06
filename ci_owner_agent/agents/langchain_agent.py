@@ -240,6 +240,7 @@ class LangChainResponsibilityAgent:
             "threshold": precheck.get("threshold"),
             "warning": precheck.get("warning"),
             "error": precheck.get("error"),
+            "diagnostics": self._compact_ai_history_diagnostics(precheck.get("diagnostics")),
             "currentFacts": [
                 {
                     "factId": item.get("factId"),
@@ -273,6 +274,39 @@ class LangChainResponsibilityAgent:
                     "feedbackOverride": self._compact_feedback_override(item.get("feedbackOverride")),
                 }
                 for item in (precheck.get("candidates") or [])[:5]
+                if isinstance(item, dict)
+            ],
+        }
+
+    def _compact_ai_history_diagnostics(self, diagnostics: Any) -> dict[str, Any] | None:
+        if not isinstance(diagnostics, dict):
+            return None
+        return {
+            "eligibleCurrentFactsCount": diagnostics.get("eligibleCurrentFactsCount"),
+            "historicalBuildsCount": diagnostics.get("historicalBuildsCount"),
+            "historicalFactsCount": diagnostics.get("historicalFactsCount"),
+            "rankedPairsCount": diagnostics.get("rankedPairsCount"),
+            "comparedPairsCount": diagnostics.get("comparedPairsCount"),
+            "acceptedCandidatesCount": diagnostics.get("acceptedCandidatesCount"),
+            "skipped": diagnostics.get("skipped"),
+            "queryStage": diagnostics.get("queryStage"),
+            "historicalBuildNumbers": diagnostics.get("historicalBuildNumbers"),
+            "historicalFactBuildNumbers": diagnostics.get("historicalFactBuildNumbers"),
+            "compareResults": [
+                {
+                    "currentFactId": item.get("currentFactId"),
+                    "currentSignatureKey": item.get("currentSignatureKey"),
+                    "historicalFactId": item.get("historicalFactId"),
+                    "historicalSignatureKey": item.get("historicalSignatureKey"),
+                    "historicalBuildNumber": item.get("historicalBuildNumber"),
+                    "sameFailure": item.get("sameFailure"),
+                    "confidence": item.get("confidence"),
+                    "relationship": item.get("relationship"),
+                    "accepted": item.get("accepted"),
+                    "skipReason": item.get("skipReason"),
+                    "reason": item.get("reason"),
+                }
+                for item in (diagnostics.get("compareResults") or [])[:5]
                 if isinstance(item, dict)
             ],
         }

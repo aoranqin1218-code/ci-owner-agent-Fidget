@@ -27,6 +27,7 @@ def history_search_similar_failure_facts(
             "mode": "ai_failure_facts",
             "candidates": [],
             "currentFacts": [],
+            "diagnostics": _new_diagnostics(),
             "warning": "history disabled",
         }
     if not context.settings.ai_history_compare_enabled:
@@ -36,6 +37,7 @@ def history_search_similar_failure_facts(
             "mode": "ai_failure_facts",
             "candidates": [],
             "currentFacts": [],
+            "diagnostics": _new_diagnostics(),
             "warning": "AI history compare disabled",
         }
 
@@ -47,30 +49,29 @@ def history_search_similar_failure_facts(
             "mode": "ai_failure_facts",
             "candidates": [],
             "currentFacts": [],
+            "diagnostics": _new_diagnostics(),
             "warning": "history store disabled or unavailable",
         }
 
+    diagnostics = _new_diagnostics()
     current_facts = _current_facts(context.failure_facts)
     if not current_facts:
-        return _base_result(context, current_facts=[], candidates=[], warning="no current failure facts")
+        return _base_result(context, current_facts=[], candidates=[], diagnostics=diagnostics, warning="no current failure facts")
 
     current_views = [_current_fact_view(fact, context.settings.ai_failure_fact_min_confidence) for fact in current_facts]
     eligible_current = [item for item in current_views if item["_eligible"]]
+    diagnostics["eligibleCurrentFactsCount"] = len(eligible_current)
+    diagnostics["skipped"]["currentFactIneligible"] = len(current_views) - len(eligible_current)
     if not eligible_current:
-        return _base_result(context, current_facts=_public_current_views(current_views), candidates=[])
+        return _base_result(context, current_facts=_public_current_views(current_views), candidates=[], diagnostics=diagnostics)
 
-    historical_docs = history_store.find_historical_failure_facts(
-        job=context.job,
-        branch=context.branch,
-        current_build_number=context.build_number,
-        last_successful_build_number=context.last_successful_build_number,
-        lookback_builds=context.settings.ai_history_max_fact_candidates,
-        max_facts=context.settings.ai_history_max_fact_candidates,
-    )
+    historical_docs, store_diagnostics = _find_historical_facts_with_diagnostics(history_store, context)
+    diagnostics.update(store_diagnostics)
     if not historical_docs:
-        return _base_result(context, current_facts=_public_current_views(current_views), candidates=[])
+        return _base_result(context, current_facts=_public_current_views(current_views), candidates=[], diagnostics=diagnostics)
 
-    pairs = _ranked_pairs(eligible_current, historical_docs)
+    pairs = _ranked_pairs(eligible_current, historical_docs, diagnostics)
+    diagnostics["rankedPairsCount"] = len(pairs)
     compare_limit = max(1, context.settings.ai_history_max_compare_calls)
     candidate_limit = max(1, min(maxCandidates or context.settings.history_max_candidates, context.settings.ai_history_max_fact_candidates, 50))
     candidates: list[dict] = []
@@ -83,11 +84,21 @@ def history_search_similar_failure_facts(
                 current_fact=current_view["_fact"],
                 historical_fact=historical_fact,
             )
+            diagnostics["comparedPairsCount"] += 1
         except Exception as exc:
+            diagnostics["comparedPairsCount"] += 1
+            diagnostics["skipped"]["compareError"] += 1
             warning = f"AI failure fact compare error: {exc}"
+            _append_compare_result(diagnostics, current_view["_fact"], historical_fact, historical_doc, None, False, "compare_error", str(exc))
             continue
 
         if not _is_same_failure(comparison, context.settings.ai_history_compare_threshold):
+            skip_reason = _comparison_skip_reason(comparison, context.settings.ai_history_compare_threshold)
+            if skip_reason == "compare_below_threshold":
+                diagnostics["skipped"]["compareBelowThreshold"] += 1
+            else:
+                diagnostics["skipped"]["compareNotSameFailure"] += 1
+            _append_compare_result(diagnostics, current_view["_fact"], historical_fact, historical_doc, comparison, False, skip_reason, comparison.reason)
             continue
 
         feedback = find_feedback_override_for_failure_signature(
@@ -99,7 +110,9 @@ def history_search_similar_failure_facts(
             notice_doc={"notice": historical_doc.get("notice") or {}},
         )
         if _feedback_blocks(feedback):
+            diagnostics["skipped"]["blockedByFeedback"] += 1
             current_view["blockedReason"] = f"blocked_by_feedback_{feedback.get('action')}"
+            _append_compare_result(diagnostics, current_view["_fact"], historical_fact, historical_doc, comparison, False, f"blocked_by_feedback_{feedback.get('action')}", comparison.reason)
             continue
 
         inherited_owner = _inherited_owner_from_historical_doc(
@@ -108,11 +121,14 @@ def history_search_similar_failure_facts(
             feedback,
         )
         if not inherited_owner.get("found"):
+            diagnostics["skipped"]["invalidOwner"] += 1
+            _append_compare_result(diagnostics, current_view["_fact"], historical_fact, historical_doc, comparison, False, "invalid_owner", comparison.reason)
             continue
 
         candidate = _candidate_dict(current_view["_fact"], historical_fact, historical_doc, comparison, inherited_owner, feedback)
         candidates.append(candidate)
         current_view.setdefault("_candidateOwners", []).append(inherited_owner)
+        _append_compare_result(diagnostics, current_view["_fact"], historical_fact, historical_doc, comparison, True, None, comparison.reason)
 
     for current_view in current_views:
         owners = current_view.pop("_candidateOwners", [])
@@ -128,15 +144,24 @@ def history_search_similar_failure_facts(
         ),
         reverse=True,
     )
+    diagnostics["acceptedCandidatesCount"] = len(candidates)
     return _base_result(
         context,
         current_facts=_public_current_views(current_views),
         candidates=candidates[:candidate_limit],
+        diagnostics=diagnostics,
         warning=warning,
     )
 
 
-def _base_result(context: AgentRuntimeContext, *, current_facts: list[dict], candidates: list[dict], warning: str | None = None) -> dict:
+def _base_result(
+    context: AgentRuntimeContext,
+    *,
+    current_facts: list[dict],
+    candidates: list[dict],
+    diagnostics: dict,
+    warning: str | None = None,
+) -> dict:
     return {
         "ok": True,
         "historyEnabled": True,
@@ -146,7 +171,55 @@ def _base_result(context: AgentRuntimeContext, *, current_facts: list[dict], can
         "threshold": context.settings.ai_history_compare_threshold,
         "currentFacts": current_facts,
         "candidates": candidates,
+        "diagnostics": diagnostics,
         "warning": warning,
+    }
+
+
+def _new_diagnostics() -> dict:
+    return {
+        "eligibleCurrentFactsCount": 0,
+        "historicalBuildsCount": None,
+        "historicalFactsCount": 0,
+        "rankedPairsCount": 0,
+        "comparedPairsCount": 0,
+        "acceptedCandidatesCount": 0,
+        "skipped": {
+            "currentFactIneligible": 0,
+            "invalidHistoricalFact": 0,
+            "compareNotSameFailure": 0,
+            "compareBelowThreshold": 0,
+            "blockedByFeedback": 0,
+            "invalidOwner": 0,
+            "compareError": 0,
+        },
+        "compareResults": [],
+    }
+
+
+def _find_historical_facts_with_diagnostics(history_store: MongoHistoryStore, context: AgentRuntimeContext) -> tuple[list[dict], dict]:
+    kwargs = {
+        "job": context.job,
+        "branch": context.branch,
+        "current_build_number": context.build_number,
+        "last_successful_build_number": context.last_successful_build_number,
+        "lookback_builds": context.settings.ai_history_max_fact_candidates,
+        "max_facts": context.settings.ai_history_max_fact_candidates,
+    }
+    if hasattr(history_store, "find_historical_failure_facts_with_diagnostics"):
+        result = history_store.find_historical_failure_facts_with_diagnostics(**kwargs)
+        return list(result.get("facts") or []), _compact_store_diagnostics(result.get("diagnostics") or {})
+    facts = history_store.find_historical_failure_facts(**kwargs)
+    return list(facts), {"historicalFactsCount": len(facts)}
+
+
+def _compact_store_diagnostics(value: dict) -> dict:
+    return {
+        "historicalBuildsCount": value.get("historicalBuildsCount"),
+        "historicalBuildNumbers": value.get("historicalBuildNumbers"),
+        "historicalFactsCount": value.get("historicalFactsCount", 0),
+        "historicalFactBuildNumbers": value.get("historicalFactBuildNumbers"),
+        "queryStage": value.get("queryStage"),
     }
 
 
@@ -198,7 +271,7 @@ def _blocked_reason(fact: FailureFact, min_confidence: float) -> str | None:
     return None
 
 
-def _ranked_pairs(current_views: list[dict], historical_docs: list[dict]) -> list[tuple[dict, dict, FailureFact]]:
+def _ranked_pairs(current_views: list[dict], historical_docs: list[dict], diagnostics: dict) -> list[tuple[dict, dict, FailureFact]]:
     pairs: list[tuple[int, dict, dict, FailureFact]] = []
     for current in current_views:
         current_fact = current["_fact"]
@@ -206,12 +279,48 @@ def _ranked_pairs(current_views: list[dict], historical_docs: list[dict]) -> lis
             try:
                 historical_fact = FailureFact.model_validate(historical_doc.get("fact") or {})
             except Exception:
+                diagnostics["skipped"]["invalidHistoricalFact"] += 1
                 continue
             score = _pair_score(current_fact, historical_fact)
             build_number = int(historical_doc.get("buildNumber") or 0)
             pairs.append((score * 100000 + build_number, current, historical_doc, historical_fact))
     pairs.sort(key=lambda item: item[0], reverse=True)
     return [(current, doc, fact) for _, current, doc, fact in pairs]
+
+
+def _comparison_skip_reason(comparison: FailureFactComparison, threshold: float) -> str:
+    if comparison.sameFailure and comparison.relationship == "same_root_cause" and comparison.confidence < threshold:
+        return "compare_below_threshold"
+    return "compare_not_same_failure"
+
+
+def _append_compare_result(
+    diagnostics: dict,
+    current_fact: FailureFact,
+    historical_fact: FailureFact,
+    historical_doc: dict,
+    comparison: FailureFactComparison | None,
+    accepted: bool,
+    skip_reason: str | None,
+    reason: str,
+) -> None:
+    if len(diagnostics["compareResults"]) >= 5:
+        return
+    diagnostics["compareResults"].append(
+        {
+            "currentFactId": current_fact.factId,
+            "currentSignatureKey": current_fact.signatureKey,
+            "historicalFactId": historical_fact.factId,
+            "historicalSignatureKey": historical_fact.signatureKey,
+            "historicalBuildNumber": historical_doc.get("buildNumber"),
+            "sameFailure": comparison.sameFailure if comparison else False,
+            "confidence": comparison.confidence if comparison else 0,
+            "relationship": comparison.relationship if comparison else "unclear",
+            "accepted": accepted,
+            "skipReason": skip_reason,
+            "reason": reason,
+        }
+    )
 
 
 def _pair_score(current: FailureFact, historical: FailureFact) -> int:

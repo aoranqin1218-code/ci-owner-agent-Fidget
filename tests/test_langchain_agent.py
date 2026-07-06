@@ -1030,6 +1030,38 @@ def _ai_history_precheck_payload(count: int = 1) -> dict:
         "mode": "ai_failure_facts",
         "threshold": 0.9,
         "warning": None,
+        "diagnostics": {
+            "eligibleCurrentFactsCount": count,
+            "historicalBuildsCount": 2,
+            "historicalFactsCount": 2,
+            "rankedPairsCount": count,
+            "comparedPairsCount": count,
+            "acceptedCandidatesCount": 1,
+            "skipped": {"compareNotSameFailure": 0, "compareError": 0},
+            "queryStage": "ok",
+            "historicalBuildNumbers": [7, 6],
+            "historicalFactBuildNumbers": [7, 6],
+            "notice": {"large": "should be omitted"},
+            "evidence": ["should be omitted"],
+            "compareResults": [
+                {
+                    "currentFactId": f"fact-{idx}",
+                    "currentSignatureKey": f"typescript_compile_error|TS2305|src/{idx}.ts|symbol",
+                    "historicalFactId": f"hist-{idx}",
+                    "historicalSignatureKey": f"typescript_compile_error|TS2305|src/{idx}.ts|symbol",
+                    "historicalBuildNumber": 7,
+                    "sameFailure": True,
+                    "confidence": 0.95,
+                    "relationship": "same_root_cause",
+                    "accepted": True,
+                    "skipReason": None,
+                    "reason": "same root cause",
+                    "notice": {"large": "should be omitted"},
+                    "evidence": ["should be omitted"],
+                }
+                for idx in range(count)
+            ],
+        },
         "currentFacts": [
             {
                 "factId": f"fact-{idx}",
@@ -1094,6 +1126,8 @@ def test_initial_input_includes_ai_history_precheck(repo_cache, sample_repo, log
     assert precheck["currentFacts"][0]["inheritedOwner"]["found"] is True
     assert precheck["currentFacts"][0]["inheritedOwner"]["matchType"] == "ai_fact_semantic"
     assert precheck["candidates"][0]["matchType"] == "ai_fact_semantic"
+    assert precheck["diagnostics"]["historicalFactsCount"] == 2
+    assert precheck["diagnostics"]["compareResults"][0]["accepted"] is True
 
 
 def test_initial_input_ai_history_precheck_is_compacted(repo_cache, sample_repo, logs):
@@ -1110,6 +1144,10 @@ def test_initial_input_ai_history_precheck_is_compacted(repo_cache, sample_repo,
     assert "evidence" not in precheck["currentFacts"][0]
     assert "notice" not in precheck["candidates"][0]
     assert "evidence" not in precheck["candidates"][0]
+    assert "notice" not in precheck["diagnostics"]
+    assert "evidence" not in precheck["diagnostics"]
+    assert "notice" not in precheck["diagnostics"]["compareResults"][0]
+    assert "evidence" not in precheck["diagnostics"]["compareResults"][0]
     assert "should be omitted" not in raw
 
 

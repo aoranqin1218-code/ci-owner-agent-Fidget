@@ -137,6 +137,17 @@ def test_ai_history_no_current_facts(repo_cache, sample_repo, logs):
     assert result["candidates"] == []
 
 
+def test_ai_history_diagnostics_when_historical_facts_missing(repo_cache, sample_repo, logs):
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    result = history_search_similar_failure_facts(_context(context, facts=[make_fact()]), store=make_store())
+    diagnostics = result["diagnostics"]
+    assert diagnostics["eligibleCurrentFactsCount"] == 1
+    assert diagnostics["historicalFactsCount"] == 0
+    assert diagnostics["rankedPairsCount"] == 0
+    assert diagnostics["comparedPairsCount"] == 0
+    assert diagnostics["acceptedCandidatesCount"] == 0
+
+
 def test_ai_history_filters_current_generic_fact(monkeypatch, repo_cache, sample_repo, logs):
     calls = []
     monkeypatch.setattr("ci_owner_agent.tools.ai_history_tools.compare_failure_facts_with_ai", lambda **kwargs: calls.append(kwargs))
@@ -167,6 +178,26 @@ def test_ai_history_ts2305_vs_etarget_not_inherited(monkeypatch, repo_cache, sam
     result = history_search_similar_failure_facts(_context(context, facts=[etarget]), store=store)
     assert result["candidates"] == []
     assert result["currentFacts"][0]["inheritedOwner"]["found"] is False
+    assert result["diagnostics"]["comparedPairsCount"] > 0
+    assert result["diagnostics"]["skipped"]["compareNotSameFailure"] > 0
+    assert result["diagnostics"]["compareResults"][0]["skipReason"] == "compare_not_same_failure"
+
+
+def test_ai_history_same_ts2305_compare_false_has_diagnostics(monkeypatch, repo_cache, sample_repo, logs):
+    monkeypatch.setattr("ci_owner_agent.tools.ai_history_tools.compare_failure_facts_with_ai", lambda **kwargs: _different())
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    store = make_store()
+    fact = make_fact()
+    _save_fact(store, context, build=7, fact=fact)
+    result = history_search_similar_failure_facts(_context(context, facts=[fact], build=13), store=store)
+    assert result["candidates"] == []
+    assert result["currentFacts"][0]["inheritedOwner"]["found"] is False
+    assert result["diagnostics"]["comparedPairsCount"] > 0
+    assert result["diagnostics"]["skipped"]["compareNotSameFailure"] > 0
+    compare_result = result["diagnostics"]["compareResults"][0]
+    assert compare_result["currentSignatureKey"] == fact.signatureKey
+    assert compare_result["historicalSignatureKey"] == fact.signatureKey
+    assert compare_result["accepted"] is False
 
 
 def test_ai_history_same_ts2305_inherits_owner(monkeypatch, repo_cache, sample_repo, logs):
@@ -183,6 +214,7 @@ def test_ai_history_same_ts2305_inherits_owner(monkeypatch, repo_cache, sample_r
     assert inherited["ownerName"] == "test"
     assert inherited["matchType"] == "ai_fact_semantic"
     assert inherited["relationship"] == "same_root_cause"
+    assert result["diagnostics"]["acceptedCandidatesCount"] == 1
 
 
 def test_ai_history_compare_below_threshold_not_inherited(monkeypatch, repo_cache, sample_repo, logs):
@@ -339,3 +371,5 @@ def test_ai_history_compare_exception_does_not_fail(monkeypatch, repo_cache, sam
     assert result["ok"] is True
     assert result["candidates"] == []
     assert "compare exploded" in result["warning"]
+    assert result["diagnostics"]["skipped"]["compareError"] > 0
+    assert result["diagnostics"]["compareResults"][0]["skipReason"] == "compare_error"
