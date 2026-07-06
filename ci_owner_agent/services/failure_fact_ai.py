@@ -21,7 +21,7 @@ def extract_failure_facts_with_ai(
 ) -> FailureFactExtractionResult:
     if not settings.ai_failure_facts_enabled:
         return FailureFactExtractionResult(ok=False, warning="AI failure facts disabled")
-    if settings.model_provider == "fake":
+    if settings.model_provider.lower() == "fake":
         return FailureFactExtractionResult(ok=False, warning="AI failure facts disabled for fake provider")
     if not log_excerpt.strip():
         return FailureFactExtractionResult(ok=False, warning="empty log excerpt")
@@ -48,6 +48,13 @@ def extract_failure_facts_with_ai(
         result = FailureFactExtractionResult.model_validate(data)
     except Exception as exc:
         return FailureFactExtractionResult(ok=False, warning=f"AI failure facts extraction failed: {exc}")
+
+    if result.ok is False:
+        return FailureFactExtractionResult(
+            ok=False,
+            facts=[],
+            warning=result.warning or "AI failure facts extraction returned ok=false",
+        )
 
     kept = [
         fact

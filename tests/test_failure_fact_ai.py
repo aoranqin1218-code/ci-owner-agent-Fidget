@@ -68,6 +68,32 @@ def test_extract_failure_facts_fake_provider_disabled():
     assert result.warning == "AI failure facts disabled for fake provider"
 
 
+def test_extract_failure_facts_fake_provider_case_insensitive():
+    result = extract_failure_facts_with_ai(
+        settings=_settings(model_provider="FAKE"),
+        job="job",
+        build_number=1,
+        build_url="url",
+        branch=None,
+        log_excerpt="log",
+        changed_files=[],
+        commits=[],
+    )
+    assert result.ok is False
+    assert result.warning == "AI failure facts disabled for fake provider"
+
+
+def test_extract_failure_facts_model_returns_ok_false(monkeypatch):
+    result = _extract(
+        _settings(),
+        monkeypatch,
+        {"ok": False, "facts": [], "warning": "cannot extract"},
+    )
+    assert result.ok is False
+    assert result.facts == []
+    assert "cannot extract" in result.warning
+
+
 def test_extract_failure_facts_ts2305(monkeypatch):
     result = _extract(
         _settings(),
