@@ -40,6 +40,10 @@ class Settings:
     ai_failure_facts_enabled: bool
     ai_failure_fact_min_confidence: float
     ai_failure_fact_max_log_chars: int
+    ai_history_compare_enabled: bool
+    ai_history_compare_threshold: float
+    ai_history_max_fact_candidates: int
+    ai_history_max_compare_calls: int
     wecom_notify_enabled: bool
     wecom_webhook_url: str | None
     wecom_notify_dry_run: bool
@@ -134,6 +138,10 @@ def load_settings(env_file: str | Path | None = None) -> Settings:
         ai_failure_facts_enabled=_bool_env("CI_AGENT_AI_FAILURE_FACTS_ENABLED", False),
         ai_failure_fact_min_confidence=max(0, min(_float_env_or_default("CI_AGENT_AI_FAILURE_FACT_MIN_CONFIDENCE", 0.70), 1)),
         ai_failure_fact_max_log_chars=_int_env_or_default("CI_AGENT_AI_FAILURE_FACT_MAX_LOG_CHARS", 12000),
+        ai_history_compare_enabled=_bool_env("CI_AGENT_AI_HISTORY_COMPARE_ENABLED", False),
+        ai_history_compare_threshold=max(0, min(_float_env_or_default("CI_AGENT_AI_HISTORY_COMPARE_THRESHOLD", 0.90), 1)),
+        ai_history_max_fact_candidates=_int_env_or_default("CI_AGENT_AI_HISTORY_MAX_FACT_CANDIDATES", 20),
+        ai_history_max_compare_calls=_int_env_or_default("CI_AGENT_AI_HISTORY_MAX_COMPARE_CALLS", 20),
         wecom_notify_enabled=_bool_env("CI_AGENT_WECOM_NOTIFY_ENABLED", False),
         wecom_webhook_url=os.getenv("CI_AGENT_WECOM_WEBHOOK_URL") or None,
         wecom_notify_dry_run=_bool_env("CI_AGENT_WECOM_NOTIFY_DRY_RUN", True),

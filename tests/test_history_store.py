@@ -746,3 +746,128 @@ def test_save_failure_facts_uses_matching_responsibility_item_owner(repo_cache, 
 
     assert store.failure_facts.docs[0]["factOwner"]["name"] == "Li Si"
     assert store.failure_facts.docs[0]["factOwner"]["email"] == "lisi@example.com"
+
+
+def _save_fact_build(store, context, *, build: int, branch: str | None = "dev", fact: FailureFact | None = None):
+    from ci_owner_agent.schemas import CiResponsibilityNotice
+
+    notice = CiResponsibilityNotice.model_validate(high_confidence_payload(context))
+    build_info = BuildInfo(job=context.job, buildNumber=build, result="FAILURE", buildUrl=f"local://job/{build}", branch=branch, commit=context.head_commit)
+    store.save_analysis(build_info, notice, context.base_commit, context.head_commit, 6, context.base_commit, [])
+    store.save_failure_facts(
+        build_info=build_info,
+        notice=notice,
+        facts=[
+            fact
+            or FailureFact(
+                signatureKey=f"typescript_compile_error|TS2305|src/{build}.ts|classifyErrorMessage",
+                historyEligible=True,
+                isGenericWrapper=False,
+                failureKind="typescript_compile_error",
+                errorCode="TS2305",
+                message="missing export",
+                rootCauseSummary="missing export",
+                confidence=0.95,
+            )
+        ],
+    )
+
+
+def test_find_historical_failure_facts_returns_saved_facts(repo_cache, sample_repo, logs):
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    store = make_store()
+    _save_fact_build(store, context, build=7)
+
+    facts = store.find_historical_failure_facts(
+        job=context.job,
+        branch="dev",
+        current_build_number=8,
+        last_successful_build_number=6,
+    )
+
+    assert len(facts) == 1
+    assert facts[0]["buildNumber"] == 7
+    assert facts[0]["fact"]["errorCode"] == "TS2305"
+
+
+def test_find_historical_failure_facts_respects_last_successful_build(repo_cache, sample_repo, logs):
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    store = make_store()
+    _save_fact_build(store, context, build=5)
+    _save_fact_build(store, context, build=7)
+
+    facts = store.find_historical_failure_facts(
+        job=context.job,
+        branch="dev",
+        current_build_number=8,
+        last_successful_build_number=6,
+    )
+
+    assert [item["buildNumber"] for item in facts] == [7]
+
+
+def test_find_historical_failure_facts_excludes_current_and_future(repo_cache, sample_repo, logs):
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    store = make_store()
+    _save_fact_build(store, context, build=8)
+    _save_fact_build(store, context, build=9)
+
+    facts = store.find_historical_failure_facts(
+        job=context.job,
+        branch="dev",
+        current_build_number=8,
+        last_successful_build_number=6,
+    )
+
+    assert facts == []
+
+
+def test_find_historical_failure_facts_filters_ineligible_and_generic(repo_cache, sample_repo, logs):
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    store = make_store()
+    _save_fact_build(store, context, build=5, fact=FailureFact(signatureKey="ineligible", historyEligible=False, failureKind="generic", message="x", rootCauseSummary="x", confidence=0.9))
+    _save_fact_build(store, context, build=6, fact=FailureFact(signatureKey="generic", historyEligible=True, isGenericWrapper=True, failureKind="generic_wrapper", message="x", rootCauseSummary="x", confidence=0.9))
+    _save_fact_build(store, context, build=7)
+
+    facts = store.find_historical_failure_facts(
+        job=context.job,
+        branch="dev",
+        current_build_number=8,
+        last_successful_build_number=None,
+    )
+
+    assert [item["buildNumber"] for item in facts] == [7]
+
+
+def test_find_historical_failure_facts_filters_branch(repo_cache, sample_repo, logs):
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    store = make_store()
+    _save_fact_build(store, context, build=5, branch="feature")
+    _save_fact_build(store, context, build=6, branch=None)
+    _save_fact_build(store, context, build=7, branch="dev")
+
+    facts = store.find_historical_failure_facts(
+        job=context.job,
+        branch="dev",
+        current_build_number=8,
+        last_successful_build_number=None,
+    )
+
+    assert [item["buildNumber"] for item in facts] == [7, 6]
+
+
+def test_find_historical_failure_facts_limits_max_facts(repo_cache, sample_repo, logs):
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    store = make_store()
+    for build in [5, 6, 7]:
+        _save_fact_build(store, context, build=build)
+
+    facts = store.find_historical_failure_facts(
+        job=context.job,
+        branch="dev",
+        current_build_number=8,
+        last_successful_build_number=None,
+        max_facts=2,
+    )
+
+    assert [item["buildNumber"] for item in facts] == [7, 6]

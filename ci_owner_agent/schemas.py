@@ -167,6 +167,28 @@ class FailureFactExtractionResult(StrictModel):
     warning: str | None = None
 
 
+class FailureFactComparison(StrictModel):
+    sameFailure: bool
+    confidence: float
+    relationship: Literal[
+        "same_root_cause",
+        "different_root_cause",
+        "unclear",
+        "blocked_by_generic_wrapper",
+        "blocked_by_low_confidence",
+    ]
+    samePoints: list[str] = Field(default_factory=list)
+    differentPoints: list[str] = Field(default_factory=list)
+    reason: str
+
+    @model_validator(mode="after")
+    def normalize_comparison(self) -> "FailureFactComparison":
+        self.confidence = max(0, min(float(self.confidence or 0), 1))
+        if not self.sameFailure and self.relationship == "same_root_cause":
+            self.relationship = "unclear"
+        return self
+
+
 class CiResponsibilityNotice(StrictModel):
     job: str
     buildNumber: int

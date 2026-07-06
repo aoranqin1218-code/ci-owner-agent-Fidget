@@ -234,6 +234,43 @@ class MongoHistoryStore:
             )
         return chunks
 
+    def find_historical_failure_facts(
+        self,
+        *,
+        job: str,
+        branch: str | None,
+        current_build_number: int,
+        last_successful_build_number: int | None,
+        lookback_builds: int = 20,
+        max_facts: int = 20,
+    ) -> list[dict]:
+        build_query: dict[str, Any] = {
+            "job": job,
+            "buildNumber": {"$lt": current_build_number},
+            "result": {"$in": ["FAILURE", "UNSTABLE", "UNKNOWN"]},
+        }
+        if branch is not None:
+            build_query["branch"] = {"$in": [branch, None]}
+        if last_successful_build_number is not None:
+            build_query["buildNumber"]["$gt"] = last_successful_build_number
+
+        builds = list(self.builds.find(build_query).sort("buildNumber", -1).limit(max(1, lookback_builds)))
+        build_numbers = [item.get("buildNumber") for item in builds if item.get("buildNumber") is not None]
+        if not build_numbers:
+            return []
+
+        fact_query: dict[str, Any] = {
+            "job": job,
+            "buildNumber": {"$in": build_numbers},
+            "historyEligible": True,
+            "isGenericWrapper": False,
+        }
+        if branch is not None:
+            fact_query["branch"] = {"$in": [branch, None]}
+        facts = list(self.failure_facts.find(fact_query))
+        facts.sort(key=lambda item: (item.get("buildNumber") or 0, item.get("factIndex") or 0), reverse=True)
+        return facts[: max(1, max_facts)]
+
     def notification_sent(self, *, job: str, branch: str | None, build_number: int, notice_hash: str, channel: str = "wecom") -> bool:
         return self.notifications.find_one(
             {"job": job, "branch": branch, "buildNumber": build_number, "noticeHash": notice_hash, "channel": channel, "status": "sent"}
