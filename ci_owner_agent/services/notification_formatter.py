@@ -20,32 +20,41 @@ def format_wecom_markdown_notice(
     owners = collect_responsible_owners(notice)
     evidence_by_id = {item.id: item for item in notice.evidence}
     lines = [
-        f"### 单测失败 | {notice.job} #{notice.buildNumber}",
+        f"### {result_icon(notice.result)} CI 单测{result_label(notice.result)} | {notice.job} #{notice.buildNumber}",
         "",
-        f"**责任人**：{format_responsible_mentions(owners, mapper, mention_mode)}",
-        f"**原因**：{public_single_line(notice.failureReason, max_reason_chars)}",
+        f"👤 **责任人**：{format_responsible_mentions(owners, mapper, mention_mode)}",
+        f"🧭 **原因**：{public_single_line(notice.failureReason, max_reason_chars)}",
+        responsibility_item_stats(notice.responsibilityItems),
         "",
-        "#### 责任项",
+        "#### 🧩 责任项",
+        "",
     ]
     if notice.responsibilityItems:
         for idx, item in enumerate(notice.responsibilityItems, start=1):
             owner_name = format_item_owner(item.owner, mapper, mention_mode)
+            item_type = str(item.responsibilityType or "unknown")
             lines.extend(
                 [
-                    f"{idx}. {public_single_line(item.failureTitle, 120)}",
-                    f"   - 类型：{item.responsibilityType}",
-                    f"   - 责任人：{owner_name}",
-                    f"   - 来源：{source_build_label(item, notice)}",
-                    f"   - 证据：{format_item_evidence(item, evidence_by_id, max_evidence_chars)}",
+                    f"{idx}. {responsibility_type_icon(item_type)} {responsibility_type_label(item_type)} | {public_single_line(item.failureTitle, 120)}",
+                    f"   - 👤 责任人：{owner_name}",
+                    f"   - 🧷 来源：{source_build_label(item, notice)}",
+                    f"   - 🔎 证据：{format_item_evidence(item, evidence_by_id, max_evidence_chars)}",
                     "",
                 ]
             )
     else:
-        lines.extend(["1. 未识别到独立责任项", "   - 类型：unknown", "   - 责任人：无高可信责任人", "   - 来源：-", "   - 证据：证据不足，详见分析结果 JSON。", ""])
+        lines.extend(["1. 🧩 unknown | 未识别到独立责任项", "   - 👤 责任人：无高可信责任人", "   - 🧷 来源：-", "   - 🔎 证据：证据不足，详见分析结果 JSON。", ""])
 
-    lines.extend(["#### 构建链接", f"[查看 Jenkins 构建]({notice.buildUrl})" if notice.buildUrl else "无", "", "#### 反馈链接"])
+    suggestions = format_suggestions(notice.suggestions)
+    if suggestions:
+        lines.extend(["#### 🛠️ 修复建议", ""])
+        lines.extend(f"- {suggestion}" for suggestion in suggestions)
+        lines.append("")
+
+    lines.extend(["#### 🔗 相关链接", ""])
+    lines.append(f"- 🏗️ [查看 Jenkins 构建]({notice.buildUrl})" if notice.buildUrl else "- 🏗️ Jenkins 构建：无")
     feedback_url = build_feedback_url(feedback_base_url, notice, feedback_token)
-    lines.append(f"[提交反馈]({feedback_url})" if feedback_url else "未配置")
+    lines.append(f"- 📝 [提交反馈]({feedback_url})" if feedback_url else "- 📝 反馈：未配置")
     return "\n".join(lines)
 
 
@@ -98,6 +107,65 @@ def format_item_evidence(item: ResponsibilityItem, evidence_by_id: dict[str, Evi
         if text:
             snippets.append(public_single_line(text, 220))
     return public_single_line("；".join(snippets), max_chars) if snippets else "证据不足，详见分析结果 JSON。"
+
+
+def result_icon(result: str) -> str:
+    return {
+        "SUCCESS": "✅",
+        "FAILURE": "❌",
+        "UNSTABLE": "⚠️",
+        "ABORTED": "⏹️",
+        "UNKNOWN": "❔",
+    }.get(str(result or "").upper(), "❔")
+
+
+def result_label(result: str) -> str:
+    return {
+        "SUCCESS": "成功",
+        "FAILURE": "失败",
+        "UNSTABLE": "不稳定",
+        "ABORTED": "中止",
+        "UNKNOWN": "未知",
+    }.get(str(result or "").upper(), "未知")
+
+
+def responsibility_type_icon(value: str) -> str:
+    return {
+        "current_build_owner": "🔥",
+        "inherited_failure_owner": "♻️",
+        "no_high_confidence_owner": "❓",
+    }.get(str(value or ""), "🧩")
+
+
+def responsibility_type_label(value: str) -> str:
+    return {
+        "current_build_owner": "当前引入",
+        "inherited_failure_owner": "历史持续",
+        "no_high_confidence_owner": "待确认",
+    }.get(str(value or ""), str(value or "unknown"))
+
+
+def responsibility_item_stats(items: list[ResponsibilityItem]) -> str:
+    if not items:
+        return "📌 **责任项**：未识别到独立责任项"
+    current = sum(1 for item in items if item.responsibilityType == "current_build_owner")
+    inherited = sum(1 for item in items if item.responsibilityType == "inherited_failure_owner")
+    unresolved = sum(1 for item in items if item.responsibilityType == "no_high_confidence_owner")
+    other = len(items) - current - inherited - unresolved
+    parts = [f"共 {len(items)} 项"]
+    if current:
+        parts.append(f"当前引入 {current}")
+    if inherited:
+        parts.append(f"历史持续 {inherited}")
+    if unresolved:
+        parts.append(f"待确认 {unresolved}")
+    if other:
+        parts.append(f"其他 {other}")
+    return f"📌 **责任项**：{'，'.join(parts)}"
+
+
+def format_suggestions(suggestions: list[str], max_items: int = 3) -> list[str]:
+    return [public_single_line(item, 200) for item in suggestions[:max_items] if public_single_line(item, 200)]
 
 
 def build_feedback_url(base_url: str | None, notice: CiResponsibilityNotice, token: str | None = None) -> str | None:

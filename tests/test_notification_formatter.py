@@ -7,7 +7,7 @@ from ci_owner_agent.schemas import CiResponsibilityNotice
 from ci_owner_agent.config import load_settings
 from ci_owner_agent.main import _maybe_notify_notice, _notify_notice, main
 from ci_owner_agent.services.history_store import notice_hash
-from ci_owner_agent.services.notification_formatter import collect_responsible_display_names, format_wecom_markdown_notice
+from ci_owner_agent.services.notification_formatter import collect_responsible_display_names, format_wecom_markdown_notice, result_icon
 from ci_owner_agent.services.wecom_user_mapping import WeComUserMapper
 from tests.test_history_store import make_store
 
@@ -55,7 +55,10 @@ def item(owner_name="Tang.Tangerine-唐嘉伟", owner_type="inherited_failure_ow
 def test_inherited_item_owner_is_mentioned_without_top_level_conclusion():
     notice = CiResponsibilityNotice.model_validate(notice_payload([item()]))
     markdown = format_wecom_markdown_notice(notice, feedback_base_url="http://ci-agent.test/feedback")
-    assert "**责任人**：@Tang.Tangerine-唐嘉伟" in markdown
+    assert "### ❌ CI 单测失败 | services/fx-code-unittest #5099" in markdown
+    assert "👤 **责任人**：@Tang.Tangerine-唐嘉伟" in markdown
+    assert "🧭 **原因**：" in markdown
+    assert "#### 🧩 责任项" in markdown
     assert "顶层结论" not in markdown
     assert "顶层结论：无高可信责任人" not in markdown
 
@@ -65,13 +68,30 @@ def test_multiple_responsible_names_are_deduplicated_in_order():
         notice_payload([item("Tang"), item("Tang"), item("Mars", "high_confidence", "current_build_owner", "新失败。", "mars@example.com")])
     )
     assert collect_responsible_display_names(notice) == ["Tang", "Mars"]
-    assert "**责任人**：@Tang、@Mars" in format_wecom_markdown_notice(notice)
+    assert "👤 **责任人**：@Tang、@Mars" in format_wecom_markdown_notice(notice)
 
 
 def test_no_item_owner_displays_no_high_confidence_owner():
     no_owner = item("无高可信责任人", "no_high_confidence_owner", "no_high_confidence_owner", "证据不足。")
     notice = CiResponsibilityNotice.model_validate(notice_payload([no_owner]))
-    assert "**责任人**：无高可信责任人" in format_wecom_markdown_notice(notice)
+    assert "👤 **责任人**：无高可信责任人" in format_wecom_markdown_notice(notice)
+
+
+def test_responsibility_type_labels_are_public_readable():
+    current = item("Henry", "high_confidence", "current_build_owner", "新失败。", "henry@example.com")
+    inherited = item("Tang", "inherited_failure_owner", "inherited_failure_owner", "历史持续。", "tang@example.com")
+    no_owner = item("无高可信责任人", "no_high_confidence_owner", "no_high_confidence_owner", "证据不足。")
+    notice = CiResponsibilityNotice.model_validate(notice_payload([current, inherited, no_owner]))
+
+    markdown = format_wecom_markdown_notice(notice)
+
+    assert "📌 **责任项**：共 3 项，当前引入 1，历史持续 1，待确认 1" in markdown
+    assert "🔥 当前引入 | EtlUtils - getInputEntryInfo" in markdown
+    assert "♻️ 历史持续 | EtlUtils - getInputEntryInfo" in markdown
+    assert "❓ 待确认 | EtlUtils - getInputEntryInfo" in markdown
+    assert "current_build_owner" not in markdown
+    assert "inherited_failure_owner" not in markdown
+    assert "no_high_confidence_owner" not in markdown
 
 
 def test_top_responsible_owners_use_mapper_userid_mention(tmp_path):
@@ -84,7 +104,7 @@ def test_top_responsible_owners_use_mapper_userid_mention(tmp_path):
     mapper = WeComUserMapper.from_csv(path)
     notice = CiResponsibilityNotice.model_validate(notice_payload([item("Tang")]))
     markdown = format_wecom_markdown_notice(notice, user_mapper=mapper)
-    assert "**责任人**：<@tang.userid>" in markdown
+    assert "👤 **责任人**：<@tang.userid>" in markdown
 
 
 def test_responsibility_item_owner_uses_mapper_userid_mention(tmp_path):
@@ -97,14 +117,14 @@ def test_responsibility_item_owner_uses_mapper_userid_mention(tmp_path):
     mapper = WeComUserMapper.from_csv(path)
     notice = CiResponsibilityNotice.model_validate(notice_payload([item("Tang")]))
     markdown = format_wecom_markdown_notice(notice, user_mapper=mapper)
-    assert "   - 责任人：<@tang.userid>" in markdown
+    assert "   - 👤 责任人：<@tang.userid>" in markdown
 
 
 def test_unmapped_owner_fallback_to_name_mention():
     notice = CiResponsibilityNotice.model_validate(notice_payload([item("Tang")]))
     markdown = format_wecom_markdown_notice(notice, user_mapper=WeComUserMapper([]))
-    assert "**责任人**：@Tang" in markdown
-    assert "   - 责任人：@Tang" in markdown
+    assert "👤 **责任人**：@Tang" in markdown
+    assert "   - 👤 责任人：@Tang" in markdown
 
 
 def test_mention_mode_name_does_not_use_userid(tmp_path):
@@ -118,7 +138,7 @@ def test_mention_mode_name_does_not_use_userid(tmp_path):
     notice = CiResponsibilityNotice.model_validate(notice_payload([item("Tang")]))
     markdown = format_wecom_markdown_notice(notice, user_mapper=mapper, mention_mode="name")
     assert "<@tang.userid>" not in markdown
-    assert "**责任人**：@Tang" in markdown
+    assert "👤 **责任人**：@Tang" in markdown
 
 
 def test_system_fields_are_not_displayed():
@@ -136,7 +156,7 @@ def test_system_fields_are_not_displayed():
 
 def test_item_reason_is_used_as_evidence():
     notice = CiResponsibilityNotice.model_validate(notice_payload([item(reason="当前 failure item 与历史构建 #5094 一致。")]))
-    assert "证据：当前 failure item 与历史构建 #5094 一致。" in format_wecom_markdown_notice(notice)
+    assert "🔎 证据：当前 failure item 与历史构建 #5094 一致。" in format_wecom_markdown_notice(notice)
 
 
 def test_empty_reason_falls_back_to_evidence_ids():
@@ -147,15 +167,53 @@ def test_empty_reason_falls_back_to_evidence_ids():
     assert "日志显示 Webhook触发 Timeout" in markdown
 
 
+def test_suggestions_show_first_three_items():
+    payload = notice_payload([item()])
+    payload["suggestions"] = ["检查测试数据准备逻辑。", "优先验证历史持续失败。", "补充单测覆盖。", "第四条不展示。"]
+    notice = CiResponsibilityNotice.model_validate(payload)
+
+    markdown = format_wecom_markdown_notice(notice)
+
+    assert "#### 🛠️ 修复建议" in markdown
+    assert "- 检查测试数据准备逻辑。" in markdown
+    assert "- 优先验证历史持续失败。" in markdown
+    assert "- 补充单测覆盖。" in markdown
+    assert "第四条不展示" not in markdown
+
+
+def test_suggestions_section_is_omitted_when_empty():
+    notice = CiResponsibilityNotice.model_validate(notice_payload([item()]))
+
+    assert "#### 🛠️ 修复建议" not in format_wecom_markdown_notice(notice)
+
+
+def test_result_icons_and_labels():
+    expected = {
+        "SUCCESS": "### ✅ CI 单测成功",
+        "FAILURE": "### ❌ CI 单测失败",
+        "UNSTABLE": "### ⚠️ CI 单测不稳定",
+        "ABORTED": "### ⏹️ CI 单测中止",
+        "UNKNOWN": "### ❔ CI 单测未知",
+        "OTHER": "### ❔ CI 单测未知",
+    }
+    for result, title in expected.items():
+        payload = notice_payload([item()])
+        payload["result"] = result
+        notice = CiResponsibilityNotice.model_validate(payload)
+        assert title in format_wecom_markdown_notice(notice)
+    assert result_icon("failure") == "❌"
+
+
 def test_build_and_feedback_links():
     notice = CiResponsibilityNotice.model_validate(notice_payload([item()]))
     markdown = format_wecom_markdown_notice(notice, feedback_base_url="http://ci-agent.xxx/feedback")
-    assert "#### 构建链接" in markdown
+    assert "#### 🔗 相关链接" in markdown
     assert notice.buildUrl in markdown
-    assert "#### 反馈链接" in markdown
+    assert "🏗️ [查看 Jenkins 构建]" in markdown
+    assert "📝 [提交反馈]" in markdown
     assert "job=services%2Ffx-code-unittest" in markdown
     assert "build=5099" in markdown
-    assert "未配置" in format_wecom_markdown_notice(notice, feedback_base_url=None)
+    assert "📝 反馈：未配置" in format_wecom_markdown_notice(notice, feedback_base_url=None)
 
 
 def test_feedback_link_can_include_shared_token():
@@ -176,8 +234,8 @@ def test_notify_notice_dry_run_outputs_markdown(tmp_path, capsys, monkeypatch):
     rc = main(["notify-notice", "--notice-file", str(notice_file), "--dry-run", "--feedback-base-url", "http://ci-agent.test/feedback"])
     out = capsys.readouterr().out
     assert rc == 0
-    assert "### 单测失败 | services/fx-code-unittest #5099" in out
-    assert "#### 反馈链接" in out
+    assert "### ❌ CI 单测失败 | services/fx-code-unittest #5099" in out
+    assert "#### 🔗 相关链接" in out
 
 
 def test_notify_notice_dry_run_uses_mapping_file(tmp_path, capsys, monkeypatch):
@@ -260,7 +318,7 @@ def test_analyze_notify_dry_run_stdout_stays_json(monkeypatch, capsys):
     assert rc == 0
     parsed = __import__("json").loads(out)
     assert parsed["buildNumber"] == 5099
-    assert "### 单测失败" not in out
+    assert "CI 单测失败" not in out
 
 
 def test_maybe_notify_filters_no_owner_by_responsibility_items(monkeypatch):
@@ -366,5 +424,5 @@ def test_analyze_notify_exception_stays_json(monkeypatch, capsys):
     assert rc == 0
     assert parsed["buildNumber"] == 5099
     assert "WARNING" not in captured.out
-    assert "### 单测失败" not in captured.out
+    assert "CI 单测失败" not in captured.out
     assert "WARNING: notify failed unexpectedly: mongo down" in captured.err
