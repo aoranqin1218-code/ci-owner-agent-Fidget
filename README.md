@@ -338,3 +338,57 @@ python .\scripts\batch_analyze_company_logs.py `
 - Range filtering happens after scanning all logs, so a failed build inside the range still gets the correct previous successful commit and `--last-success-build` from earlier logs outside the range.
 - `--limit` applies after build range filtering.
 - `--dry-run` prints commands without calling the real LLM.
+
+## Batch Jenkins Builds
+
+`scripts/batch_analyze_jenkins_builds.py` runs the formal Jenkins mode in a batch. It calls `python -m ci_owner_agent analyze`, reads build metadata and console logs from Jenkins, and lets `analyze_jenkins` resolve `lastSuccessfulBuild`, `baseCommit`, and `headCommit`. It does not read local console files and does not pass `analyze-local` arguments.
+
+Range example:
+
+```powershell
+python .\scripts\batch_analyze_jenkins_builds.py `
+  --job CI-test/unintest-MatureLeek `
+  --repo fx-code `
+  --build-from 7 `
+  --build-to 13 `
+  --log-tail-lines 200 `
+  --out-dir .\runs\jenkins-batch-unintest-MatureLeek-7-13 `
+  --fetch-trace `
+  --trace-wait-seconds 60
+```
+
+Specific builds:
+
+```powershell
+python .\scripts\batch_analyze_jenkins_builds.py `
+  --job CI-test/unintest-MatureLeek `
+  --repo fx-code `
+  --builds 7,13 `
+  --log-tail-lines 200 `
+  --out-dir .\runs\jenkins-batch-ai-history-7-13 `
+  --fetch-trace
+```
+
+Notification dry run:
+
+```powershell
+python .\scripts\batch_analyze_jenkins_builds.py `
+  --job CI-test/unintest-MatureLeek `
+  --repo fx-code `
+  --build-from 7 `
+  --build-to 13 `
+  --notify-dry-run
+```
+
+Formal notification:
+
+```powershell
+python .\scripts\batch_analyze_jenkins_builds.py `
+  --job CI-test/unintest-MatureLeek `
+  --repo fx-code `
+  --build-from 7 `
+  --build-to 13 `
+  --notify
+```
+
+The output layout matches the local batch script: `index.jsonl`, `summary.csv`, `notices/`, `stdout/`, `stderr/`, and optional `traces/`. When traces are fetched, the summary includes compact `aiHistoryPrecheck.diagnostics` counters such as historical build/fact counts, compared pairs, accepted candidates, and skipped reasons.
