@@ -7,7 +7,7 @@ import pytest
 from ci_owner_agent.agents.context import AgentRuntimeContext
 from ci_owner_agent.agents.factory import AgentConfigurationError, create_responsibility_agent
 from ci_owner_agent.agents.langchain_agent import LangChainResponsibilityAgent
-from ci_owner_agent.agents.responsibility_agent import RuleBasedResponsibilityAgent
+from ci_owner_agent.agents.responsibility_agent import FakeResponsibilityAgent
 from ci_owner_agent.config import load_settings
 from ci_owner_agent.schemas import BuildInfo
 from ci_owner_agent.services.git_client import GitClient
@@ -44,10 +44,13 @@ def make_context(repo_cache, sample_repo, logs, provider="fake"):
     )
 
 
-def test_factory_fake_returns_rule_based(repo_cache, sample_repo, logs):
+def test_factory_fake_returns_fixed_no_owner_agent(repo_cache, sample_repo, logs):
     context = make_context(repo_cache, sample_repo, logs, provider="fake")
     agent = create_responsibility_agent(context.settings, context)
-    assert isinstance(agent, RuleBasedResponsibilityAgent)
+    assert isinstance(agent, FakeResponsibilityAgent)
+    notice = agent.analyze(context)
+    assert notice.owner.type == "no_high_confidence_owner"
+    assert notice.hasHighConfidenceOwner is False
 
 
 def test_factory_openai_missing_key_is_clear_error(repo_cache, sample_repo, logs):

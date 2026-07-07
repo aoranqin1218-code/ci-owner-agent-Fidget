@@ -125,7 +125,7 @@ def test_aborted_build_short_circuits(repo_cache: Path, sample_repo, logs):
     assert "不进入普通业务代码定责流程" in notice.failureReason
 
 
-def test_failure_high_confidence(repo_cache: Path, sample_repo, logs):
+def test_fake_provider_failure_returns_no_owner(repo_cache: Path, sample_repo, logs):
     notice = analyze_local(
         repo=sample_repo["repo"],
         job="services/fx-code-unittest",
@@ -137,11 +137,9 @@ def test_failure_high_confidence(repo_cache: Path, sample_repo, logs):
         build_url="local://services/fx-code-unittest/5061",
         git_client=GitClient(repo_cache),
     )
-    assert notice.owner.type == "high_confidence"
-    assert notice.owner.email == "zhangsan@example.com"
-    assert notice.hasHighConfidenceOwner is True
-    assert len({item.type for item in notice.evidence}) >= 2
-    assert any(item.source == "repo_sync" for item in notice.evidence)
+    assert notice.owner.type == "no_high_confidence_owner"
+    assert notice.hasHighConfidenceOwner is False
+    assert "fake provider" in notice.failureReason
 
 
 def test_failure_insufficient_evidence(repo_cache: Path, readme_only_repo, logs):
@@ -189,7 +187,7 @@ def test_cli_analyze_local_outputs_json(repo_cache: Path, sample_repo, logs, cap
     assert "```" not in output
     assert output.lstrip().startswith("{")
     payload = json.loads(output)
-    assert payload["owner"]["type"] == "high_confidence"
+    assert payload["owner"]["type"] == "no_high_confidence_owner"
 
 
 def test_cli_analyze_local_checkout_mismatch_outputs_clear_error(repo_cache: Path, sample_repo, tmp_path: Path, capsys, monkeypatch):
