@@ -10,7 +10,6 @@ from ci_owner_agent.tools.keyword_tools import repo_keyword_search as keyword_se
 from ci_owner_agent.tools.path_tools import repo_find_paths as find_paths
 from ci_owner_agent.tools.typescript_tools import (
     check_node_dependencies_for_analysis as check_ts_deps,
-    ts_analyze_changed_functions as analyze_changed_functions,
     ts_find_callers as find_callers,
     ts_find_definitions as find_definitions,
 )
@@ -224,22 +223,6 @@ def build_langchain_tools(context: AgentRuntimeContext) -> list[Any]:
             max_chars,
         )
 
-    def ts_analyze_changed_functions(files: list[str] | None = None) -> dict:
-        """Analyze changed TypeScript or TSX functions for context changed files."""
-        blocked = _guard_tool_call("ts_analyze_changed_functions", {"files": files or []})
-        if blocked:
-            return blocked
-        target_files = files or [item.path for item in context.changed_files if item.path.endswith((".ts", ".tsx"))]
-        return analyze_changed_functions(
-            repo=context.repo,
-            baseCommit=context.base_commit,
-            headCommit=context.head_commit,
-            files=target_files,
-            repo_cache_dir=context.settings.repo_cache_dir,
-            analyzer_dir=context.settings.ts_analyzer_dir,
-            max_output_chars=max_chars,
-        )
-
     def ts_find_definitions(symbols: list[str]) -> dict:
         """Find TypeScript definitions for symbols at the context head commit."""
         blocked = _guard_tool_call("ts_find_definitions", {"symbols": symbols})
@@ -310,7 +293,6 @@ def build_langchain_tools(context: AgentRuntimeContext) -> list[Any]:
             "Search keywords. Valid scope values: changed_files, paths, whole_repo. Use scope=paths with paths=[...] to search specific directories/files. Use scope=whole_repo for the whole repository. Aliases repo/repository/all are accepted as whole_repo.",
             repo_keyword_search,
         ),
-        ("ts_analyze_changed_functions", "Analyze changed TS/TSX functions.", ts_analyze_changed_functions),
         ("ts_find_definitions", "Find TypeScript definitions for symbols.", ts_find_definitions),
         ("ts_find_callers", "Find TypeScript callers of a symbol.", ts_find_callers),
         ("check_node_dependencies_for_analysis", "Check TS node_modules and tsconfig dependencies.", check_node_dependencies_for_analysis),
