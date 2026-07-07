@@ -4,7 +4,7 @@ import csv
 from dataclasses import dataclass
 from pathlib import Path
 
-NO_OWNER_NAME = "无高可信责任人"
+from ci_owner_agent.constants import NO_OWNER_NAME
 
 
 @dataclass(frozen=True)

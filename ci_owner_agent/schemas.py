@@ -6,6 +6,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from ci_owner_agent.constants import NO_OWNER_NAME
+
 
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -218,12 +220,12 @@ class CiResponsibilityNotice(StrictModel):
             for item in self.responsibilityItems
             if item.owner.type in {"high_confidence", "medium_confidence", "inherited_failure_owner"}
             and item.owner.name
-            and item.owner.name != "无高可信责任人"
+            and item.owner.name != NO_OWNER_NAME
         }
         if len(responsible_owners) > 1:
             self.owner = Owner(
                 type="no_high_confidence_owner",
-                name="无高可信责任人",
+                name=NO_OWNER_NAME,
                 email=None,
                 commit=None,
                 confidence=0,
@@ -234,19 +236,16 @@ class CiResponsibilityNotice(StrictModel):
             self.hasHighConfidenceOwner = True
         else:
             self.hasHighConfidenceOwner = False
-        if self.owner.name == "无高可信责任人" or self.owner.type == "no_high_confidence_owner":
+        if self.owner.name == NO_OWNER_NAME or self.owner.type == "no_high_confidence_owner":
             self.owner = Owner(
                 type="no_high_confidence_owner",
-                name="无高可信责任人",
+                name=NO_OWNER_NAME,
                 email=None,
                 commit=None,
                 confidence=0,
             )
             self.hasHighConfidenceOwner = False
         return self
-
-
-NO_OWNER_NAME = "无高可信责任人"
 
 
 def _no_owner() -> Owner:

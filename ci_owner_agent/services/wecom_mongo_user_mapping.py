@@ -3,8 +3,9 @@ from __future__ import annotations
 import datetime as dt
 from typing import Any
 
+from ci_owner_agent.constants import NO_OWNER_NAME
 from ci_owner_agent.services.history_store import MongoHistoryStore
-from ci_owner_agent.services.wecom_user_mapping import NO_OWNER_NAME, WeComUserMapper, WeComUserMappingEntry, build_mapping_key, normalize_email
+from ci_owner_agent.services.wecom_user_mapping import WeComUserMapper, WeComUserMappingEntry, build_mapping_key, normalize_email
 
 
 class MongoWeComUserMapper:

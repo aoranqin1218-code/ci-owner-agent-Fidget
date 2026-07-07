@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from ci_owner_agent.agents.context import AgentRuntimeContext
+from ci_owner_agent.constants import NO_OWNER_NAME
 from ci_owner_agent.schemas import FailureFact, FailureFactComparison
 from ci_owner_agent.services.failure_fact_compare_ai import compare_failure_facts_with_ai
 from ci_owner_agent.services.history_store import (
@@ -12,7 +13,6 @@ from ci_owner_agent.services.history_store import (
 )
 
 OWNER_TYPES = {"high_confidence", "medium_confidence", "inherited_failure_owner"}
-NO_OWNER_NAME = "无高可信责任人"
 
 
 def history_search_similar_failure_facts(
