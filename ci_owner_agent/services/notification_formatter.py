@@ -165,7 +165,12 @@ def responsibility_item_stats(items: list[ResponsibilityItem]) -> str:
 
 
 def format_suggestions(suggestions: list[str], max_items: int = 3) -> list[str]:
-    return [public_single_line(item, 200) for item in suggestions[:max_items] if public_single_line(item, 200)]
+    result: list[str] = []
+    for item in suggestions[:max_items]:
+        cleaned = public_single_line(item, 200)
+        if cleaned:
+            result.append(cleaned)
+    return result
 
 
 def build_feedback_url(base_url: str | None, notice: CiResponsibilityNotice, token: str | None = None) -> str | None:

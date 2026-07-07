@@ -31,8 +31,6 @@ ERROR_TERMS = [
 ]
 FAILURE_BLOCK_RE = re.compile(r"^\s*(\d+)\)\s+(.+?)\s*$")
 XFAIL_BLOCK_RE = re.compile(r"^\s*✖\s+(.+?)\s*$")
-FATAL_ERROR_RE = re.compile(r"(?:✖\s+ERROR:|\bERROR:|\bError\s+\[ERR_|\bERR_[A-Z0-9_]+)")
-ERROR_CODE_RE = re.compile(r"\b(ERR_[A-Z0-9_]+)\b")
 ERROR_LINE_RE = re.compile(r"\b(AssertionError|Error|TypeError|ReferenceError):\s*(.*)")
 PATH_RE = re.compile(
     r"((?:(?:[A-Za-z]:)?/?(?:var/app/)?)?(?:node_modules/|test/|server/|modules/|packages/)[^\s)'\",]+?\.(?:ts|tsx|js|jsx))(?:[:]\d+(?::\d+)?)?"
@@ -515,35 +513,6 @@ def _extract_xfail_signature(content: str) -> dict:
         "testName": title,
         "testCase": title,
         "errorType": error_type,
-        "errorMessage": normalized_error,
-        "testFile": test_file,
-        "topStackFile": top_stack_file,
-        "businessStackFiles": files,
-        "signatureKey": signature_key,
-    }
-
-
-def _extract_fatal_error_signature(content: str) -> dict:
-    lines = content.splitlines()
-    text = "\n".join(lines)
-    code_match = ERROR_CODE_RE.search(text)
-    error_code = code_match.group(1) if code_match else "fatal error"
-    message = ""
-    for line in lines:
-        if "Directory import" in line or ERROR_LINE_RE.search(line) or error_code in line:
-            message = line
-            break
-    if error_code and error_code not in message:
-        message = f"{error_code} {message}".strip()
-    files = _extract_stack_paths(lines)
-    test_file = _pick_test_file(files)
-    top_stack_file = test_file or (files[0] if files else None)
-    normalized_error = _stable_error_message(message or error_code)
-    signature_key = "|".join(["fatal", error_code, normalized_error, test_file or "", top_stack_file or ""])
-    return {
-        "testName": "test initialization",
-        "testCase": error_code,
-        "errorType": "Error",
         "errorMessage": normalized_error,
         "testFile": test_file,
         "topStackFile": top_stack_file,
