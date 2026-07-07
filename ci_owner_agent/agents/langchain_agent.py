@@ -153,7 +153,9 @@ class LangChainResponsibilityAgent:
             "instruction": (
                 "必须基于工具证据。证据不足输出 no_high_confidence_owner。最终只输出 JSON。"
                 "如需更多 changed files 或 commits，请调用 repo_get_diff_files / repo_get_commits_between。"
+                "当前 Agent 正常只处理 FAILURE / UNSTABLE / UNKNOWN；SUCCESS / ABORTED 已由 orchestrator 处理。"
                 "failureSummaries 是当前构建最重要的失败摘要；如果存在，优先基于它判断失败测试名、错误类型、测试文件和栈。"
+                "不要默认读取 log tail；只有 failureSummaries/failureFacts 不足、需要原文证据、或需要验证关键词/文件路径/测试名时，才调用日志工具。"
                 "failureFacts 是 AI 从非结构化日志中提取的内层失败事实；如果 failureSummaries 为空但 failureFacts 非空，"
                 "优先基于 failureFacts + log/diff 工具判断当前责任。Docker/Jenkins/BuildKit/shell wrapper 不能单独作为责任依据。"
                 "failureFacts 来自构建日志中的内层失败事实；如果基于 failureFacts 输出 evidence，对应 evidence.type 应优先使用 \"log\"，"
@@ -174,7 +176,7 @@ class LangChainResponsibilityAgent:
                 "Docker/Jenkins/BuildKit/shell wrapper 永远不能作为历史继承依据。"
                 "deterministic historyPrecheck 和 aiHistoryPrecheck 都存在时，优先使用 deterministic historyPrecheck；"
                 "AI history 只用于非 Mocha/Japa failure facts。"
-                "如需更多日志，再调用 log_read_range / log_search / log_read_tail。"
+                "如需更多日志，再调用 log_read_range / log_search / log_find_error_chunks / log_read_tail。"
                 "不要仅凭 changedFiles 或 package.json 依赖升级输出 high_confidence。"
             ),
         }

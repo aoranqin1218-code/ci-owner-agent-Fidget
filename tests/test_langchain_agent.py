@@ -1178,6 +1178,29 @@ def test_instruction_tells_failure_facts_should_be_log_evidence(repo_cache, samp
         assert text in instruction
 
 
+def test_initial_input_instruction_does_not_default_to_log_tail(repo_cache, sample_repo, logs):
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    payload = json.loads(LangChainResponsibilityAgent(context.settings, context, [])._initial_input())
+    instruction = payload["instruction"]
+
+    assert "failureSummaries 是当前构建最重要的失败摘要" in instruction
+    assert "不要默认读取 log tail" in instruction
+    assert "log_find_error_chunks" in instruction
+    assert "SUCCESS / ABORTED 已由 orchestrator 处理" in instruction
+    assert "先阅读构建信息和日志尾部" not in instruction
+
+
+def test_system_prompt_prioritizes_summaries_over_log_tail():
+    prompt = LANGCHAIN_RESPONSIBILITY_AGENT_SYSTEM_PROMPT
+
+    assert "当前 Agent 正常只接收 FAILURE / UNSTABLE / UNKNOWN 构建" in prompt
+    assert "SUCCESS / ABORTED 已由 orchestrator 直接处理" in prompt
+    assert "failureSummaries 是当前构建最重要的失败摘要" in prompt
+    assert "不要默认调用 log_read_tail" in prompt
+    assert "log_find_error_chunks / log_search / log_read_range / log_read_tail" in prompt
+    assert "先阅读构建信息和日志尾部" not in prompt
+
+
 def test_load_settings_reads_model_timeout_and_retries(monkeypatch):
     monkeypatch.setenv("CI_AGENT_MODEL_TIMEOUT_SECONDS", "180")
     monkeypatch.setenv("CI_AGENT_MODEL_MAX_RETRIES", "2")

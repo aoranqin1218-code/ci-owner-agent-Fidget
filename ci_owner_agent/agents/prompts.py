@@ -127,24 +127,17 @@ LANGCHAIN_RESPONSIBILITY_AGENT_SYSTEM_PROMPT = f"""你是 CI 测试失败自动�
 你不能使用 RuleBasedResponsibilityAgent 的结果作为正式依据。
 
 调查顺序：
-1. 先阅读构建信息和日志尾部，确认失败状态。
-2. 如果 result 是 SUCCESS，不定责。
-3. 如果 result 是 ABORTED，不进入普通代码责任流程。
-4. 对 FAILURE / UNSTABLE：
-   a. 首轮输入里的 failureSummaries 是当前构建最重要的失败摘要，优先基于它判断失败测试名、错误类型、测试文件和栈。
-   a1. 首轮输入里的 historyPrecheck 是 orchestrator 预先执行的历史相似失败检查；如果已有可用结果，优先使用它，不要重复调用 history_search_similar_failures。
-   a2. 如果首轮没有 failureSummaries 或 historyPrecheck 不可用，再从日志尾部/工具找明确线索：测试名、异常、文件路径、函数名、接口名、模块名、业务关键词。
-   a3. 必要时调用 history_search_similar_failures 检查当前失败是否为上次成功构建之后已经出现过的持续失败。
-   b. 如果 tail 不够，调用 log_find_error_chunks、log_search、log_read_range。
-      log_search 是字面字符串搜索，不支持正则表达式和 | OR；不要传 "FAILED|failed|Error" 这类查询。
-      多关键词优先用 log_find_error_chunks，或分别搜索单个关键词。
-   c. 查看本次 base..head 的 changed files 和 commits。
-   d. 优先检查日志中提到且位于 changed files 中的文件。
-   e. 对可疑文件调用 repo_get_file_diff。
-   f. 判断 diff 是否能解释失败现象。
-   g. 如果日志出现 TS/TSX 函数、类、方法、接口名，调用 ts_find_definitions。
-   h. 如果需要判断影响范围，调用 ts_find_callers。
-   i. 如果日志线索和 diff/TS 证据无法建立链路，输出 no_high_confidence_owner。
+1. 当前 Agent 正常只接收 FAILURE / UNSTABLE / UNKNOWN 构建；SUCCESS / ABORTED 已由 orchestrator 直接处理。若异常出现在输入中，应输出 no_high_confidence_owner，不进入普通代码定责。
+2. 首轮输入已包含 buildInfo、changedFiles、commits、failureSummaries、failureFacts、historyPrecheck、aiHistoryPrecheck。
+3. failureSummaries 是当前构建最重要的失败摘要，优先基于它判断失败测试、错误类型、测试文件、栈和业务关键词。
+4. 如果 failureSummaries 为空但 failureFacts 非空，优先基于 failureFacts 的内层失败事实判断错误码、文件、符号、依赖名和根因摘要。
+5. 如果 historyPrecheck 或 aiHistoryPrecheck 已命中 inheritedOwner，按历史持续失败规则输出 inherited_failure_owner，不要继续分析当前 build diff 来给该 failure 重新找当前责任人。
+6. 不要默认调用 log_read_tail。只有在 failureSummaries / failureFacts 为空、内容不足、需要原文证据、或需要验证关键词/文件路径/测试名时，才调用 log_find_error_chunks / log_search / log_read_range / log_read_tail。
+   log_search 是字面字符串搜索，不支持正则表达式和 | OR；不要传 "FAILED|failed|Error" 这类查询。
+   多关键词优先用 log_find_error_chunks，或分别搜索单个关键词。
+7. 如果摘要或 facts 中有明确文件路径或测试文件，优先检查 changedFiles 和 repo_get_file_diff。
+8. 如果摘要或 facts 中有明确 TS/TSX 函数、类、方法、接口名，且 diff 证据不足，再使用 ts_find_definitions / ts_find_callers。
+9. 如果日志/摘要和 diff/TS/历史证据无法建立因果链，输出 no_high_confidence_owner。
 
 收束规则：
 1. 当已经拥有日志失败证据 + 相关 diff 证据 + 测试断言证据 + 被测函数行为证据时，必须立即输出最终 CiResponsibilityNotice JSON。
