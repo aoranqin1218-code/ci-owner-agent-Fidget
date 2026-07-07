@@ -285,12 +285,16 @@ def _save_history(
             last_successful_commit=base_commit,
             error_chunks=chunks,
         )
-        if failure_facts is not None or settings.ai_failure_facts_enabled:
+        failure_facts_ok = isinstance(failure_facts, dict) and failure_facts.get("ok") is True
+        if failure_facts_ok:
             facts = [
                 fact if isinstance(fact, FailureFact) else FailureFact.model_validate(fact)
                 for fact in ((failure_facts or {}).get("facts") or [])
             ]
             store.save_failure_facts(build_info=build_info, notice=notice, facts=facts)
+        elif isinstance(failure_facts, dict) and failure_facts.get("ok") is False:
+            warning = failure_facts.get("warning") or "AI failure facts extraction failed"
+            build_info.warnings.append(f"failure facts not saved: {warning}")
     except Exception as exc:
         build_info.warnings.append(f"history save failed: {exc}")
 

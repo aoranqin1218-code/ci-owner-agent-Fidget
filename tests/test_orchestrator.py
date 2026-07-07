@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from ci_owner_agent.orchestrator import _with_precomputed_failure_context
-from ci_owner_agent.schemas import FailureFact, FailureFactExtractionResult
+from ci_owner_agent.orchestrator import _save_history, _with_precomputed_failure_context
+from ci_owner_agent.schemas import BuildInfo, CiResponsibilityNotice, FailureFact, FailureFactExtractionResult
+from tests.test_history_store import high_confidence_payload, make_store
 from tests.test_langchain_agent import make_lc_context
 
 
@@ -32,6 +33,40 @@ class SummaryProvider:
 
     def find_focused_failure_chunks(self, tail_lines=500, max_chunks=1):
         raise AssertionError("focused chunks should not be read when summaries exist")
+
+
+def _save_existing_failure_fact(store, context, fact: FailureFact) -> tuple[BuildInfo, CiResponsibilityNotice]:
+    payload = high_confidence_payload(context)
+    payload["buildNumber"] = 7
+    payload["responsibilityItems"] = [
+        {
+            "failureId": "failure-7",
+            "failureTitle": "TS2305",
+            "failureSignature": fact.signatureKey,
+            "owner": {
+                "type": "high_confidence",
+                "name": "test",
+                "email": "test@test.com",
+                "commit": context.head_commit,
+                "confidence": 0.9,
+            },
+            "responsibilityType": "current_build_owner",
+            "confidence": 0.9,
+            "reason": "existing fact owner",
+        }
+    ]
+    notice = CiResponsibilityNotice.model_validate(payload)
+    build_info = BuildInfo(
+        job=context.job,
+        buildNumber=7,
+        result="FAILURE",
+        buildUrl=context.build_url,
+        branch=context.branch,
+        commit=context.head_commit,
+    )
+    store.save_analysis(build_info, notice, context.base_commit, context.head_commit, 6, context.base_commit, [])
+    store.save_failure_facts(build_info=build_info, notice=notice, facts=[fact])
+    return build_info, notice
 
 
 def test_orchestrator_extracts_ai_failure_facts_when_no_summaries(monkeypatch, repo_cache, sample_repo, logs):
@@ -222,3 +257,69 @@ def test_orchestrator_ai_history_exception_does_not_fail(monkeypatch, repo_cache
 
     assert result.ai_history_precheck["ok"] is False
     assert "ai history exploded" in result.ai_history_precheck["error"]
+
+
+def test_save_history_does_not_clear_existing_failure_facts_when_extraction_failed(monkeypatch, repo_cache, sample_repo, logs):
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    settings = replace(context.settings, history_enabled=True, ai_failure_facts_enabled=True)
+    store = make_store()
+    fact = FailureFact(
+        signatureKey="typescript_compile_error|TS2305|src/index.ts|classifyErrorMessage",
+        historyEligible=True,
+        failureKind="typescript_compile_error",
+        errorCode="TS2305",
+        message="missing export",
+        rootCauseSummary="missing export",
+        confidence=0.9,
+    )
+    build_info, notice = _save_existing_failure_fact(store, context, fact)
+    assert len(store.failure_facts.docs) == 1
+    monkeypatch.setattr("ci_owner_agent.orchestrator.get_history_store", lambda settings: store)
+
+    _save_history(
+        settings,
+        build_info,
+        notice,
+        NoSummaryProvider(),
+        context.base_commit,
+        context.head_commit,
+        6,
+        failure_summaries={"chunks": []},
+        failure_facts={"ok": False, "facts": [], "warning": "boom"},
+    )
+
+    assert len(store.failure_facts.docs) == 1
+    assert store.failure_facts.docs[0]["signatureKey"] == fact.signatureKey
+    assert any("failure facts not saved: boom" in warning for warning in build_info.warnings)
+
+
+def test_save_history_clears_existing_failure_facts_when_extraction_succeeds_with_no_facts(monkeypatch, repo_cache, sample_repo, logs):
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    settings = replace(context.settings, history_enabled=True, ai_failure_facts_enabled=True)
+    store = make_store()
+    fact = FailureFact(
+        signatureKey="typescript_compile_error|TS2305|src/index.ts|classifyErrorMessage",
+        historyEligible=True,
+        failureKind="typescript_compile_error",
+        errorCode="TS2305",
+        message="missing export",
+        rootCauseSummary="missing export",
+        confidence=0.9,
+    )
+    build_info, notice = _save_existing_failure_fact(store, context, fact)
+    assert len(store.failure_facts.docs) == 1
+    monkeypatch.setattr("ci_owner_agent.orchestrator.get_history_store", lambda settings: store)
+
+    _save_history(
+        settings,
+        build_info,
+        notice,
+        NoSummaryProvider(),
+        context.base_commit,
+        context.head_commit,
+        6,
+        failure_summaries={"chunks": []},
+        failure_facts={"ok": True, "facts": []},
+    )
+
+    assert store.failure_facts.docs == []
