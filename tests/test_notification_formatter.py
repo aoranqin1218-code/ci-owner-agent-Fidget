@@ -257,6 +257,83 @@ def test_notify_notice_dry_run_uses_mapping_file(tmp_path, capsys, monkeypatch):
     assert "<@tang.userid>" in out
 
 
+def test_notify_notice_prefers_mongo_wecom_userid(monkeypatch):
+    store = make_store()
+    store.wecom_users.update_one(
+        {"normalizedEmail": "x@example.com"},
+        {"$set": {"authorName": "Tang", "normalizedEmail": "x@example.com", "wecomUserId": "mongo.userid", "commitCount": 1}},
+        upsert=True,
+    )
+    notice = CiResponsibilityNotice.model_validate(notice_payload([item("Tang")]))
+    settings = replace(load_settings(), notification_dedup_enabled=False, wecom_user_mapping_file=None)
+    monkeypatch.setattr("ci_owner_agent.main.get_history_store", lambda settings: store)
+
+    result = _notify_notice(notice, settings, dry_run=True, force=False, feedback_base_url=None)
+
+    assert "<@mongo.userid>" in result["markdown"]
+
+
+def test_notify_notice_falls_back_to_csv_when_mongo_missing(tmp_path, monkeypatch):
+    store = make_store()
+    mapping_file = tmp_path / "mapping.csv"
+    mapping_file.write_text(
+        "mappingKey,authorName,authorEmail,normalizedEmail,wecomUserId,mappingStatus,note\n"
+        "Tang <x@example.com>,Tang,x@example.com,x@example.com,csv.userid,manual,\n",
+        encoding="utf-8",
+    )
+    notice = CiResponsibilityNotice.model_validate(notice_payload([item("Tang")]))
+    settings = replace(load_settings(), notification_dedup_enabled=False, wecom_user_mapping_file=mapping_file)
+    monkeypatch.setattr("ci_owner_agent.main.get_history_store", lambda settings: store)
+
+    result = _notify_notice(notice, settings, dry_run=True, force=False, feedback_base_url=None)
+
+    assert "<@csv.userid>" in result["markdown"]
+
+
+def test_notify_notice_falls_back_to_csv_when_history_store_unavailable(tmp_path, monkeypatch):
+    mapping_file = tmp_path / "mapping.csv"
+    mapping_file.write_text(
+        "mappingKey,authorName,authorEmail,normalizedEmail,wecomUserId,mappingStatus,note\n"
+        "Tang <x@example.com>,Tang,x@example.com,x@example.com,csv.userid,manual,\n",
+        encoding="utf-8",
+    )
+    notice = CiResponsibilityNotice.model_validate(notice_payload([item("Tang")]))
+    settings = replace(load_settings(), notification_dedup_enabled=False, wecom_user_mapping_file=mapping_file)
+    monkeypatch.setattr("ci_owner_agent.main.get_history_store", lambda settings: None)
+
+    result = _notify_notice(notice, settings, dry_run=True, force=False, feedback_base_url=None)
+
+    assert "<@csv.userid>" in result["markdown"]
+
+
+def test_notify_notice_falls_back_to_name_when_no_mapping(monkeypatch):
+    store = make_store()
+    notice = CiResponsibilityNotice.model_validate(notice_payload([item("Tang")]))
+    settings = replace(load_settings(), notification_dedup_enabled=False, wecom_user_mapping_file=None)
+    monkeypatch.setattr("ci_owner_agent.main.get_history_store", lambda settings: store)
+
+    result = _notify_notice(notice, settings, dry_run=True, force=False, feedback_base_url=None)
+
+    assert "👤 **责任人**：@Tang" in result["markdown"]
+
+
+def test_notify_notice_mention_mode_name_ignores_mongo_userid(monkeypatch):
+    store = make_store()
+    store.wecom_users.update_one(
+        {"normalizedEmail": "x@example.com"},
+        {"$set": {"authorName": "Tang", "normalizedEmail": "x@example.com", "wecomUserId": "mongo.userid", "commitCount": 1}},
+        upsert=True,
+    )
+    notice = CiResponsibilityNotice.model_validate(notice_payload([item("Tang")]))
+    settings = replace(load_settings(), notification_dedup_enabled=False, wecom_user_mapping_file=None, wecom_mention_mode="name")
+    monkeypatch.setattr("ci_owner_agent.main.get_history_store", lambda settings: store)
+
+    result = _notify_notice(notice, settings, dry_run=True, force=False, feedback_base_url=None)
+
+    assert "<@mongo.userid>" not in result["markdown"]
+    assert "👤 **责任人**：@Tang" in result["markdown"]
+
+
 def test_notify_notice_missing_file_returns_error_without_traceback(tmp_path, capsys, monkeypatch):
     missing = tmp_path / "missing.json"
     monkeypatch.setenv("CI_AGENT_MODEL_PROVIDER", "fake")
