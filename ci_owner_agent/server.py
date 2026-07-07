@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import html
+import json
 from urllib.parse import parse_qs, urlencode
 
 from fastapi import FastAPI, Query, Request
+from fastapi.responses import JSONResponse
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from ci_owner_agent.config import Settings, load_settings
 from ci_owner_agent.services.feedback_store import FeedbackStore
 from ci_owner_agent.services.history_store import MongoHistoryStore, get_history_store
+from ci_owner_agent.services.wecom_user_directory import WeComUserDirectory
 
 
 def create_app(settings: Settings | None = None, history_store: MongoHistoryStore | None = None) -> FastAPI:
@@ -62,6 +65,7 @@ def create_app(settings: Settings | None = None, history_store: MongoHistoryStor
                 owner_name=form.get("ownerName") or None,
                 owner_email=form.get("ownerEmail") or None,
                 owner_type=form.get("ownerType") or "high_confidence",
+                owner_wecom_userid=form.get("wecomUserId") or None,
                 reviewer=form.get("reviewer") or None,
                 note=form.get("note") or None,
             )
@@ -71,6 +75,20 @@ def create_app(settings: Settings | None = None, history_store: MongoHistoryStor
         if token:
             query["token"] = token
         return RedirectResponse(f"/feedback?{urlencode(query)}", status_code=303)
+
+    @app.get("/api/wecom-users/search")
+    def search_wecom_users(q: str = Query(default=""), limit: int = Query(default=20), token: str | None = Query(default=None)) -> JSONResponse:
+        forbidden = _forbidden_response(app_settings, token)
+        if forbidden is not None:
+            return JSONResponse({"ok": False, "items": [], "error": "forbidden"}, status_code=403)
+        store = _store_for_request(app)
+        if store is None:
+            return JSONResponse({"ok": False, "items": [], "error": "history store unavailable"})
+        try:
+            items = WeComUserDirectory(store).search_users(q, limit=min(limit, 50))
+            return JSONResponse({"ok": True, "items": items})
+        except Exception as exc:
+            return JSONResponse({"ok": False, "items": [], "error": str(exc)})
 
     return app
 
@@ -134,6 +152,9 @@ def _render_feedback_page(notice_doc: dict, feedback_docs: list[dict], token: st
   </section>
   <h2>责任项</h2>
   {''.join(item_blocks)}
+  <script>
+{_owner_search_script(token)}
+  </script>
 </main>
 </body>
 </html>"""
@@ -143,6 +164,7 @@ def _render_item(idx: int, job: str, build: int, item: dict, feedback: dict | No
     owner = item.get("owner") if isinstance(item.get("owner"), dict) else {}
     feedback_html = _render_feedback_status(feedback)
     hidden_token = f'<input type="hidden" name="token" value="{_e(token)}">' if token else ""
+    safe_id = _safe_dom_id(item.get("failureId") or idx)
     return f"""
 <section class="item">
   <h3>{idx}. {_e(item.get("failureTitle"))}</h3>
@@ -157,6 +179,7 @@ def _render_item(idx: int, job: str, build: int, item: dict, feedback: dict | No
     <input type="hidden" name="job" value="{_e(job)}">
     <input type="hidden" name="build" value="{build}">
     <input type="hidden" name="failureId" value="{_e(item.get("failureId"))}">
+    <input type="hidden" name="wecomUserId" id="wecomUserId-{safe_id}">
     {hidden_token}
     <label>反馈动作
       <select name="action">
@@ -166,8 +189,11 @@ def _render_item(idx: int, job: str, build: int, item: dict, feedback: dict | No
         <option value="mark_no_owner">无高可信责任人</option>
       </select>
     </label>
-    <label>修正责任人姓名 <input name="ownerName" autocomplete="off"></label>
-    <label>修正责任人邮箱 <input name="ownerEmail" autocomplete="off"></label>
+    <label>修正责任人姓名
+      <input name="ownerName" id="ownerName-{safe_id}" list="ownerOptions-{safe_id}" autocomplete="off" data-owner-search="{safe_id}">
+      <datalist id="ownerOptions-{safe_id}"></datalist>
+    </label>
+    <label>修正责任人邮箱 <input name="ownerEmail" id="ownerEmail-{safe_id}" autocomplete="off"></label>
     <label>责任人类型
       <select name="ownerType">
         <option value="high_confidence">high_confidence</option>
@@ -179,6 +205,54 @@ def _render_item(idx: int, job: str, build: int, item: dict, feedback: dict | No
     <button type="submit">提交反馈</button>
   </form>
 </section>
+"""
+
+
+def _owner_search_script(token: str | None) -> str:
+    token_json = html.escape(json.dumps(token or ""), quote=False)
+    return f"""
+const feedbackToken = {token_json};
+const ownerSearchState = new Map();
+function debounce(fn, delay) {{
+  let timer = null;
+  return (...args) => {{
+    window.clearTimeout(timer);
+    timer = window.setTimeout(() => fn(...args), delay);
+  }};
+}}
+async function fetchOwnerOptions(input) {{
+  const key = input.dataset.ownerSearch;
+  const list = document.getElementById(`ownerOptions-${{key}}`);
+  const query = input.value.trim();
+  const params = new URLSearchParams({{ q: query, limit: "20" }});
+  if (feedbackToken) params.set("token", feedbackToken);
+  const response = await fetch(`/api/wecom-users/search?${{params.toString()}}`);
+  const payload = await response.json();
+  const optionMap = new Map();
+  list.innerHTML = "";
+  if (payload.ok && Array.isArray(payload.items)) {{
+    for (const item of payload.items) {{
+      const option = document.createElement("option");
+      option.value = item.displayName || item.wecomUserId;
+      option.label = `${{item.displayName || item.wecomUserId}} / ${{item.preferredEmail || ""}} / ${{item.wecomUserId || ""}}`;
+      list.appendChild(option);
+      optionMap.set(option.value, item);
+    }}
+  }}
+  ownerSearchState.set(key, optionMap);
+}}
+function applyOwnerSelection(input) {{
+  const key = input.dataset.ownerSearch;
+  const item = (ownerSearchState.get(key) || new Map()).get(input.value);
+  if (!item) return;
+  input.value = item.displayName || "";
+  document.getElementById(`ownerEmail-${{key}}`).value = item.preferredEmail || "";
+  document.getElementById(`wecomUserId-${{key}}`).value = item.wecomUserId || "";
+}}
+document.querySelectorAll("[data-owner-search]").forEach((input) => {{
+  input.addEventListener("input", debounce(() => fetchOwnerOptions(input), 200));
+  input.addEventListener("change", () => applyOwnerSelection(input));
+}});
 """
 
 
@@ -219,6 +293,10 @@ def _html_error(message: str, status_code: int) -> HTMLResponse:
 
 def _e(value: object) -> str:
     return html.escape(str(value or ""), quote=True)
+
+
+def _safe_dom_id(value: object) -> str:
+    return "".join(ch if ch.isalnum() else "-" for ch in str(value or "item")).strip("-") or "item"
 
 
 app = create_app()

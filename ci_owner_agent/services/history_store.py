@@ -37,6 +37,7 @@ class MongoHistoryStore:
         self.failure_facts = self.db["ci_failure_facts"]
         self.notifications = self.db["ci_notifications"]
         self.feedback = self.db["ci_feedback"]
+        self.wecom_users = self.db["ci_wecom_users"]
         self.ensure_indexes()
 
     @classmethod
@@ -58,6 +59,11 @@ class MongoHistoryStore:
         self.notifications.create_index([("job", 1), ("branch", 1), ("buildNumber", 1), ("noticeHash", 1), ("channel", 1)])
         self.feedback.create_index([("job", 1), ("branch", 1), ("buildNumber", 1), ("failureId", 1)])
         self.feedback.create_index([("job", 1), ("branch", 1), ("failureSignature", 1), ("isActive", 1)])
+        self.wecom_users.create_index([("wecomUserId", 1)])
+        self.wecom_users.create_index([("normalizedEmail", 1)])
+        self.wecom_users.create_index([("authorName", 1)])
+        self.wecom_users.create_index([("emailDomain", 1)])
+        self.wecom_users.create_index([("searchText", 1)])
 
     def save_analysis(
         self,

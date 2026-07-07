@@ -418,6 +418,26 @@ CI_AGENT_WECOM_USER_MAPPING_FILE=./runs/git-author-mapping-fx-code/git_author_we
 CI_AGENT_WECOM_MENTION_MODE=userid
 ```
 
+Import the same CSV into MongoDB so the feedback page can search and auto-fill owners:
+
+```powershell
+python .\scripts\import_git_author_wecom_mapping_to_mongo.py `
+  --csv-file .\runs\git-author-mapping-fx-code\git_author_wecom_mapping.csv `
+  --mongo-uri $env:CI_AGENT_HISTORY_MONGO_URI `
+  --mongo-db $env:CI_AGENT_HISTORY_MONGO_DB `
+  --clear
+```
+
+Use `--dry-run` first to preview row counts without writing. The importer stores rows in `ci_wecom_users`; the feedback page queries this collection through `/api/wecom-users/search`, groups aliases by `wecomUserId`, and prefers a `@fanruan.com` email when multiple git author emails map to the same user. When a reviewer selects a suggested owner, the feedback record stores `correctedOwnerWeComUserId` while keeping the existing notice schema unchanged.
+
+Start the feedback server, then open the feedback link from a notice:
+
+```powershell
+python -m ci_owner_agent serve-feedback
+```
+
+In the feedback page, type a WeCom userid, git author name, or email keyword in the owner field; selecting a suggestion fills the preferred email automatically. If `ci_wecom_users` is empty or MongoDB is unavailable, the page still allows manual owner name/email input and feedback submission.
+
 Preview:
 
 ```powershell
