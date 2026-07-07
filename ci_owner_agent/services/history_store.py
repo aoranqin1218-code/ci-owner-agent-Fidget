@@ -6,6 +6,7 @@ import json
 import sys
 from typing import Any
 
+from ci_owner_agent.constants import NO_OWNER_NAME
 from ci_owner_agent.config import Settings
 from ci_owner_agent.schemas import BuildInfo, CiResponsibilityNotice, FailureFact
 from ci_owner_agent.services.failure_similarity import hash_normalized_chunk, normalize_error_chunk
@@ -368,7 +369,7 @@ def _responsibility_item_summary(items: list[dict]) -> dict[str, Any]:
             inherited_count += 1
         if responsibility_type == "current_build_owner":
             current_count += 1
-        if owner_type != "no_high_confidence_owner" and owner_name and owner_name != "无高可信责任人":
+        if owner_type != "no_high_confidence_owner" and owner_name and owner_name != NO_OWNER_NAME:
             responsible_names.append(owner_name)
             responsible_types.append(owner_type)
     return {

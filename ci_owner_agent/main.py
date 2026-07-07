@@ -5,6 +5,7 @@ import json
 import sys
 from pathlib import Path
 
+from ci_owner_agent.constants import NO_OWNER_NAME
 from ci_owner_agent.config import load_settings
 from ci_owner_agent.orchestrator import analyze_jenkins, analyze_local, failure_without_context
 from ci_owner_agent.schemas import BuildInfo, CiResponsibilityNotice
@@ -264,7 +265,7 @@ def _maybe_notify_notice(notice: CiResponsibilityNotice, settings, cli_notify: b
 def _has_responsible_item_owner(notice: CiResponsibilityNotice) -> bool:
     for item in notice.responsibilityItems:
         owner = item.owner
-        if owner.type != "no_high_confidence_owner" and owner.name and owner.name != "无高可信责任人":
+        if owner.type != "no_high_confidence_owner" and owner.name and owner.name != NO_OWNER_NAME:
             return True
     return False
 

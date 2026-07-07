@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from urllib.parse import urlencode
 
+from ci_owner_agent.constants import NO_OWNER_NAME
 from ci_owner_agent.schemas import CiResponsibilityNotice, EvidenceItem, Owner, ResponsibilityItem
 from ci_owner_agent.services.wecom_user_mapping import WeComUserMapper
 
@@ -43,7 +44,7 @@ def format_wecom_markdown_notice(
                 ]
             )
     else:
-        lines.extend(["1. 🧩 unknown | 未识别到独立责任项", "   - 👤 责任人：无高可信责任人", "   - 🧷 来源：-", "   - 🔎 证据：证据不足，详见分析结果 JSON。", ""])
+        lines.extend(["1. 🧩 unknown | 未识别到独立责任项", f"   - 👤 责任人：{NO_OWNER_NAME}", "   - 🧷 来源：-", "   - 🔎 证据：证据不足，详见分析结果 JSON。", ""])
 
     suggestions = format_suggestions(notice.suggestions)
     if suggestions:
@@ -63,7 +64,7 @@ def collect_responsible_owners(notice: CiResponsibilityNotice) -> list[Owner]:
     seen: set[str] = set()
     for item in notice.responsibilityItems:
         owner = item.owner
-        if owner.type == "no_high_confidence_owner" or not owner.name or owner.name == "无高可信责任人":
+        if owner.type == "no_high_confidence_owner" or not owner.name or owner.name == NO_OWNER_NAME:
             continue
         key = owner.email.lower().strip() if owner.email else owner.name
         if key in seen:
@@ -79,12 +80,12 @@ def collect_responsible_display_names(notice: CiResponsibilityNotice) -> list[st
 
 def format_responsible_mentions(owners: list[Owner], mapper: WeComUserMapper | None = None, mention_mode: str = "userid") -> str:
     mapper = mapper or WeComUserMapper([])
-    return "、".join(mapper.mention_owner(owner.name, owner.email, mode=mention_mode) for owner in owners) if owners else "无高可信责任人"
+    return "、".join(mapper.mention_owner(owner.name, owner.email, mode=mention_mode) for owner in owners) if owners else NO_OWNER_NAME
 
 
 def format_item_owner(owner: Owner, mapper: WeComUserMapper, mention_mode: str) -> str:
-    if owner.type == "no_high_confidence_owner" or not owner.name or owner.name == "无高可信责任人":
-        return "无高可信责任人"
+    if owner.type == "no_high_confidence_owner" or not owner.name or owner.name == NO_OWNER_NAME:
+        return NO_OWNER_NAME
     return mapper.mention_owner(owner.name, owner.email, mode=mention_mode)
 
 
@@ -93,7 +94,7 @@ def format_item_evidence(item: ResponsibilityItem, evidence_by_id: dict[str, Evi
         return public_single_line(item.reason, max_chars)
     if item.responsibilityType == "inherited_failure_owner":
         build = item.sourceBuildNumber or "-"
-        name = item.owner.name or "无高可信责任人"
+        name = item.owner.name or NO_OWNER_NAME
         return truncate_single_line(
             f"当前失败与历史构建 #{build} 的失败表现一致，属于历史持续失败；责任继承自首次失败责任人 {name}，不是当前 build 新引入。",
             max_chars,
