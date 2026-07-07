@@ -44,7 +44,7 @@ CI_AGENT_HISTORY_MAX_CANDIDATES=5
 CI_AGENT_FAILURE_CHUNK_TAIL_LINES=500
 ```
 
-`CI_AGENT_MODEL_PROVIDER=fake` is the default offline test mode. It uses the rule-based MVP agent only to verify the toolchain and tests; it is not the formal analysis mode.
+`CI_AGENT_MODEL_PROVIDER=fake` is the default offline test mode. It uses a fixed no-owner fake agent to verify CLI, toolchain, persistence, notification, and pytest flows; it is not the formal analysis mode and does not attempt responsibility attribution.
 
 OpenAI-compatible real LLM providers are supported with `openai`, `deepseek`, `doubao`, and `openai-compatible`.
 
@@ -273,9 +273,9 @@ Tests create temporary Git repositories under `tmp_path`; they do not call Jenki
 - TypeScript Compiler API tools are implemented as subprocess-backed optional analysis helpers.
 - `ts_find_definitions` and `ts_find_callers` may detach-checkout the agent-owned analysis repository to the requested commit; do not point `CI_AGENT_REPO_CACHE_DIR` at a human developer working copy.
 - TypeScript dependency checks do not auto-install unless explicitly requested with `install=True`; real project `tsconfig` and installed npm dependencies must be available in the target repo.
-- Real LLM mode requires LangChain v1, `langchain-openai`, and provider credentials. Fake mode remains the default for offline pytest.
+- Real LLM mode requires LangChain v1, `langchain-openai`, and provider credentials. Fake mode remains the default for offline pytest and always returns `无高可信责任人` for failed builds.
 - `repo_sync` errors are warnings in local analysis so temporary repos without remotes can still be analyzed; formal Jenkins mode should treat sync failure as blocking for high-confidence ownership.
-- The rule engine is intentionally conservative and prefers `无高可信责任人` when evidence is weak.
+- High-confidence ownership is produced only by real LLM analysis plus local validators; weak or contradictory outputs are downgraded to `无高可信责任人`.
 
 ## Smoke Test
 
