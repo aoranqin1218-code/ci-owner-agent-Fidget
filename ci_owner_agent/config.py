@@ -49,6 +49,8 @@ class Settings:
     wecom_notify_dry_run: bool
     wecom_notify_on_success: bool
     wecom_notify_on_no_owner: bool
+    wecom_user_mapping_file: Path | None
+    wecom_mention_mode: str
     feedback_base_url: str | None
     feedback_server_host: str
     feedback_server_port: int
@@ -147,6 +149,10 @@ def load_settings(env_file: str | Path | None = None) -> Settings:
         wecom_notify_dry_run=_bool_env("CI_AGENT_WECOM_NOTIFY_DRY_RUN", True),
         wecom_notify_on_success=_bool_env("CI_AGENT_WECOM_NOTIFY_ON_SUCCESS", False),
         wecom_notify_on_no_owner=_bool_env("CI_AGENT_WECOM_NOTIFY_ON_NO_OWNER", True),
+        wecom_user_mapping_file=Path(os.getenv("CI_AGENT_WECOM_USER_MAPPING_FILE")).expanduser() if os.getenv("CI_AGENT_WECOM_USER_MAPPING_FILE") else None,
+        wecom_mention_mode=os.getenv("CI_AGENT_WECOM_MENTION_MODE", "userid").lower()
+        if os.getenv("CI_AGENT_WECOM_MENTION_MODE", "userid").lower() in {"userid", "name"}
+        else "userid",
         feedback_base_url=os.getenv("CI_AGENT_FEEDBACK_BASE_URL") or None,
         feedback_server_host=os.getenv("CI_AGENT_FEEDBACK_SERVER_HOST", "127.0.0.1"),
         feedback_server_port=_int_env_or_default("CI_AGENT_FEEDBACK_SERVER_PORT", 8765),
@@ -179,4 +185,5 @@ def public_settings(settings: Settings) -> dict[str, object]:
     data["feedback_shared_token"] = "***" if settings.feedback_shared_token else None
     data["repo_cache_dir"] = str(settings.repo_cache_dir)
     data["ts_analyzer_dir"] = str(settings.ts_analyzer_dir)
+    data["wecom_user_mapping_file"] = str(settings.wecom_user_mapping_file) if settings.wecom_user_mapping_file else None
     return data

@@ -8,6 +8,7 @@ from ci_owner_agent.config import load_settings
 from ci_owner_agent.main import _maybe_notify_notice, _notify_notice, main
 from ci_owner_agent.services.history_store import notice_hash
 from ci_owner_agent.services.notification_formatter import collect_responsible_display_names, format_wecom_markdown_notice
+from ci_owner_agent.services.wecom_user_mapping import WeComUserMapper
 from tests.test_history_store import make_store
 
 
@@ -32,13 +33,13 @@ def notice_payload(items):
     }
 
 
-def item(owner_name="Tang.Tangerine-唐嘉伟", owner_type="inherited_failure_owner", responsibility_type="inherited_failure_owner", reason="历史持续失败。"):
+def item(owner_name="Tang.Tangerine-唐嘉伟", owner_type="inherited_failure_owner", responsibility_type="inherited_failure_owner", reason="历史持续失败。", owner_email="x@example.com"):
     return {
         "failureId": "failure-secret",
         "failureTitle": "EtlUtils - getInputEntryInfo",
         "failureSignature": "sig-secret",
         "failureSummary": "summary",
-        "owner": {"type": owner_type, "name": owner_name, "email": "x@example.com", "commit": "secretcommit", "confidence": 0.9},
+        "owner": {"type": owner_type, "name": owner_name, "email": owner_email, "commit": "secretcommit", "confidence": 0.9},
         "responsibilityType": responsibility_type,
         "sourceBuildNumber": 5094 if responsibility_type == "inherited_failure_owner" else 5099,
         "sourceBuildUrl": None,
@@ -61,7 +62,7 @@ def test_inherited_item_owner_is_mentioned_without_top_level_conclusion():
 
 def test_multiple_responsible_names_are_deduplicated_in_order():
     notice = CiResponsibilityNotice.model_validate(
-        notice_payload([item("Tang"), item("Tang"), item("Mars", "high_confidence", "current_build_owner", "新失败。")])
+        notice_payload([item("Tang"), item("Tang"), item("Mars", "high_confidence", "current_build_owner", "新失败。", "mars@example.com")])
     )
     assert collect_responsible_display_names(notice) == ["Tang", "Mars"]
     assert "**责任人**：@Tang、@Mars" in format_wecom_markdown_notice(notice)
@@ -71,6 +72,53 @@ def test_no_item_owner_displays_no_high_confidence_owner():
     no_owner = item("无高可信责任人", "no_high_confidence_owner", "no_high_confidence_owner", "证据不足。")
     notice = CiResponsibilityNotice.model_validate(notice_payload([no_owner]))
     assert "**责任人**：无高可信责任人" in format_wecom_markdown_notice(notice)
+
+
+def test_top_responsible_owners_use_mapper_userid_mention(tmp_path):
+    path = tmp_path / "mapping.csv"
+    path.write_text(
+        "mappingKey,authorName,authorEmail,normalizedEmail,wecomUserId,mappingStatus,note\n"
+        "Tang <x@example.com>,Tang,x@example.com,x@example.com,tang.userid,manual,\n",
+        encoding="utf-8",
+    )
+    mapper = WeComUserMapper.from_csv(path)
+    notice = CiResponsibilityNotice.model_validate(notice_payload([item("Tang")]))
+    markdown = format_wecom_markdown_notice(notice, user_mapper=mapper)
+    assert "**责任人**：<@tang.userid>" in markdown
+
+
+def test_responsibility_item_owner_uses_mapper_userid_mention(tmp_path):
+    path = tmp_path / "mapping.csv"
+    path.write_text(
+        "mappingKey,authorName,authorEmail,normalizedEmail,wecomUserId,mappingStatus,note\n"
+        "Tang <x@example.com>,Tang,x@example.com,x@example.com,tang.userid,manual,\n",
+        encoding="utf-8",
+    )
+    mapper = WeComUserMapper.from_csv(path)
+    notice = CiResponsibilityNotice.model_validate(notice_payload([item("Tang")]))
+    markdown = format_wecom_markdown_notice(notice, user_mapper=mapper)
+    assert "   - 责任人：<@tang.userid>" in markdown
+
+
+def test_unmapped_owner_fallback_to_name_mention():
+    notice = CiResponsibilityNotice.model_validate(notice_payload([item("Tang")]))
+    markdown = format_wecom_markdown_notice(notice, user_mapper=WeComUserMapper([]))
+    assert "**责任人**：@Tang" in markdown
+    assert "   - 责任人：@Tang" in markdown
+
+
+def test_mention_mode_name_does_not_use_userid(tmp_path):
+    path = tmp_path / "mapping.csv"
+    path.write_text(
+        "mappingKey,authorName,authorEmail,normalizedEmail,wecomUserId,mappingStatus,note\n"
+        "Tang <x@example.com>,Tang,x@example.com,x@example.com,tang.userid,manual,\n",
+        encoding="utf-8",
+    )
+    mapper = WeComUserMapper.from_csv(path)
+    notice = CiResponsibilityNotice.model_validate(notice_payload([item("Tang")]))
+    markdown = format_wecom_markdown_notice(notice, user_mapper=mapper, mention_mode="name")
+    assert "<@tang.userid>" not in markdown
+    assert "**责任人**：@Tang" in markdown
 
 
 def test_system_fields_are_not_displayed():
@@ -130,6 +178,25 @@ def test_notify_notice_dry_run_outputs_markdown(tmp_path, capsys, monkeypatch):
     assert rc == 0
     assert "### 单测失败 | services/fx-code-unittest #5099" in out
     assert "#### 反馈链接" in out
+
+
+def test_notify_notice_dry_run_uses_mapping_file(tmp_path, capsys, monkeypatch):
+    notice = CiResponsibilityNotice.model_validate(notice_payload([item("Tang")]))
+    notice_file = tmp_path / "notice.json"
+    notice_file.write_text(notice.model_dump_json(), encoding="utf-8")
+    mapping_file = tmp_path / "mapping.csv"
+    mapping_file.write_text(
+        "mappingKey,authorName,authorEmail,normalizedEmail,wecomUserId,mappingStatus,note\n"
+        "Tang <x@example.com>,Tang,x@example.com,x@example.com,tang.userid,manual,\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CI_AGENT_MODEL_PROVIDER", "fake")
+    monkeypatch.setenv("CI_AGENT_WECOM_USER_MAPPING_FILE", str(mapping_file))
+    monkeypatch.setenv("CI_AGENT_WECOM_MENTION_MODE", "userid")
+    rc = main(["notify-notice", "--notice-file", str(notice_file), "--dry-run"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "<@tang.userid>" in out
 
 
 def test_notify_notice_missing_file_returns_error_without_traceback(tmp_path, capsys, monkeypatch):

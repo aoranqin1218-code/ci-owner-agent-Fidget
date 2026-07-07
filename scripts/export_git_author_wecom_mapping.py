@@ -130,7 +130,9 @@ def collect_authors(repo: Path) -> dict[str, AuthorStat]:
     return authors
 
 
-def suggested_wecom_userid(stat: AuthorStat, allowed_domain: str) -> str:
+def suggested_wecom_userid(stat: AuthorStat, allowed_domain: str, auto_email_prefix: bool = True) -> str:
+    if not auto_email_prefix:
+        return ""
     email = stat.normalized_email
     if not email.endswith(f"@{allowed_domain}"):
         return ""
@@ -162,29 +164,65 @@ def write_csv(path: Path, rows: list[dict[str, object]]) -> None:
         writer.writerows(rows)
 
 
-def build_rows(authors: dict[str, AuthorStat], allowed_domain: str) -> list[dict[str, object]]:
+def load_existing_mapping(path: Path | None) -> dict[str, dict[str, str]]:
+    if path is None or not path.exists():
+        return {}
+    with path.open("r", encoding="utf-8-sig", newline="") as file:
+        rows = list(csv.DictReader(file))
+    result: dict[str, dict[str, str]] = {}
+    for row in rows:
+        key = str(row.get("mappingKey") or "").strip()
+        if not key:
+            name = str(row.get("authorName") or "").strip()
+            email = normalize_email(str(row.get("normalizedEmail") or row.get("authorEmail") or ""))
+            key = f"{name} <{email}>"
+        if key:
+            result[key] = {str(k): str(v or "") for k, v in row.items()}
+    return result
+
+
+def merge_existing(row: dict[str, object], existing: dict[str, dict[str, str]]) -> dict[str, object]:
+    old = existing.get(str(row.get("mappingKey") or ""))
+    if not old:
+        return row
+    for field in ["wecomUserId", "mappingStatus", "note"]:
+        value = str(old.get(field) or "").strip()
+        if value:
+            row[field] = value
+    return row
+
+
+def build_rows(
+    authors: dict[str, AuthorStat],
+    allowed_domain: str,
+    *,
+    existing_mapping: dict[str, dict[str, str]] | None = None,
+    auto_email_prefix: bool = True,
+) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
+    existing_mapping = existing_mapping or {}
 
     for stat in authors.values():
         is_allowed = stat.email_domain == allowed_domain
-        wecom_userid = suggested_wecom_userid(stat, allowed_domain)
+        wecom_userid = suggested_wecom_userid(stat, allowed_domain, auto_email_prefix=auto_email_prefix)
+        row = {
+            "mappingKey": stat.key,
+            "authorName": stat.author_name,
+            "authorEmail": stat.author_email,
+            "normalizedEmail": stat.normalized_email,
+            "emailDomain": stat.email_domain,
+            "isAllowedDomain": is_allowed,
+            "commitCount": stat.commit_count,
+            "firstCommitTime": format_time(stat.first_commit_time),
+            "firstCommit": stat.first_commit or "",
+            "lastCommitTime": format_time(stat.last_commit_time),
+            "lastCommit": stat.last_commit or "",
+            "wecomUserId": wecom_userid,
+            "mappingStatus": "auto_email_prefix" if wecom_userid else "need_manual_mapping",
+            "note": "" if is_allowed else "email suffix is not allowed domain; please map manually",
+        }
         rows.append(
-            {
-                "mappingKey": stat.key,
-                "authorName": stat.author_name,
-                "authorEmail": stat.author_email,
-                "normalizedEmail": stat.normalized_email,
-                "emailDomain": stat.email_domain,
-                "isAllowedDomain": is_allowed,
-                "commitCount": stat.commit_count,
-                "firstCommitTime": format_time(stat.first_commit_time),
-                "firstCommit": stat.first_commit or "",
-                "lastCommitTime": format_time(stat.last_commit_time),
-                "lastCommit": stat.last_commit or "",
-                "wecomUserId": wecom_userid,
-                "mappingStatus": "auto_email_prefix" if wecom_userid else "need_manual_mapping",
-                "note": "" if is_allowed else "email suffix is not allowed domain; please map manually",
-            }
+            merge_existing(row, existing_mapping)
         )
 
     rows.sort(
@@ -198,7 +236,7 @@ def build_rows(authors: dict[str, AuthorStat], allowed_domain: str) -> list[dict
     return rows
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Export Git author/email list and generate WeCom mapping template."
     )
@@ -217,7 +255,9 @@ def main() -> int:
         default="fanruan.com",
         help="Allowed corporate email domain. Default: fanruan.com",
     )
-    args = parser.parse_args()
+    parser.add_argument("--existing-mapping", default=None, help="Existing maintained git_author_wecom_mapping.csv to merge.")
+    parser.add_argument("--no-auto-email-prefix", action="store_true", help="Do not suggest userid from fanruan email prefix.")
+    args = parser.parse_args(argv)
 
     repo = Path(args.repo).expanduser().resolve()
     out_dir = Path(args.out_dir).expanduser().resolve()
@@ -227,24 +267,38 @@ def main() -> int:
         raise SystemExit(f"repo does not exist: {repo}")
 
     authors = collect_authors(repo)
-    rows = build_rows(authors, allowed_domain)
+    existing_mapping = load_existing_mapping(Path(args.existing_mapping).expanduser().resolve() if args.existing_mapping else None)
+    rows = build_rows(
+        authors,
+        allowed_domain,
+        existing_mapping=existing_mapping,
+        auto_email_prefix=not args.no_auto_email_prefix,
+    )
 
     all_path = out_dir / "git_authors_all.csv"
     external_path = out_dir / "git_authors_non_fanruan.csv"
     mapping_path = out_dir / "git_author_wecom_mapping.template.csv"
+    maintained_mapping_path = out_dir / "git_author_wecom_mapping.csv"
 
     external_rows = [row for row in rows if not row["isAllowedDomain"]]
 
     write_csv(all_path, rows)
     write_csv(external_path, external_rows)
     write_csv(mapping_path, rows)
+    write_csv(maintained_mapping_path, rows)
+
+    mapped_count = sum(1 for row in rows if str(row.get("wecomUserId") or "").strip())
+    unmapped_count = len(rows) - mapped_count
 
     print(f"repo: {repo}")
     print(f"authors total: {len(rows)}")
+    print(f"mapped: {mapped_count}")
+    print(f"unmapped: {unmapped_count}")
     print(f"non @{allowed_domain}: {len(external_rows)}")
     print(f"all authors: {all_path}")
     print(f"non fanruan authors: {external_path}")
     print(f"mapping template: {mapping_path}")
+    print(f"mapping: {maintained_mapping_path}")
 
     if external_rows:
         print("")

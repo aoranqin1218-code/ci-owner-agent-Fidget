@@ -3,7 +3,8 @@ from __future__ import annotations
 import re
 from urllib.parse import urlencode
 
-from ci_owner_agent.schemas import CiResponsibilityNotice, EvidenceItem, ResponsibilityItem
+from ci_owner_agent.schemas import CiResponsibilityNotice, EvidenceItem, Owner, ResponsibilityItem
+from ci_owner_agent.services.wecom_user_mapping import WeComUserMapper
 
 
 def format_wecom_markdown_notice(
@@ -12,20 +13,23 @@ def format_wecom_markdown_notice(
     feedback_token: str | None = None,
     max_reason_chars: int = 800,
     max_evidence_chars: int = 500,
+    user_mapper: WeComUserMapper | None = None,
+    mention_mode: str = "userid",
 ) -> str:
-    names = collect_responsible_display_names(notice)
+    mapper = user_mapper or WeComUserMapper([])
+    owners = collect_responsible_owners(notice)
     evidence_by_id = {item.id: item for item in notice.evidence}
     lines = [
         f"### 单测失败 | {notice.job} #{notice.buildNumber}",
         "",
-        f"**责任人**：{format_responsible_mentions(names)}",
+        f"**责任人**：{format_responsible_mentions(owners, mapper, mention_mode)}",
         f"**原因**：{public_single_line(notice.failureReason, max_reason_chars)}",
         "",
         "#### 责任项",
     ]
     if notice.responsibilityItems:
         for idx, item in enumerate(notice.responsibilityItems, start=1):
-            owner_name = item.owner.name if item.owner.name and item.owner.name != "无高可信责任人" else "无高可信责任人"
+            owner_name = format_item_owner(item.owner, mapper, mention_mode)
             lines.extend(
                 [
                     f"{idx}. {public_single_line(item.failureTitle, 120)}",
@@ -45,22 +49,34 @@ def format_wecom_markdown_notice(
     return "\n".join(lines)
 
 
-def collect_responsible_display_names(notice: CiResponsibilityNotice) -> list[str]:
-    names: list[str] = []
+def collect_responsible_owners(notice: CiResponsibilityNotice) -> list[Owner]:
+    owners: list[Owner] = []
     seen: set[str] = set()
     for item in notice.responsibilityItems:
         owner = item.owner
         if owner.type == "no_high_confidence_owner" or not owner.name or owner.name == "无高可信责任人":
             continue
-        if owner.name in seen:
+        key = owner.email.lower().strip() if owner.email else owner.name
+        if key in seen:
             continue
-        seen.add(owner.name)
-        names.append(owner.name)
-    return names
+        seen.add(key)
+        owners.append(owner)
+    return owners
 
 
-def format_responsible_mentions(names: list[str]) -> str:
-    return "、".join(f"@{name}" for name in names) if names else "无高可信责任人"
+def collect_responsible_display_names(notice: CiResponsibilityNotice) -> list[str]:
+    return [owner.name for owner in collect_responsible_owners(notice)]
+
+
+def format_responsible_mentions(owners: list[Owner], mapper: WeComUserMapper | None = None, mention_mode: str = "userid") -> str:
+    mapper = mapper or WeComUserMapper([])
+    return "、".join(mapper.mention_owner(owner.name, owner.email, mode=mention_mode) for owner in owners) if owners else "无高可信责任人"
+
+
+def format_item_owner(owner: Owner, mapper: WeComUserMapper, mention_mode: str) -> str:
+    if owner.type == "no_high_confidence_owner" or not owner.name or owner.name == "无高可信责任人":
+        return "无高可信责任人"
+    return mapper.mention_owner(owner.name, owner.email, mode=mention_mode)
 
 
 def format_item_evidence(item: ResponsibilityItem, evidence_by_id: dict[str, EvidenceItem], max_chars: int = 500) -> str:

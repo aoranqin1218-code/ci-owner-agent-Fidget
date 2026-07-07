@@ -14,6 +14,7 @@ from ci_owner_agent.services.history_store import get_history_store, notice_hash
 from ci_owner_agent.services.jenkins_client import JenkinsClient
 from ci_owner_agent.services.notification_formatter import format_wecom_markdown_notice
 from ci_owner_agent.services.wecom_notifier import send_wecom_markdown
+from ci_owner_agent.services.wecom_user_mapping import WeComUserMapper
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -269,10 +270,13 @@ def _has_responsible_item_owner(notice: CiResponsibilityNotice) -> bool:
 
 
 def _notify_notice(notice: CiResponsibilityNotice, settings, *, dry_run: bool, force: bool, feedback_base_url: str | None) -> dict:
+    mapper = WeComUserMapper.from_csv(settings.wecom_user_mapping_file)
     markdown = format_wecom_markdown_notice(
         notice,
         feedback_base_url=feedback_base_url,
         feedback_token=settings.feedback_shared_token,
+        user_mapper=mapper,
+        mention_mode=settings.wecom_mention_mode,
     )
     store = get_history_store(settings)
     digest = notice_hash(notice)

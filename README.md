@@ -392,3 +392,47 @@ python .\scripts\batch_analyze_jenkins_builds.py `
 ```
 
 The output layout matches the local batch script: `index.jsonl`, `summary.csv`, `notices/`, `stdout/`, `stderr/`, and optional `traces/`. When traces are fetched, the summary includes compact `aiHistoryPrecheck.diagnostics` counters such as historical build/fact counts, compared pairs, accepted candidates, and skipped reasons.
+
+## WeCom User Mapping
+
+Notifications can mention real WeCom users when a maintained Git author mapping CSV is configured. The notice JSON is not changed; mapping is used only while formatting the WeCom markdown.
+
+Export authors:
+
+```powershell
+python .\scripts\export_git_author_wecom_mapping.py `
+  --repo E:\workspace\temp\fx-code `
+  --out-dir .\runs\git-author-mapping-fx-code
+```
+
+Maintain this file manually:
+
+```text
+runs/git-author-mapping-fx-code/git_author_wecom_mapping.csv
+```
+
+Fill `wecomUserId`, then configure:
+
+```env
+CI_AGENT_WECOM_USER_MAPPING_FILE=./runs/git-author-mapping-fx-code/git_author_wecom_mapping.csv
+CI_AGENT_WECOM_MENTION_MODE=userid
+```
+
+Preview:
+
+```powershell
+python -m ci_owner_agent notify-notice `
+  --notice-file .\runs\xxx\notices\xxx.notice.json `
+  --dry-run `
+  --feedback-base-url "http://ci-agent.xxx/feedback"
+```
+
+Send:
+
+```powershell
+python -m ci_owner_agent notify-notice `
+  --notice-file .\runs\xxx\notices\xxx.notice.json `
+  --force
+```
+
+`CI_AGENT_WECOM_MENTION_MODE=userid` uses `<@userid>` when mapped and falls back to `@owner.name`. `CI_AGENT_WECOM_MENTION_MODE=name` always uses `@owner.name`, which is useful for debugging or compatibility.
