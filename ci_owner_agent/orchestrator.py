@@ -10,7 +10,7 @@ from ci_owner_agent.config import Settings, load_settings
 from ci_owner_agent.schemas import BuildInfo, ChangedFile, CiResponsibilityNotice, CommitInfo, EvidenceItem, FailureFact
 from ci_owner_agent.services.failure_fact_ai import extract_failure_facts_with_ai
 from ci_owner_agent.services.git_client import GitClient
-from ci_owner_agent.services.history_store import get_history_store
+from ci_owner_agent.services.history_store import MongoHistoryStore, get_history_store
 from ci_owner_agent.services.jenkins_client import JenkinsClient
 from ci_owner_agent.services.log_provider import JenkinsLogProvider, LocalFileLogProvider, LogProvider, detect_checkout_revision_from_console_log
 from ci_owner_agent.services.scorer import no_owner, validate_notice
@@ -108,8 +108,11 @@ def analyze_failed_build(
     allow_sync_failure: bool = False,
     settings: Settings | None = None,
     last_successful_build_number: int | None = None,
+    history_store: MongoHistoryStore | None = None,
 ) -> CiResponsibilityNotice:
     settings = settings or load_settings()
+    if history_store is None and settings.history_enabled:
+        history_store = get_history_store(settings)
     sync_result = git_client.sync(repo)
     sync_warning: EvidenceItem | None = None
     if not sync_result.get("ok"):
@@ -158,7 +161,7 @@ def analyze_failed_build(
         settings=settings,
         last_successful_build_number=last_successful_build_number,
     )
-    runtime_context = _with_precomputed_failure_context(runtime_context)
+    runtime_context = _with_precomputed_failure_context(runtime_context, history_store=history_store)
     try:
         agent = create_responsibility_agent(settings, runtime_context)
         if isinstance(agent, LangChainResponsibilityAgent):
@@ -180,11 +183,15 @@ def analyze_failed_build(
         last_successful_build_number,
         runtime_context.failure_summaries,
         runtime_context.failure_facts,
+        history_store=history_store,
     )
     return notice
 
 
-def _with_precomputed_failure_context(context: AgentRuntimeContext) -> AgentRuntimeContext:
+def _with_precomputed_failure_context(
+    context: AgentRuntimeContext,
+    history_store: MongoHistoryStore | None = None,
+) -> AgentRuntimeContext:
     try:
         failure_summaries = context.log_provider.find_test_failure_summaries(
             tail_lines=context.settings.failure_chunk_tail_lines,
@@ -220,6 +227,7 @@ def _with_precomputed_failure_context(context: AgentRuntimeContext) -> AgentRunt
         history_precheck = history_search_similar_failures(
             enriched,
             maxCandidates=enriched.settings.history_max_candidates,
+            store=history_store,
         )
     except Exception as exc:
         history_precheck = {
@@ -240,7 +248,7 @@ def _with_precomputed_failure_context(context: AgentRuntimeContext) -> AgentRunt
         and enriched.settings.ai_history_compare_enabled
     ):
         try:
-            ai_history_precheck = history_search_similar_failure_facts(enriched)
+            ai_history_precheck = history_search_similar_failure_facts(enriched, store=history_store)
         except Exception as exc:
             ai_history_precheck = {
                 "ok": False,
@@ -264,8 +272,9 @@ def _save_history(
     last_successful_build_number: int | None,
     failure_summaries: dict | None = None,
     failure_facts: dict | None = None,
+    history_store: MongoHistoryStore | None = None,
 ) -> None:
-    store = get_history_store(settings)
+    store = history_store or get_history_store(settings)
     if store is None:
         return
     try:

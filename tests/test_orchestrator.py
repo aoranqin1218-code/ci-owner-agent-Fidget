@@ -146,7 +146,7 @@ def test_orchestrator_runs_ai_history_precheck_when_no_summaries_and_facts(monke
         lambda *args, **kwargs: {"ok": True, "currentChunks": [], "candidates": []},
     )
 
-    def fake_ai_history(enriched):
+    def fake_ai_history(enriched, **kwargs):
         calls["context"] = enriched
         return {
             "ok": True,
@@ -161,6 +161,47 @@ def test_orchestrator_runs_ai_history_precheck_when_no_summaries_and_facts(monke
 
     assert calls["context"].failure_facts["facts"][0]["errorCode"] == "TS2305"
     assert result.ai_history_precheck["mode"] == "ai_failure_facts"
+
+
+def test_orchestrator_reuses_history_store_for_prechecks(monkeypatch, repo_cache, sample_repo, logs):
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    settings = replace(
+        context.settings,
+        ai_failure_facts_enabled=True,
+        ai_history_compare_enabled=True,
+        history_enabled=True,
+    )
+    context = replace(context, settings=settings, log_provider=NoSummaryProvider())
+    store = make_store()
+    calls = {}
+    fact = FailureFact(
+        signatureKey="typescript_compile_error|TS2305|src/index.ts|classifyErrorMessage",
+        historyEligible=True,
+        failureKind="typescript_compile_error",
+        message="missing export",
+        rootCauseSummary="missing export",
+        confidence=0.9,
+    )
+    monkeypatch.setattr(
+        "ci_owner_agent.orchestrator.extract_failure_facts_with_ai",
+        lambda **kwargs: FailureFactExtractionResult(ok=True, facts=[fact]),
+    )
+
+    def fake_history(enriched, **kwargs):
+        calls["deterministic_store"] = kwargs.get("store")
+        return {"ok": True, "currentChunks": [], "candidates": []}
+
+    def fake_ai_history(enriched, **kwargs):
+        calls["ai_store"] = kwargs.get("store")
+        return {"ok": True, "mode": "ai_failure_facts", "currentFacts": [], "candidates": []}
+
+    monkeypatch.setattr("ci_owner_agent.orchestrator.history_search_similar_failures", fake_history)
+    monkeypatch.setattr("ci_owner_agent.orchestrator.history_search_similar_failure_facts", fake_ai_history)
+
+    _with_precomputed_failure_context(context, history_store=store)
+
+    assert calls["deterministic_store"] is store
+    assert calls["ai_store"] is store
 
 
 def test_orchestrator_skips_ai_history_when_summaries_exist(monkeypatch, repo_cache, sample_repo, logs):

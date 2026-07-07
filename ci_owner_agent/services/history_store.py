@@ -10,6 +10,11 @@ from ci_owner_agent.constants import NO_OWNER_NAME
 from ci_owner_agent.config import Settings
 from ci_owner_agent.schemas import BuildInfo, CiResponsibilityNotice, FailureFact
 from ci_owner_agent.services.failure_similarity import hash_normalized_chunk, normalize_error_chunk
+from ci_owner_agent.services.history_inheritance import (
+    active_feedback_docs as _active_feedback_docs,
+    find_feedback_override as _find_feedback_override,
+    find_feedback_override_for_failure_signature,
+)
 
 HISTORY_CHUNK_SCHEMA_VERSION = 3
 ALLOWED_HISTORY_CHUNK_SOURCES = {
@@ -395,63 +400,3 @@ def _fact_owner_for_notice(fact: FailureFact, notice_doc: dict) -> dict[str, Any
 def notice_hash(notice: CiResponsibilityNotice) -> str:
     payload = json.dumps(notice.model_dump(mode="json"), ensure_ascii=False, sort_keys=True, default=str)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
-
-
-def _active_feedback_docs(store: MongoHistoryStore, job: str, branch: str | None) -> list[dict]:
-    query: dict[str, Any] = {"job": job, "isActive": True}
-    docs = list(store.feedback.find(query))
-    if branch is None:
-        return docs
-    return [doc for doc in docs if doc.get("branch") in {branch, None}]
-
-
-def find_feedback_override_for_failure_signature(
-    store: MongoHistoryStore,
-    *,
-    job: str,
-    branch: str | None,
-    build_number: int | None,
-    failure_signature: str | None,
-    notice_doc: dict | None,
-) -> dict | None:
-    if not failure_signature:
-        return None
-    feedback_docs = _active_feedback_docs(store, job, branch)
-    return _find_feedback_override(
-        feedback_docs,
-        job=job,
-        branch=branch,
-        build_number=build_number,
-        signature_hash=None,
-        signature={"signatureKey": failure_signature},
-        notice_doc=notice_doc or {},
-    )
-
-
-def _find_feedback_override(
-    feedback_docs: list[dict],
-    *,
-    job: str,
-    branch: str | None,
-    build_number: int | None,
-    signature_hash: str | None,
-    signature: dict,
-    notice_doc: dict,
-) -> dict | None:
-    possible_signatures = {signature_hash, signature.get("signatureKey"), signature.get("signatureHash")}
-    notice = notice_doc.get("notice") if isinstance(notice_doc, dict) else None
-    failure_ids: set[str] = set()
-    for item in (notice.get("responsibilityItems") if isinstance(notice, dict) else []) or []:
-        if item.get("failureSignature") in possible_signatures and item.get("failureId"):
-            failure_ids.add(item.get("failureId"))
-    for doc in feedback_docs:
-        if doc.get("job") != job:
-            continue
-        if branch is not None and doc.get("branch") not in {branch, None}:
-            continue
-        if doc.get("failureSignature") and doc.get("failureSignature") in possible_signatures:
-            return doc
-    for doc in feedback_docs:
-        if doc.get("job") == job and doc.get("buildNumber") == build_number and doc.get("failureId") in failure_ids:
-            return doc
-    return None

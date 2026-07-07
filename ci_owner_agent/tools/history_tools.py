@@ -7,6 +7,11 @@ from ci_owner_agent.services.failure_similarity import (
     normalize_error_chunk,
     similarity_relationship,
 )
+from ci_owner_agent.services.history_inheritance import (
+    build_inherited_owner,
+    feedback_blocks_inheritance,
+    source_from_correct_owner_feedback,
+)
 from ci_owner_agent.services.history_store import MongoHistoryStore, get_history_store
 
 CURRENT_ALLOWED_CHUNK_SOURCES = {
@@ -211,23 +216,13 @@ def _find_inherited_owner_for_chunk(candidates: list[dict], current_build_number
         source = _high_confidence_source_from_candidate(candidate)
         if source is None:
             continue
-        inherited_owner = {
-            "found": True,
-            "sourceBuildNumber": source.get("sourceBuildNumber") or candidate.get("buildNumber"),
-            "sourceBuildUrl": source.get("sourceBuildUrl") or candidate.get("buildUrl"),
-            "ownerType": source.get("ownerType"),
-            "ownerName": source.get("ownerName"),
-            "ownerEmail": source.get("ownerEmail"),
-            "ownerCommit": source.get("ownerCommit"),
-            "confidence": source.get("confidence"),
-            "matchType": candidate.get("matchType"),
-            "relationship": candidate.get("relationship"),
-        }
-        if source.get("feedbackVerified"):
-            inherited_owner["feedbackVerified"] = True
-        if source.get("feedbackOverride"):
-            inherited_owner["feedbackOverride"] = True
-        return inherited_owner
+        return build_inherited_owner(
+            source,
+            fallback_build_number=candidate.get("buildNumber"),
+            fallback_build_url=candidate.get("buildUrl"),
+            match_type=candidate.get("matchType"),
+            relationship=candidate.get("relationship"),
+        )
     return {"found": False}
 
 
@@ -235,24 +230,19 @@ def _high_confidence_source_from_candidate(candidate: dict) -> dict | None:
     feedback = candidate.get("feedbackOverride")
     if isinstance(feedback, dict):
         action = feedback.get("action")
-        if action in {"mark_flaky", "mark_no_owner"}:
+        if feedback_blocks_inheritance(feedback):
             candidate["feedbackSuppressed"] = True
             candidate["feedbackReason"] = action
             return None
         if action == "confirm_owner":
             candidate["feedbackVerified"] = True
-        if action == "correct_owner" and isinstance(feedback.get("correctedOwner"), dict):
-            owner = feedback["correctedOwner"]
-            return {
-                "ownerType": owner.get("type"),
-                "ownerName": owner.get("name"),
-                "ownerEmail": owner.get("email"),
-                "ownerCommit": owner.get("commit"),
-                "confidence": owner.get("confidence"),
-                "sourceBuildNumber": feedback.get("sourceBuildNumber") or candidate.get("buildNumber"),
-                "sourceBuildUrl": feedback.get("buildUrl") or candidate.get("buildUrl"),
-                "feedbackOverride": True,
-            }
+        source = source_from_correct_owner_feedback(
+            feedback,
+            fallback_build_number=candidate.get("buildNumber"),
+            fallback_build_url=candidate.get("buildUrl"),
+        )
+        if source is not None:
+            return source
     notice_doc = candidate.get("_noticeDoc") or {}
     notice = notice_doc.get("notice")
     items = notice.get("responsibilityItems") if isinstance(notice, dict) else None

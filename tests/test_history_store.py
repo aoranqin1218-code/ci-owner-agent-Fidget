@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 
 from ci_owner_agent.schemas import BuildInfo, FailureFact
-from ci_owner_agent.services.history_store import MongoHistoryStore, notice_hash
+from ci_owner_agent.services.history_store import MongoHistoryStore, find_feedback_override_for_failure_signature, notice_hash
 from ci_owner_agent.tools.history_tools import history_search_similar_failures
 from tests.test_langchain_agent import high_confidence_payload, make_lc_context
 
@@ -746,6 +746,47 @@ def test_save_failure_facts_uses_matching_responsibility_item_owner(repo_cache, 
 
     assert store.failure_facts.docs[0]["factOwner"]["name"] == "Li Si"
     assert store.failure_facts.docs[0]["factOwner"]["email"] == "lisi@example.com"
+
+
+def test_active_feedback_prefers_newer_update_for_same_signature():
+    store = make_store()
+    store.feedback.docs.extend(
+        [
+            {
+                "job": "services/fx-code-unittest",
+                "branch": "dev",
+                "buildNumber": 1,
+                "failureSignature": "sig-1",
+                "action": "correct_owner",
+                "correctedOwner": {"name": "Old Owner", "type": "high_confidence", "confidence": 1},
+                "isActive": True,
+                "createdAt": "2026-01-01T00:00:00",
+                "updatedAt": "2026-01-01T00:00:00",
+            },
+            {
+                "job": "services/fx-code-unittest",
+                "branch": "dev",
+                "buildNumber": 1,
+                "failureSignature": "sig-1",
+                "action": "correct_owner",
+                "correctedOwner": {"name": "New Owner", "type": "high_confidence", "confidence": 1},
+                "isActive": True,
+                "createdAt": "2026-01-01T00:00:00",
+                "updatedAt": "2026-01-02T00:00:00",
+            },
+        ]
+    )
+
+    feedback = find_feedback_override_for_failure_signature(
+        store,
+        job="services/fx-code-unittest",
+        branch="dev",
+        build_number=2,
+        failure_signature="sig-1",
+        notice_doc={"notice": {}},
+    )
+
+    assert feedback["correctedOwner"]["name"] == "New Owner"
 
 
 def _save_fact_build(store, context, *, build: int, branch: str | None = "dev", fact: FailureFact | None = None):

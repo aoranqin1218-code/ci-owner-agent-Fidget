@@ -3,16 +3,20 @@ from __future__ import annotations
 from typing import Any
 
 from ci_owner_agent.agents.context import AgentRuntimeContext
-from ci_owner_agent.constants import NO_OWNER_NAME
 from ci_owner_agent.schemas import FailureFact, FailureFactComparison
 from ci_owner_agent.services.failure_fact_compare_ai import compare_failure_facts_with_ai
 from ci_owner_agent.services.history_store import (
     MongoHistoryStore,
-    find_feedback_override_for_failure_signature,
     get_history_store,
 )
-
-OWNER_TYPES = {"high_confidence", "medium_confidence", "inherited_failure_owner"}
+from ci_owner_agent.services.history_inheritance import (
+    build_inherited_owner,
+    feedback_blocks_inheritance,
+    feedback_preview,
+    find_feedback_override_for_failure_signature,
+    source_from_correct_owner_feedback,
+    valid_inherited_owner,
+)
 
 
 def history_search_similar_failure_facts(
@@ -109,7 +113,7 @@ def history_search_similar_failure_facts(
             failure_signature=historical_fact.signatureKey,
             notice_doc={"notice": historical_doc.get("notice") or {}},
         )
-        if _feedback_blocks(feedback):
+        if feedback_blocks_inheritance(feedback):
             diagnostics["skipped"]["blockedByFeedback"] += 1
             current_view["blockedReason"] = f"blocked_by_feedback_{feedback.get('action')}"
             _append_compare_result(diagnostics, current_view["_fact"], historical_fact, historical_doc, comparison, False, f"blocked_by_feedback_{feedback.get('action')}", comparison.reason)
@@ -348,10 +352,6 @@ def _is_same_failure(comparison: FailureFactComparison, threshold: float) -> boo
     )
 
 
-def _feedback_blocks(feedback: dict | None) -> bool:
-    return isinstance(feedback, dict) and feedback.get("action") in {"mark_flaky", "mark_no_owner"}
-
-
 def _inherited_owner_from_historical_doc(
     historical_doc: dict,
     comparison: FailureFactComparison,
@@ -363,14 +363,24 @@ def _inherited_owner_from_historical_doc(
     source_build_url = historical_doc.get("buildUrl")
     owner: dict[str, Any] | None = None
 
+    source = source_from_correct_owner_feedback(
+        feedback,
+        fallback_build_number=source_build_number,
+        fallback_build_url=source_build_url,
+    )
+    if source is not None:
+        source = {**source, "confidence": comparison.confidence}
+        return build_inherited_owner(
+            source,
+            fallback_build_number=source_build_number,
+            fallback_build_url=source_build_url,
+            match_type="ai_fact_semantic",
+            relationship=comparison.relationship,
+        )
+
     if isinstance(feedback, dict):
         action = feedback.get("action")
-        if action == "correct_owner" and isinstance(feedback.get("correctedOwner"), dict):
-            owner = feedback["correctedOwner"]
-            source_build_number = feedback.get("sourceBuildNumber") or source_build_number
-            source_build_url = feedback.get("buildUrl") or source_build_url
-            feedback_corrected = True
-        elif action == "confirm_owner":
+        if action == "confirm_owner":
             feedback_verified = True
 
     if owner is None:
@@ -389,32 +399,25 @@ def _inherited_owner_from_historical_doc(
         source_build_number = item_source.get("sourceBuildNumber") or source_build_number
         source_build_url = item_source.get("sourceBuildUrl") or source_build_url
 
-    if not _valid_owner(owner):
+    if not valid_inherited_owner(owner):
         return {"found": False}
 
-    return {
-        "found": True,
-        "sourceBuildNumber": source_build_number,
-        "sourceBuildUrl": source_build_url,
+    source = {
         "ownerType": owner.get("type"),
         "ownerName": owner.get("name"),
         "ownerEmail": owner.get("email"),
         "ownerCommit": owner.get("commit"),
         "confidence": comparison.confidence,
-        "matchType": "ai_fact_semantic",
-        "relationship": comparison.relationship,
         "feedbackVerified": feedback_verified,
         "feedbackCorrected": feedback_corrected,
     }
-
-
-def _valid_owner(owner: dict | None) -> bool:
-    if not isinstance(owner, dict):
-        return False
-    name = str(owner.get("name") or "").strip()
-    owner_type = str(owner.get("type") or "")
-    confidence = float(owner.get("confidence") or 0)
-    return bool(name and name != NO_OWNER_NAME and owner_type in OWNER_TYPES and confidence > 0)
+    return build_inherited_owner(
+        source,
+        fallback_build_number=source_build_number,
+        fallback_build_url=source_build_url,
+        match_type="ai_fact_semantic",
+        relationship=comparison.relationship,
+    )
 
 
 def _matching_notice_item_source(historical_doc: dict) -> dict | None:
@@ -467,16 +470,5 @@ def _candidate_dict(
         "ownerEmail": inherited_owner.get("ownerEmail"),
         "ownerCommit": inherited_owner.get("ownerCommit"),
         "inheritedOwner": inherited_owner,
-        "feedbackOverride": _feedback_preview(feedback),
-    }
-
-
-def _feedback_preview(feedback: dict | None) -> dict | None:
-    if not isinstance(feedback, dict):
-        return None
-    return {
-        "action": feedback.get("action"),
-        "reviewer": feedback.get("reviewer"),
-        "note": feedback.get("note"),
-        "correctedOwner": feedback.get("correctedOwner"),
+        "feedbackOverride": feedback_preview(feedback),
     }

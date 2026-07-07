@@ -1,0 +1,162 @@
+from __future__ import annotations
+
+import datetime as dt
+from typing import Any
+
+from ci_owner_agent.constants import NO_OWNER_NAME
+
+INHERITABLE_OWNER_TYPES = {"high_confidence", "medium_confidence", "inherited_failure_owner"}
+BLOCKING_FEEDBACK_ACTIONS = {"mark_flaky", "mark_no_owner"}
+
+
+def active_feedback_docs(store: Any, job: str, branch: str | None) -> list[dict]:
+    query: dict[str, Any] = {"job": job, "isActive": True}
+    docs = list(store.feedback.find(query))
+    if branch is not None:
+        docs = [doc for doc in docs if doc.get("branch") in {branch, None}]
+    return sort_feedback_docs(docs)
+
+
+def sort_feedback_docs(docs: list[dict]) -> list[dict]:
+    return sorted(
+        docs,
+        key=lambda doc: (_time_sort_value(doc.get("updatedAt")), _time_sort_value(doc.get("createdAt"))),
+        reverse=True,
+    )
+
+
+def find_feedback_override_for_failure_signature(
+    store: Any,
+    *,
+    job: str,
+    branch: str | None,
+    build_number: int | None,
+    failure_signature: str | None,
+    notice_doc: dict | None,
+) -> dict | None:
+    if not failure_signature:
+        return None
+    feedback_docs = active_feedback_docs(store, job, branch)
+    return find_feedback_override(
+        feedback_docs,
+        job=job,
+        branch=branch,
+        build_number=build_number,
+        signature_hash=None,
+        signature={"signatureKey": failure_signature},
+        notice_doc=notice_doc or {},
+    )
+
+
+def find_feedback_override(
+    feedback_docs: list[dict],
+    *,
+    job: str,
+    branch: str | None,
+    build_number: int | None,
+    signature_hash: str | None,
+    signature: dict,
+    notice_doc: dict,
+) -> dict | None:
+    possible_signatures = {signature_hash, signature.get("signatureKey"), signature.get("signatureHash")}
+    notice = notice_doc.get("notice") if isinstance(notice_doc, dict) else None
+    failure_ids: set[str] = set()
+    for item in (notice.get("responsibilityItems") if isinstance(notice, dict) else []) or []:
+        if item.get("failureSignature") in possible_signatures and item.get("failureId"):
+            failure_ids.add(item.get("failureId"))
+    for doc in feedback_docs:
+        if doc.get("job") != job:
+            continue
+        if branch is not None and doc.get("branch") not in {branch, None}:
+            continue
+        if doc.get("failureSignature") and doc.get("failureSignature") in possible_signatures:
+            return doc
+    for doc in feedback_docs:
+        if doc.get("job") == job and doc.get("buildNumber") == build_number and doc.get("failureId") in failure_ids:
+            return doc
+    return None
+
+
+def feedback_blocks_inheritance(feedback: dict | None) -> bool:
+    return isinstance(feedback, dict) and feedback.get("action") in BLOCKING_FEEDBACK_ACTIONS
+
+
+def feedback_preview(feedback: dict | None) -> dict | None:
+    if not isinstance(feedback, dict):
+        return None
+    return {
+        "action": feedback.get("action"),
+        "reviewer": feedback.get("reviewer"),
+        "note": feedback.get("note"),
+        "correctedOwner": feedback.get("correctedOwner"),
+    }
+
+
+def valid_inherited_owner(owner: dict | None) -> bool:
+    if not isinstance(owner, dict):
+        return False
+    name = str(owner.get("name") or "").strip()
+    owner_type = str(owner.get("type") or "")
+    confidence = float(owner.get("confidence") or 0)
+    return bool(name and name != NO_OWNER_NAME and owner_type in INHERITABLE_OWNER_TYPES and confidence > 0)
+
+
+def build_inherited_owner(
+    source: dict,
+    *,
+    fallback_build_number: int | None,
+    fallback_build_url: str | None,
+    match_type: str,
+    relationship: str,
+) -> dict:
+    return {
+        "found": True,
+        "sourceBuildNumber": source.get("sourceBuildNumber") or fallback_build_number,
+        "sourceBuildUrl": source.get("sourceBuildUrl") or fallback_build_url,
+        "ownerType": source.get("ownerType"),
+        "ownerName": source.get("ownerName"),
+        "ownerEmail": source.get("ownerEmail"),
+        "ownerCommit": source.get("ownerCommit"),
+        "confidence": source.get("confidence"),
+        "matchType": match_type,
+        "relationship": relationship,
+        **({"feedbackVerified": True} if source.get("feedbackVerified") else {}),
+        **({"feedbackOverride": True} if source.get("feedbackOverride") else {}),
+        **({"feedbackCorrected": True} if source.get("feedbackCorrected") else {}),
+    }
+
+
+def source_from_correct_owner_feedback(
+    feedback: dict | None,
+    *,
+    fallback_build_number: int | None,
+    fallback_build_url: str | None,
+) -> dict | None:
+    if not isinstance(feedback, dict) or feedback.get("action") != "correct_owner":
+        return None
+    owner = feedback.get("correctedOwner")
+    if not isinstance(owner, dict):
+        return None
+    return {
+        "ownerType": owner.get("type"),
+        "ownerName": owner.get("name"),
+        "ownerEmail": owner.get("email"),
+        "ownerCommit": owner.get("commit"),
+        "confidence": owner.get("confidence"),
+        "sourceBuildNumber": feedback.get("sourceBuildNumber") or fallback_build_number,
+        "sourceBuildUrl": feedback.get("buildUrl") or fallback_build_url,
+        "feedbackOverride": True,
+        "feedbackCorrected": True,
+    }
+
+
+def _time_sort_value(value: Any) -> float:
+    if isinstance(value, dt.datetime):
+        return value.timestamp()
+    if isinstance(value, str):
+        try:
+            text = value.replace("Z", "+00:00")
+            return dt.datetime.fromisoformat(text).timestamp()
+        except ValueError:
+            return 0
+    return 0
