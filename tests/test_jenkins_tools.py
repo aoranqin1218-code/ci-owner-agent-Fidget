@@ -192,7 +192,7 @@ def test_analyze_jenkins_missing_commit_returns_no_owner(repo_cache: Path, sampl
     assert "缺少 headCommit 或 baseCommit" in notice.failureReason
 
 
-def test_analyze_jenkins_failure_runs_existing_agent(repo_cache: Path, sample_repo, monkeypatch):
+def test_analyze_jenkins_failure_runs_fake_no_owner_agent(repo_cache: Path, sample_repo, monkeypatch):
     job = "services/fx-code-unittest"
     routes = {
         jenkins_url(job, "5061/api/json"): FakeResponse(build_payload(5061, "FAILURE", sample_repo["head"])),
@@ -211,8 +211,9 @@ def test_analyze_jenkins_failure_runs_existing_agent(repo_cache: Path, sample_re
     git_client = GitClient(repo_cache)
     monkeypatch.setattr(git_client, "sync", lambda repo: {"ok": True})
     notice = analyze_jenkins(sample_repo["repo"], job, 5061, client_for(routes), git_client)
-    assert notice.owner.type == "high_confidence"
-    assert notice.owner.email == "zhangsan@example.com"
+    assert notice.owner.type == "no_high_confidence_owner"
+    assert notice.hasHighConfidenceOwner is False
+    assert "fake provider" in notice.failureReason
 
 
 def test_cli_analyze_uses_jenkins_mode(repo_cache: Path, sample_repo, monkeypatch, capsys):
