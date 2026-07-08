@@ -1,56 +1,257 @@
 # CI Owner Agent
 
-CI Owner Agent is a Python MVP for investigating CI test failures and producing a strict JSON responsibility notice. Phase 1 focuses on local analysis: a console log file plus `baseCommit..headCommit` in a local Git cache.
+CI Owner Agent 是一个用于分析 CI / Jenkins 构建失败并生成“责任人判断通知”的 Python Agent 项目。它的核心目标不是简单地把失败归因给最后一次提交人，而是结合构建日志、Git diff、历史失败、人工反馈和 LLM 工具调用，判断某个失败是当前构建新引入、历史持续失败、偶发/环境问题，还是证据不足无法高可信定责。
 
-## Project Goal
+当证据不足时，系统必须输出 `无高可信责任人`，避免误报。
 
-The agent decides whether a build needs responsibility analysis. `SUCCESS` exits immediately. `ABORTED` is treated as a pipeline/environment/interruption class by default. `FAILURE`, `UNSTABLE`, and `UNKNOWN` enter the local investigation flow.
+---
 
-When evidence is insufficient, the output must say `无高可信责任人`.
+## 1. 项目工作流程
 
-## Install
+### 1.1 总体流程
 
-```bash
+```text
+Jenkins / 本地日志
+  -> 读取构建结果、分支、commit、console log
+  -> SUCCESS / ABORTED 状态门控
+  -> FAILURE / UNSTABLE / UNKNOWN 进入失败分析
+  -> Git 同步与 baseCommit..headCommit diff
+  -> 提取当前构建失败摘要 failureSummaries
+  -> 必要时提取 AI failureFacts
+  -> 查询 Mongo 历史失败 historyPrecheck / aiHistoryPrecheck
+  -> LangChain Agent 调用工具补充证据
+  -> 生成 CiResponsibilityNotice
+  -> 本地 validator / scorer 校验并降级弱证据
+  -> 保存 Mongo 历史记录
+  -> 可选发送企业微信通知
+  -> 可选进入反馈页修正责任人
+  -> 可选写入 metrics JSONL
+```
+
+### 1.2 构建状态门控
+
+系统首先判断构建结果：
+
+| 构建结果 | 行为 |
+| --- | --- |
+| `SUCCESS` | 直接输出成功 notice，不进入 Agent 定责。 |
+| `ABORTED` | 认为更可能是 Jenkins Pipeline、环境、节点或人工中断，不进入普通代码定责。 |
+| `FAILURE` / `UNSTABLE` / `UNKNOWN` | 进入失败分析流程。 |
+
+### 1.3 失败分析阶段
+
+失败分析主要分为几层：
+
+1. **Git 上下文**：读取 `baseCommit..headCommit` 之间的 commits 和 changed files。
+2. **失败摘要**：从日志中提取更聚焦的失败块，例如测试失败、Japa/Mocha 失败、TypeScript 编译错误等。
+3. **AI failure facts**：当确定性失败摘要不足时，可用 LLM 从非结构化日志中提取内层真实失败事实，避免把 Docker / Jenkins / shell wrapper 当成根因。
+4. **历史失败查询**：从 MongoDB 查询此前失败构建的 failure chunks / failure facts，判断当前失败是否是历史持续失败。
+5. **Agent 工具调查**：LangChain Agent 根据当前上下文调用日志、Git、TypeScript、历史查询等工具补证据。
+6. **结果校验**：本地 validator / scorer 会检查证据是否足够，不足时降级为 `无高可信责任人`。
+
+### 1.4 责任类型
+
+`responsibilityItems` 中每个失败项可以表达不同责任类型：
+
+| 类型 | 含义 |
+| --- | --- |
+| `current_build_owner` | 当前构建引入的新失败，有日志和 diff 等证据支撑。 |
+| `inherited_failure_owner` | 当前构建仍在失败，但根因来自历史构建，应继承首次失败责任人。 |
+| `no_high_confidence_owner` | 证据不足、环境问题、偶发问题或无法高可信定责。 |
+| `unknown` | 模型无法稳定判断，通常会被校验逻辑降级。 |
+
+### 1.5 历史继承与反馈
+
+开启 Mongo 历史后，系统会保存：
+
+- `ci_builds`：构建元数据。
+- `ci_notices`：最终责任通知。
+- `ci_failure_chunks`：结构化失败摘要。
+- `ci_failure_facts`：AI 提取的失败事实。
+- `ci_feedback`：人工反馈。
+- `ci_notifications`：通知发送记录。
+- `ci_wecom_users`：企业微信用户映射。
+
+人工反馈会影响后续继承：
+
+| 反馈动作 | 后续影响 |
+| --- | --- |
+| `confirm_owner` | 确认原责任人，后续继承时可标记为已验证。 |
+| `correct_owner` | 修正责任人，后续继承时优先使用修正后的 owner。 |
+| `mark_flaky` | 标记偶发/环境问题，阻断后续历史继承。 |
+| `mark_no_owner` | 标记无高可信责任人，阻断后续历史继承。 |
+
+### 1.6 通知与反馈页
+
+分析完成后可以发送企业微信 Markdown 通知。通知中可包含反馈链接，用户打开 `/feedback` 页面后可以对每个责任项进行确认、修正、标记偶发或标记无责任人。
+
+企业微信 @ 人优先使用 MongoDB 中的 `ci_wecom_users` 映射；如果 Mongo 不可用，可回退到 CSV 映射；仍无法匹配时显示普通姓名。
+
+### 1.7 metrics 记录
+
+开启 metrics 后，每次 `analyze` / `analyze-local` 会追加一行 JSONL，记录：
+
+- 总耗时。
+- 阶段耗时。
+- LLM calls。
+- provider 返回的 token usage。
+- 责任项数量。
+- inherited / current owner 数量。
+- 错误和 warning。
+
+metrics 只用于调试和性能分析，写入失败不会导致分析失败。
+
+---
+
+## 2. 目录结构
+
+```text
+ci_owner_agent/
+  agents/                  # Agent 上下文、LangChain Agent、fake agent
+  services/                # Jenkins、Git、Mongo history、通知、metrics、AI facts 等服务
+  tools/                   # LangChain 可调用工具封装
+  main.py                  # CLI 入口
+  orchestrator.py          # analyze / analyze-local 主流程编排
+  server.py                # 反馈页 FastAPI 服务
+scripts/
+  batch_analyze_company_logs.py   # 批量分析本地 Jenkins 日志
+  batch_analyze_jenkins_builds.py # 批量分析 Jenkins 构建号
+  clear_history_failure_chunks.py # 清理历史 failure chunks
+ts-analyzer/               # TypeScript 静态分析脚本
+tests/                     # pytest 测试
+samples/                   # 可放脱敏日志样例
+```
+
+---
+
+## 3. 安装
+
+### 3.1 Python 环境
+
+要求 Python `>=3.11`。
+
+Windows PowerShell：
+
+```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
+python -m pip install -U pip
 python -m pip install -e ".[dev]"
 ```
 
-On Linux or macOS, activate with `source .venv/bin/activate`.
+Linux / macOS：
 
-## Configuration
+```bash
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install -U pip
+python -m pip install -e ".[dev]"
+```
 
-Copy `.env.example` to `.env` and edit values as needed. Do not put secrets in source files.
+项目依赖见 `pyproject.toml`，核心依赖包括 `pydantic`、`python-dotenv`、`requests`、`langchain`、`langchain-openai`、`langsmith`、`pymongo` 等。
 
-Important settings:
+### 3.2 复制配置文件
+
+```powershell
+Copy-Item .env.example .env
+```
+
+然后按实际环境修改 `.env`。
+
+### 3.3 准备 Git repo cache
+
+`CI_AGENT_REPO_CACHE_DIR` 指向 Agent 专用的 repo 缓存目录，支持：
 
 ```text
+{CI_AGENT_REPO_CACHE_DIR}/{repo}
+{CI_AGENT_REPO_CACHE_DIR}/{repo}.git
+```
+
+例如：
+
+```text
+E:/ci-agent-cache/fx-code
+```
+
+注意：TypeScript 分析工具可能会对目标 repo 执行 detached checkout。不要把 `CI_AGENT_REPO_CACHE_DIR` 指向人工日常开发工作区，建议使用 Agent 专用 clone。
+
+### 3.4 准备 TypeScript Analyzer
+
+如果需要 `ts_find_definitions` / `ts_find_callers` 等 TypeScript 静态分析能力：
+
+```powershell
+cd ts-analyzer
+npm install
+```
+
+目标业务仓库本身也需要提前安装依赖：
+
+```powershell
+cd E:/ci-agent-cache/fx-code
+npm install
+```
+
+---
+
+## 4. `.env.example` 配置说明
+
+### 4.1 Jenkins 配置
+
+```env
+JENKINS_URL=
+JENKINS_USER=
+JENKINS_TOKEN=
+```
+
+| 配置 | 说明 |
+| --- | --- |
+| `JENKINS_URL` | Jenkins 地址，例如 `https://jenkins.example.com`。为空时 `analyze` 无法访问 Jenkins。 |
+| `JENKINS_USER` | Jenkins 用户名。 |
+| `JENKINS_TOKEN` | Jenkins API token 或密码。 |
+
+### 4.2 Agent 基础配置
+
+```env
 CI_AGENT_REPO_CACHE_DIR=E:/ci-agent-cache
 CI_AGENT_DEFAULT_LOG_TAIL_LINES=500
 CI_AGENT_MAX_TOOL_STEPS=12
 CI_AGENT_MAX_TOOL_OUTPUT_CHARS=20000
 CI_AGENT_RECURSION_LIMIT=60
+```
+
+| 配置 | 说明 |
+| --- | --- |
+| `CI_AGENT_REPO_CACHE_DIR` | 本地 Git repo 缓存目录。 |
+| `CI_AGENT_DEFAULT_LOG_TAIL_LINES` | 默认读取日志尾部行数。 |
+| `CI_AGENT_MAX_TOOL_STEPS` | Agent 工具调用预算参考值。 |
+| `CI_AGENT_MAX_TOOL_OUTPUT_CHARS` | 单个工具输出最大字符数，防止上下文过大。 |
+| `CI_AGENT_RECURSION_LIMIT` | LangChain Agent recursion limit。 |
+
+### 4.3 LLM 配置
+
+```env
 CI_AGENT_MODEL_PROVIDER=fake
+CI_AGENT_MODEL_BASE_URL=
+CI_AGENT_MODEL_NAME=
+CI_AGENT_API_KEY=
 CI_AGENT_MODEL_TIMEOUT_SECONDS=180
 CI_AGENT_MODEL_MAX_RETRIES=2
 CI_AGENT_RESPONSE_FORMAT=tool
-TS_ANALYZER_DIR=./ts-analyzer
-LANGSMITH_TRACING=false
-LANGSMITH_PROJECT=ci-owner-agent-dev
-CI_AGENT_HISTORY_ENABLED=false
-CI_AGENT_HISTORY_MONGO_URI=mongodb://localhost:27017
-CI_AGENT_HISTORY_MONGO_DB=ci_owner_agent
-CI_AGENT_HISTORY_MAX_CANDIDATES=5
-CI_AGENT_FAILURE_CHUNK_TAIL_LINES=500
-CI_AGENT_METRICS_ENABLED=false
-CI_AGENT_METRICS_FILE=./runs/metrics/ci_analysis_metrics.jsonl
 ```
 
-`CI_AGENT_MODEL_PROVIDER=fake` is the default offline test mode. It uses a fixed no-owner fake agent to verify CLI, toolchain, persistence, notification, and pytest flows; it is not the formal analysis mode and does not attempt responsibility attribution.
+| 配置 | 说明 |
+| --- | --- |
+| `CI_AGENT_MODEL_PROVIDER` | `fake`、`openai`、`deepseek`、`doubao`、`openai-compatible`。 |
+| `CI_AGENT_MODEL_BASE_URL` | OpenAI-compatible API base URL。 |
+| `CI_AGENT_MODEL_NAME` | 模型名称。 |
+| `CI_AGENT_API_KEY` | 模型 API key。 |
+| `CI_AGENT_MODEL_TIMEOUT_SECONDS` | 单次模型 HTTP 请求超时。 |
+| `CI_AGENT_MODEL_MAX_RETRIES` | 模型请求重试次数。 |
+| `CI_AGENT_RESPONSE_FORMAT` | `tool` 或 `json_text`。`tool` 使用结构化输出，`json_text` 只要求模型输出 JSON 文本。 |
 
-OpenAI-compatible real LLM providers are supported with `openai`, `deepseek`, `doubao`, and `openai-compatible`.
+`fake` 是默认离线测试模式，只返回固定 no-owner 结果，用于验证 CLI、工具链、持久化、通知、pytest 流程，不做正式定责。
 
-Doubao example:
+豆包示例：
 
 ```env
 CI_AGENT_MODEL_PROVIDER=doubao
@@ -59,16 +260,7 @@ CI_AGENT_MODEL_NAME=doubao-seed-2-0-lite-260428
 CI_AGENT_API_KEY=your-api-key
 ```
 
-DeepSeek example:
-
-```env
-CI_AGENT_MODEL_PROVIDER=deepseek
-CI_AGENT_MODEL_BASE_URL=https://api.deepseek.com
-CI_AGENT_MODEL_NAME=deepseek-chat
-CI_AGENT_API_KEY=your-api-key
-```
-
-Generic OpenAI-compatible example:
+通用 OpenAI-compatible 示例：
 
 ```env
 CI_AGENT_MODEL_PROVIDER=openai-compatible
@@ -77,386 +269,416 @@ CI_AGENT_MODEL_NAME=your-model
 CI_AGENT_API_KEY=your-key
 ```
 
-Use `openai-compatible` when a vendor exposes an OpenAI-compatible API but should not be configured as `deepseek` or `doubao`.
-
-LangSmith tracing is optional:
+### 4.4 TypeScript Analyzer 配置
 
 ```env
-LANGSMITH_TRACING=true
-LANGSMITH_API_KEY=your-langsmith-key
+TS_ANALYZER_DIR=./ts-analyzer
+```
+
+指向包含 `src/find_definitions.js` 等脚本的目录。
+
+### 4.5 LangSmith 配置
+
+```env
+LANGSMITH_TRACING=false
+LANGSMITH_API_KEY=
 LANGSMITH_PROJECT=ci-owner-agent-dev
+LANGSMITH_ENDPOINT=https://api.smith.langchain.com
 ```
 
-Tracing is enabled only when both `LANGSMITH_TRACING=true` and `LANGSMITH_API_KEY` are present. Keys are not printed.
+| 配置 | 说明 |
+| --- | --- |
+| `LANGSMITH_TRACING` | 是否开启 LangSmith tracing。 |
+| `LANGSMITH_API_KEY` | LangSmith API key。 |
+| `LANGSMITH_PROJECT` | trace 所属项目名。 |
+| `LANGSMITH_ENDPOINT` | LangSmith endpoint。 |
 
-Historical failure recall is optional and disabled by default. When `CI_AGENT_HISTORY_ENABLED=true`, the agent stores build metadata, notices, and normalized focused failure chunks in MongoDB, then exposes `history_search_similar_failures` to detect pre-existing failures. MongoDB write/search failures do not block analysis.
+只有 `LANGSMITH_TRACING=true` 且存在 `LANGSMITH_API_KEY` 时才会开启 tracing。
 
-MongoDB history chunks use schemaVersion 3 failure summaries and signatures extracted from focused Test stage / `make docker-test` logs. The older generic `find_error_chunks` windows and schemaVersion 2 Test-stage tails are still available to the Agent for log exploration, but are not written as primary history chunks and are ignored by history search. `CI_AGENT_FAILURE_CHUNK_TAIL_LINES` controls the focused Test stage tail size used before summary extraction and defaults to 500 lines.
+### 4.6 Mongo 历史配置
 
-Metrics are optional and disabled by default. When `CI_AGENT_METRICS_ENABLED=true`, each `analyze` / `analyze-local` run appends one JSONL record to `CI_AGENT_METRICS_FILE` (default `./runs/metrics/ci_analysis_metrics.jsonl`). The record includes total duration, stage timings, LLM calls, returned token usage, and responsibility item counts. Metrics write failures are reported as warnings and do not fail analysis.
-
-After switching to schemaVersion 3, clear old noisy or schemaVersion 2 chunks manually:
-
-```bash
-python scripts/clear_history_failure_chunks.py
+```env
+CI_AGENT_HISTORY_ENABLED=false
+CI_AGENT_HISTORY_MONGO_URI=mongodb://localhost:27017
+CI_AGENT_HISTORY_MONGO_DB=ci_owner_agent
+CI_AGENT_HISTORY_MAX_CANDIDATES=5
+CI_AGENT_FAILURE_CHUNK_TAIL_LINES=500
 ```
 
-Manual Mongo equivalent:
+| 配置 | 说明 |
+| --- | --- |
+| `CI_AGENT_HISTORY_ENABLED` | 是否启用 Mongo 历史记录与历史失败查询。 |
+| `CI_AGENT_HISTORY_MONGO_URI` | MongoDB URI。 |
+| `CI_AGENT_HISTORY_MONGO_DB` | 数据库名。 |
+| `CI_AGENT_HISTORY_MAX_CANDIDATES` | 历史候选失败最大数量。 |
+| `CI_AGENT_FAILURE_CHUNK_TAIL_LINES` | 提取 focused failure summaries 前读取的测试阶段尾部行数。 |
+
+### 4.7 metrics 配置
+
+```env
+CI_AGENT_METRICS_ENABLED=false
+CI_AGENT_METRICS_FILE=./runs/metrics/ci_analysis_metrics.jsonl
+```
+
+| 配置 | 说明 |
+| --- | --- |
+| `CI_AGENT_METRICS_ENABLED` | 是否开启分析耗时和 token 记录。 |
+| `CI_AGENT_METRICS_FILE` | JSONL 输出文件。 |
+
+### 4.8 企业微信通知与反馈配置
+
+```env
+CI_AGENT_WECOM_NOTIFY_ENABLED=false
+CI_AGENT_WECOM_WEBHOOK_URL=
+CI_AGENT_WECOM_NOTIFY_DRY_RUN=true
+CI_AGENT_WECOM_NOTIFY_ON_SUCCESS=false
+CI_AGENT_WECOM_NOTIFY_ON_NO_OWNER=true
+CI_AGENT_WECOM_USER_MAPPING_FILE=
+CI_AGENT_WECOM_MENTION_MODE=userid
+CI_AGENT_FEEDBACK_BASE_URL=
+CI_AGENT_NOTIFICATION_DEDUP_ENABLED=true
+```
+
+| 配置 | 说明 |
+| --- | --- |
+| `CI_AGENT_WECOM_NOTIFY_ENABLED` | 是否默认发送企业微信通知。 |
+| `CI_AGENT_WECOM_WEBHOOK_URL` | 企业微信群机器人 webhook。 |
+| `CI_AGENT_WECOM_NOTIFY_DRY_RUN` | dry-run 时只生成 markdown，不真正发送。 |
+| `CI_AGENT_WECOM_NOTIFY_ON_SUCCESS` | 是否通知成功构建。默认 false。 |
+| `CI_AGENT_WECOM_NOTIFY_ON_NO_OWNER` | 无高可信责任人时是否仍通知。 |
+| `CI_AGENT_WECOM_USER_MAPPING_FILE` | CSV 用户映射文件，Mongo 映射不可用时可回退。 |
+| `CI_AGENT_WECOM_MENTION_MODE` | `userid` 或 `name`。`userid` 会尽量生成 `<@userid>`。 |
+| `CI_AGENT_FEEDBACK_BASE_URL` | 反馈页基础 URL，用于通知中生成反馈链接。 |
+| `CI_AGENT_NOTIFICATION_DEDUP_ENABLED` | 是否根据 notice hash 做通知去重。 |
+
+---
+
+## 5. 启动与命令说明
+
+所有命令都通过模块入口运行：
+
+```powershell
+python -m ci_owner_agent <command> [options]
+```
+
+### 5.1 本地日志分析：`analyze-local`
+
+用于分析已经下载到本地的 Jenkins console log。适合离线回放、批量测试和调试。
+
+```powershell
+python -m ci_owner_agent analyze-local `
+  --repo fx-code `
+  --job services/fx-code-unittest `
+  --build 5064 `
+  --branch dev `
+  --base-commit <last-success-commit> `
+  --head-commit <failed-build-commit> `
+  --console-file .\samples\company_log\company-unittest-5064.log `
+  --build-url local://services/fx-code-unittest/5064 `
+  --last-success-build 5060
+```
+
+参数说明：
+
+| 参数 | 必填 | 说明 |
+| --- | --- | --- |
+| `--repo` | 是 | repo cache 中的仓库名，例如 `fx-code`。 |
+| `--job` | 是 | Jenkins job 名。 |
+| `--build` | 是 | 构建号。 |
+| `--branch` | 否 | 分支名。 |
+| `--base-commit` | 是 | diff 起点，通常是上次成功构建 commit。 |
+| `--head-commit` | 是 | 当前失败构建实际 checkout commit。 |
+| `--console-file` | 是 | 本地 console log 文件。 |
+| `--build-url` | 是 | 展示用构建链接，可用 `local://...`。 |
+| `--log-tail-lines` | 否 | 日志尾部读取行数，默认来自配置。 |
+| `--result` | 否 | 手动覆盖日志中检测到的构建结果。 |
+| `--ignore-checkout-commit-mismatch` | 否 | 忽略日志 checkout commit 与 `--head-commit` 不一致的保护。 |
+| `--last-success-build` | 否 | 上次成功构建号，用于历史查询边界。 |
+| `--notify` | 否 | 本次分析后发送通知。 |
+| `--notify-dry-run` | 否 | 只预览通知，不发送。 |
+| `--force-notify` | 否 | 忽略通知去重，强制发送。 |
+
+`analyze-local` 会检查日志中的 `Checking out Revision <sha>` 或 `git checkout -f <sha>`。如果日志实际 checkout commit 和 `--head-commit` 不一致，会直接失败，避免对错误 commit 做定责。
+
+### 5.2 Jenkins 在线分析：`analyze`
+
+用于直接从 Jenkins 读取构建信息和 console log。
+
+```powershell
+python -m ci_owner_agent analyze `
+  --job services/fx-code-unittest `
+  --build 5064 `
+  --repo fx-code `
+  --log-tail-lines 500 `
+  --notify
+```
+
+参数说明：
+
+| 参数 | 必填 | 说明 |
+| --- | --- | --- |
+| `--job` | 是 | Jenkins job 名。 |
+| `--build` | 是 | Jenkins 构建号。 |
+| `--repo` | 是 | repo cache 中的仓库名。 |
+| `--log-tail-lines` | 否 | Jenkins console log tail 行数。 |
+| `--notify` | 否 | 本次分析后发送通知。 |
+| `--notify-dry-run` | 否 | 通知 dry-run。 |
+| `--force-notify` | 否 | 忽略通知去重。 |
+
+`analyze` 会读取当前构建和 `lastSuccessfulBuild`，用上次成功 commit 作为 base commit，再进入正式分析流程。
+
+### 5.3 发送或预览已有 notice：`notify-notice`
+
+```powershell
+python -m ci_owner_agent notify-notice `
+  --notice-file .\runs\xxx.notice.json `
+  --dry-run
+```
+
+参数说明：
+
+| 参数 | 说明 |
+| --- | --- |
+| `--notice-file` | 已生成的 `CiResponsibilityNotice` JSON 文件。 |
+| `--dry-run` | 只打印 Markdown，不发送。 |
+| `--force` | 忽略通知去重。 |
+| `--feedback-base-url` | 覆盖配置中的反馈页基础 URL。 |
+
+### 5.4 人工反馈：`feedback`
+
+提交反馈：
+
+```powershell
+python -m ci_owner_agent feedback apply `
+  --job services/fx-code-unittest `
+  --build 5064 `
+  --failure-id F1 `
+  --action correct_owner `
+  --owner-name "张三" `
+  --owner-email zhangsan@example.com `
+  --reviewer "reviewer" `
+  --note "修正责任人"
+```
+
+查看反馈：
+
+```powershell
+python -m ci_owner_agent feedback list `
+  --job services/fx-code-unittest `
+  --build 5064
+```
+
+支持的 `--action`：
+
+```text
+confirm_owner
+correct_owner
+mark_flaky
+mark_no_owner
+```
+
+### 5.5 启动反馈服务：`serve-feedback`
+
+```powershell
+python -m ci_owner_agent serve-feedback --host 0.0.0.0 --port 8765
+```
+
+服务接口：
+
+| 路径 | 说明 |
+| --- | --- |
+| `GET /health` | 健康检查。 |
+| `GET /feedback?job=...&build=...&token=...` | 反馈页面。 |
+| `POST /feedback` | 提交反馈。 |
+| `GET /api/wecom-users/search?q=...` | 搜索企业微信用户映射。 |
+
+如果配置了 `CI_AGENT_FEEDBACK_SHARED_TOKEN`，访问反馈页和用户搜索接口时需要带 `token`。
+
+---
+
+## 6. 批量测试脚本说明
+
+### 6.1 批量分析本地日志：`scripts/batch_analyze_company_logs.py`
+
+适用于已经下载到本地的一批 Jenkins console log。脚本会按构建号排序，自动从成功构建推导后续失败构建的 base commit。
+
+示例：
+
+```powershell
+python .\scripts\batch_analyze_company_logs.py `
+  --log-dir .\samples\company_log `
+  --log-glob "company-unittest-*.log" `
+  --repo fx-code `
+  --job services/fx-code-unittest `
+  --branch dev `
+  --initial-base-commit <first-known-success-commit> `
+  --build-from 5060 `
+  --build-to 5112 `
+  --timeout-seconds 900 `
+  --out-dir .\runs\company-log-batch
+```
+
+常用参数：
+
+| 参数 | 说明 |
+| --- | --- |
+| `--log-dir` | 日志目录。 |
+| `--log-glob` | 日志文件匹配规则，默认 `*.log`。 |
+| `--out-dir` | 输出目录。默认 `runs/company-log-batch-时间戳`。 |
+| `--env-file` | 加载的 env 文件，默认 `.env`。 |
+| `--env-override` | 允许 env 文件覆盖当前环境变量。 |
+| `--repo` | repo 名，默认 `fx-code`。 |
+| `--job` | job 名，默认 `services/fx-code-unittest`。 |
+| `--branch` | 分支名，默认 `dev`。 |
+| `--build-url-prefix` | 本地 build URL 前缀。 |
+| `--initial-base-commit` | 第一段失败前的已知成功 commit。 |
+| `--build-from` / `--build-to` | 构建号范围过滤。 |
+| `--limit` | 最多执行多少个失败构建。 |
+| `--timeout-seconds` | 单个构建分析超时。 |
+| `--dry-run` | 只生成命令，不执行。 |
+| `--resume` | 已有 notice 时跳过。 |
+| `--fetch-trace` | 从 LangSmith 拉取 trace。 |
+| `--trace-wait-seconds` | 等待 trace 出现的最长时间。 |
+
+输出目录结构：
+
+```text
+runs/company-log-batch-xxxx/
+  index.jsonl
+  summary.csv
+  notices/*.notice.json
+  stdout/*.stdout.txt
+  stderr/*.stderr.txt
+  traces/*.trace.json
+```
+
+`summary.csv` 会包含 owner、责任项数量、继承责任人、当前构建责任人、unresolved 数量、历史匹配信息等字段。
+
+### 6.2 批量分析 Jenkins 构建号：`scripts/batch_analyze_jenkins_builds.py`
+
+适用于 Jenkins 仍可访问的场景，脚本会对指定构建号逐个执行 `python -m ci_owner_agent analyze`。
+
+示例：
+
+```powershell
+python .\scripts\batch_analyze_jenkins_builds.py `
+  --job services/fx-code-unittest `
+  --repo fx-code `
+  --build-from 5060 `
+  --build-to 5112 `
+  --log-tail-lines 500 `
+  --timeout-seconds 900 `
+  --out-dir .\runs\jenkins-batch
+```
+
+也可以指定离散构建号：
+
+```powershell
+python .\scripts\batch_analyze_jenkins_builds.py `
+  --job services/fx-code-unittest `
+  --repo fx-code `
+  --builds 5088,5094,5095
+```
+
+常用参数：
+
+| 参数 | 说明 |
+| --- | --- |
+| `--job` | Jenkins job 名。 |
+| `--repo` | repo 名。 |
+| `--builds` | 逗号分隔构建号。 |
+| `--build-from` / `--build-to` | 构建号范围。 |
+| `--log-tail-lines` | Jenkins log tail 行数。 |
+| `--out-dir` | 输出目录。 |
+| `--env-file` / `--env-override` | 环境变量文件加载。 |
+| `--fetch-trace` | 拉取 LangSmith trace。 |
+| `--timeout-seconds` | 单个构建超时。 |
+| `--resume` | 已有 notice 时跳过。 |
+| `--dry-run` | 只输出命令。 |
+| `--notify` | 分析后发送通知。 |
+| `--notify-dry-run` | 通知 dry-run。 |
+| `--force-notify` | 强制通知。 |
+
+### 6.3 清理历史 failure chunks
+
+当历史 chunk schema 或抽取逻辑变更后，可以清理旧历史 chunks：
+
+```powershell
+python .\scripts\clear_history_failure_chunks.py
+```
+
+等价 Mongo 命令：
 
 ```javascript
 use ci_owner_agent
 db.ci_failure_chunks.deleteMany({})
 ```
 
-## Local Repo Cache
+---
 
-The Git cache must already exist. The tool does not guess or clone remote URLs.
+## 7. 输出结果说明
 
-Supported layouts:
-
-```text
-{CI_AGENT_REPO_CACHE_DIR}/{repo}
-{CI_AGENT_REPO_CACHE_DIR}/{repo}.git
-```
-
-Ordinary Git analysis supports both normal clones and bare mirrors: diff files, commit lists, keyword search, and file content can read commit objects directly without checkout.
-
-TypeScript Program analysis is different. `ts_find_definitions` and `ts_find_callers` only support a normal working-tree repo. They checkout the agent-owned analysis repo to the requested commit in detached HEAD mode, then create the TypeScript Program from the real project `tsconfig`. Do not point `CI_AGENT_REPO_CACHE_DIR` at a human developer working copy. Use a dedicated agent cache, for example `E:/workspace/temp/fx-code`.
-
-## Run analyze-local
-
-```bash
-python -m ci_owner_agent analyze-local ^
-  --repo fx-code ^
-  --job services/fx-code-unittest ^
-  --build 5064 ^
-  --branch dev ^
-  --base-commit def456 ^
-  --head-commit abc123 ^
-  --console-file samples/company_log/company-unittest-5064.log ^
-  --build-url local://services/fx-code-unittest/5064 ^
-  --log-tail-lines 500
-```
-
-Optional `--result SUCCESS|FAILURE|UNSTABLE|ABORTED|UNKNOWN` overrides the status detected from `Finished: ...` in the log.
-
-`analyze-local` also checks whether the console log contains `Checking out Revision <sha>` or `git checkout -f <sha>`. If that commit differs from `--head-commit`, the command fails before LLM analysis so responsibility is not assigned against the wrong commit. Rerun with the checkout SHA shown in the error, or pass `--ignore-checkout-commit-mismatch` only when you intentionally want to bypass this guard.
-
-## Run analyze
-
-```bash
-python -m ci_owner_agent analyze ^
-  --job services/fx-code-unittest ^
-  --build 5064 ^
-  --repo fx-code ^
-  --log-tail-lines 500
-```
-
-Jenkins analyze mode is implemented. It reads build metadata and console logs from Jenkins, short-circuits `SUCCESS` and `ABORTED`, and for failed builds compares the failed commit against `lastSuccessfulBuild` before running the existing responsibility analysis.
-
-In real LLM mode, the outer orchestrator still performs deterministic gates first. `SUCCESS` and `ABORTED` never enter the Agent. Failed builds enter a LangChain tool-calling Agent, which reads logs through tools instead of receiving the full Jenkins log at once.
-
-The real Agent uses LangChain v1 `create_agent` with `response_format=CiResponsibilityNotice`. Agent invocation uses the v1 `messages` input format. If a provider cannot produce structured output, the project still falls back to text parsing plus one repair attempt, followed by local validator/scorer checks.
-
-If an OpenAI-compatible model hangs during structured output / ToolStrategy, try:
-
-```env
-CI_AGENT_MODEL_TIMEOUT_SECONDS=180
-CI_AGENT_MODEL_MAX_RETRIES=2
-CI_AGENT_RESPONSE_FORMAT=json_text
-```
-
-`json_text` mode omits LangChain structured `response_format`; the model is still required by prompt to output JSON, and the result still goes through local JSON parse, one repair attempt, and validator/scorer.
-
-`CI_AGENT_MODEL_TIMEOUT_SECONDS` controls a single model HTTP request timeout. `CI_AGENT_MODEL_MAX_RETRIES` controls retries for model timeouts or transient failures. For noisy CI batches, 180 seconds with 2 retries is a practical starting point; 300 seconds with 2 retries is useful for slower OpenAI-compatible gateways. These settings only reduce the impact of occasional model/API read timeouts. The main latency reduction comes from keeping the initial Agent input compact: full `logTail.content` is omitted, focused `failureSummaries` are included, and history precheck is passed in compact form.
-
-Recommended LangChain v1 packages:
+CLI 会输出严格 JSON，主要字段包括：
 
 ```text
-langchain>=1.3,<2
-langchain-openai>=1.0,<2
-langgraph>=1.2,<2
+job
+buildNumber
+buildUrl
+result
+branch
+headCommit
+baseCommit
+owner
+failureReason
+evidence
+suggestions
+hasHighConfidenceOwner
+responsibilityItems
 ```
 
-Verify the environment with:
+其中 `owner` 是顶层摘要，`responsibilityItems` 是更推荐关注的逐失败项责任判断。对于多失败构建，顶层可能是 `无高可信责任人`，但 `responsibilityItems` 里仍可能同时包含 inherited owner 和 current build owner。
 
-```bash
-python -c "from langchain.agents import create_agent; print('ok')"
-python -m pip check
-```
+---
 
-## TypeScript Analyzer
+## 8. 测试
 
-The TypeScript analyzer lives under `ts-analyzer/` and is called by Python through `node` subprocesses. It provides:
+运行全部测试：
 
-- `ts_analyze_changed_functions`
-- `ts_find_definitions`
-- `ts_find_callers`
-
-`TS_ANALYZER_DIR` must point to the directory containing `src/find_definitions.js`, for example:
-
-```text
-E:/workspace/lanchain/ci-owner-agent/ts-analyzer
-```
-
-Install its Node dependency before using the successful TypeScript paths:
-
-```bash
-cd ts-analyzer
-npm install
-```
-
-If Node.js, `typescript`, `tsconfig.json`, or Program creation is unavailable, the Python tools return structured errors and the main analysis continues.
-
-`ts_find_definitions` and `ts_find_callers` analyze the requested `commit` by checking out the dedicated analysis repository to that commit in detached HEAD mode before creating the TypeScript Program. The project intentionally does not create temporary worktrees or temporary checkout directories; the repo cache is assumed to be agent-owned. In the LangChain Agent wrapper these tools use `force_checkout=True`, because the analysis repository is considered Agent-owned. This operation does not run `git clean -fdx`, so it does not delete `node_modules`.
-
-The analyzer always uses the real project `tsconfig` passed by the caller, defaulting to `tsconfig.json`. It does not provide a fallback tsconfig and does not generate `tsconfig.ci-agent.json`.
-
-Prepare target repo dependencies once in the agent-owned repo:
-
-```bash
-cd E:/ci-agent-cache/fx-code
-npm install
-```
-
-`git checkout --detach --force <commit>` does not delete `node_modules`, and this project never runs `git clean -fdx`, so installed dependencies are reused across later checkouts. You usually only need to reinstall when `package.json` or a lock file changes, or when `node_modules` is deleted. If `tsconfig.json` extends an npm package such as `nstarter-tsconfig`, that package must already exist under the target repo's `node_modules`.
-
-Use `check_node_dependencies_for_analysis(repo, tsconfig="tsconfig.json")` to check whether `node_modules`, `tsconfig`, extended config files, and dependency marker hashes are ready. It writes `.ci-owner-agent/deps.json` with hashes of `package.json`, `package-lock.json`, `pnpm-lock.yaml`, and `yarn.lock`. The check does not install by default. If explicitly called with `install=True`, it chooses `npm install`, `pnpm install`, or `yarn install` from the lock file and returns structured install errors instead of crashing.
-
-## Output JSON
-
-Output is a `CiResponsibilityNotice` with:
-
-- `job`, `buildNumber`, `buildUrl`, `result`, `branch`
-- `headCommit`, `baseCommit`
-- `owner`: `high_confidence`, `medium_confidence`, or `no_high_confidence_owner`
-- `failureReason`
-- `evidence`
-- `suggestions`
-- `hasHighConfidenceOwner`
-
-The CLI prints JSON only, without Markdown wrapping.
-
-## High Confidence Rules
-
-High confidence requires at least two supporting evidence types. Accepted combinations include:
-
-- log clue plus changed diff file
-- log keyword plus hit inside changed files
-- changed file diff that contains the same symbol, file, or keyword found in logs
-- log symbol plus TypeScript definition/caller relationship plus relevant diff
-
-Only "someone committed in the interval" is not enough. Only "a file changed" is not enough. Only a keyword match is not enough. `node_modules` definitions can be background type evidence but cannot be responsibility files. Validator/scorer downgrades weak or contradictory outputs to `无高可信责任人`.
-
-## ABORTED Strategy
-
-`ABORTED` builds skip normal code responsibility analysis. The notice explains that the likely class is Jenkins Pipeline context, environment, or manual interruption. Jenkinsfile/Pipeline responsibility analysis is intentionally left for a later phase.
-
-## Real Log Data
-
-Real Jenkins logs can be placed under `samples/company_log/`. The system detects status from the final Jenkins line:
-
-- `Finished: SUCCESS`
-- `Finished: FAILURE`
-- `Finished: ABORTED`
-- missing marker => `UNKNOWN`
-
-Do not classify failures from `ERROR`, `FAILED`, `Exception`, or `Timeout` alone because successful logs may contain those words.
-
-## Tests
-
-```bash
+```powershell
 python -m pytest
 ```
 
-Tests create temporary Git repositories under `tmp_path`; they do not call Jenkins, a real LLM, or any company repository.
-
-## Known Limits
-
-- Jenkins API tools and `JenkinsLogProvider` are implemented, but require `JENKINS_URL` and optional credentials in `.env`.
-- TypeScript Compiler API tools are implemented as subprocess-backed optional analysis helpers.
-- `ts_find_definitions` and `ts_find_callers` may detach-checkout the agent-owned analysis repository to the requested commit; do not point `CI_AGENT_REPO_CACHE_DIR` at a human developer working copy.
-- TypeScript dependency checks do not auto-install unless explicitly requested with `install=True`; real project `tsconfig` and installed npm dependencies must be available in the target repo.
-- Real LLM mode requires LangChain v1, `langchain-openai`, and provider credentials. Fake mode remains the default for offline pytest and always returns `无高可信责任人` for failed builds.
-- `repo_sync` errors are warnings in local analysis so temporary repos without remotes can still be analyzed; formal Jenkins mode should treat sync failure as blocking for high-confidence ownership.
-- High-confidence ownership is produced only by real LLM analysis plus local validators; weak or contradictory outputs are downgraded to `无高可信责任人`.
-
-## Smoke Test
+如果只想看某个测试文件：
 
 ```powershell
-cd E:\workspace\lanchain\ci-owner-agent
-python -m pytest -q
-
-$env:CI_AGENT_MODEL_PROVIDER="fake"
-python -m ci_owner_agent analyze-local `
-  --repo fx-code `
-  --job services/fx-code-unittest `
-  --build 5064 `
-  --branch dev `
-  --base-commit <base> `
-  --head-commit <head> `
-  --console-file samples/company_log/company-unittest-5064.log `
-  --build-url local://services/fx-code-unittest/5064
+python -m pytest tests/test_metrics.py
+python -m pytest tests/test_history_store.py
 ```
 
-Real LLM example:
+---
 
-```powershell
-$env:CI_AGENT_MODEL_PROVIDER="doubao"
-$env:CI_AGENT_MODEL_BASE_URL="https://ark.cn-beijing.volces.com/api/v3"
-$env:CI_AGENT_MODEL_NAME="doubao-seed-2-0-lite-260428"
-$env:CI_AGENT_API_KEY="..."
-$env:LANGSMITH_TRACING="true"
-$env:LANGSMITH_API_KEY="..."
-$env:LANGSMITH_PROJECT="ci-owner-agent-dev"
+## 9. 常见注意事项
 
-python -m ci_owner_agent analyze-local `
-  --repo fx-code `
-  --job services/fx-code-unittest `
-  --build 5104 `
-  --branch dev `
-  --base-commit <base> `
-  --head-commit <head> `
-  --console-file samples/company_log/company-unittest-5104.log `
-  --build-url local://services/fx-code-unittest/5104
-```
+1. **不要把 repo cache 指向人工开发目录**：TypeScript 工具会 detached checkout。
+2. **不要把 Docker/Jenkins wrapper 当根因**：真正定责必须寻找内层错误，例如测试失败、TS 编译错误、依赖版本错误等。
+3. **历史继承必须有足够相似度或 AI semantic match**：不能仅因为都失败在同一阶段就继承。
+4. **metrics token 不估算**：只有 provider 返回 usage 时才累计 token。
+5. **通知失败不应阻塞分析**：通知失败只 warning。
+6. **反馈会影响后续继承**：`correct_owner` 会修正后续继承责任人，`mark_flaky` / `mark_no_owner` 会阻断继承。
 
-## Batch Company Logs
+---
 
-`scripts/batch_analyze_company_logs.py` scans local Jenkins console logs by build number, keeps the previous successful build commit, and calls `analyze-local` for runnable failed builds. It writes `index.jsonl`, `summary.csv`, stdout/stderr, notices, and optional traces under the output directory.
+## 10. 推荐调试顺序
 
-Useful parameters:
-
-```powershell
-python .\scripts\batch_analyze_company_logs.py `
-  --log-dir .\samples\company_log `
-  --out-dir .\runs\company-log-batch-5072-5076-dryrun `
-  --env-file .\.env `
-  --build-from 5072 `
-  --build-to 5076 `
-  --dry-run
-```
-
-- `--build-from`: only execute/report logs with `buildNumber >= value`.
-- `--build-to`: only execute/report logs with `buildNumber <= value`.
-- Range filtering happens after scanning all logs, so a failed build inside the range still gets the correct previous successful commit and `--last-success-build` from earlier logs outside the range.
-- `--limit` applies after build range filtering.
-- `--dry-run` prints commands without calling the real LLM.
-
-## Batch Jenkins Builds
-
-`scripts/batch_analyze_jenkins_builds.py` runs the formal Jenkins mode in a batch. It calls `python -m ci_owner_agent analyze`, reads build metadata and console logs from Jenkins, and lets `analyze_jenkins` resolve `lastSuccessfulBuild`, `baseCommit`, and `headCommit`. It does not read local console files and does not pass `analyze-local` arguments.
-
-Range example:
-
-```powershell
-python .\scripts\batch_analyze_jenkins_builds.py `
-  --job CI-test/unintest-MatureLeek `
-  --repo fx-code `
-  --build-from 7 `
-  --build-to 13 `
-  --log-tail-lines 200 `
-  --out-dir .\runs\jenkins-batch-unintest-MatureLeek-7-13 `
-  --fetch-trace `
-  --trace-wait-seconds 60
-```
-
-Specific builds:
-
-```powershell
-python .\scripts\batch_analyze_jenkins_builds.py `
-  --job CI-test/unintest-MatureLeek `
-  --repo fx-code `
-  --builds 7,13 `
-  --log-tail-lines 200 `
-  --out-dir .\runs\jenkins-batch-ai-history-7-13 `
-  --fetch-trace
-```
-
-Notification dry run:
-
-```powershell
-python .\scripts\batch_analyze_jenkins_builds.py `
-  --job CI-test/unintest-MatureLeek `
-  --repo fx-code `
-  --build-from 7 `
-  --build-to 13 `
-  --notify-dry-run
-```
-
-Formal notification:
-
-```powershell
-python .\scripts\batch_analyze_jenkins_builds.py `
-  --job CI-test/unintest-MatureLeek `
-  --repo fx-code `
-  --build-from 7 `
-  --build-to 13 `
-  --notify
-```
-
-The output layout matches the local batch script: `index.jsonl`, `summary.csv`, `notices/`, `stdout/`, `stderr/`, and optional `traces/`. When traces are fetched, the summary includes compact `aiHistoryPrecheck.diagnostics` counters such as historical build/fact counts, compared pairs, accepted candidates, and skipped reasons.
-
-## WeCom User Mapping
-
-Notifications can mention real WeCom users when a maintained Git author mapping CSV is configured. The notice JSON is not changed; mapping is used only while formatting the WeCom markdown.
-
-Export authors:
-
-```powershell
-python .\scripts\export_git_author_wecom_mapping.py `
-  --repo E:\workspace\temp\fx-code `
-  --out-dir .\runs\git-author-mapping-fx-code
-```
-
-Maintain this file manually:
+首次接入时建议按以下顺序验证：
 
 ```text
-runs/git-author-mapping-fx-code/git_author_wecom_mapping.csv
+1. python -m pytest
+2. fake provider 下跑 analyze-local，确认 CLI / Git cache / Mongo / metrics 流程可用
+3. 开启真实 LLM，单个失败构建跑 analyze-local
+4. 开启 CI_AGENT_HISTORY_ENABLED=true，连续跑多次构建验证历史继承
+5. 开启 CI_AGENT_METRICS_ENABLED=true，观察耗时和 token
+6. 开启企业微信 dry-run，确认 Markdown 和反馈链接
+7. 关闭 dry-run，正式发送通知
+8. 接入 Jenkins analyze 或批量脚本
 ```
-
-Fill `wecomUserId`, then configure:
-
-```env
-CI_AGENT_WECOM_USER_MAPPING_FILE=./runs/git-author-mapping-fx-code/git_author_wecom_mapping.csv
-CI_AGENT_WECOM_MENTION_MODE=userid
-```
-
-Import the same CSV into MongoDB so the feedback page can search and auto-fill owners:
-
-```powershell
-python .\scripts\import_git_author_wecom_mapping_to_mongo.py `
-  --csv-file .\runs\git-author-mapping-fx-code\git_author_wecom_mapping.csv `
-  --mongo-uri $env:CI_AGENT_HISTORY_MONGO_URI `
-  --mongo-db $env:CI_AGENT_HISTORY_MONGO_DB `
-  --clear
-```
-
-Use `--dry-run` first to preview row counts without writing. The importer stores rows in `ci_wecom_users`; the feedback page queries this collection through `/api/wecom-users/search`, groups aliases by `wecomUserId`, and prefers a `@fanruan.com` email when multiple git author emails map to the same user. When a reviewer selects a suggested owner, the feedback record stores `correctedOwnerWeComUserId` while keeping the existing notice schema unchanged.
-
-Start the feedback server, then open the feedback link from a notice:
-
-```powershell
-python -m ci_owner_agent serve-feedback
-```
-
-In the feedback page, type a WeCom userid, git author name, or email keyword in the owner field; selecting a suggestion fills the preferred email automatically. If `ci_wecom_users` is empty or MongoDB is unavailable, the page still allows manual owner name/email input and feedback submission.
-
-Preview:
-
-```powershell
-python -m ci_owner_agent notify-notice `
-  --notice-file .\runs\xxx\notices\xxx.notice.json `
-  --dry-run `
-  --feedback-base-url "http://ci-agent.xxx/feedback"
-```
-
-Send:
-
-```powershell
-python -m ci_owner_agent notify-notice `
-  --notice-file .\runs\xxx\notices\xxx.notice.json `
-  --force
-```
-
-`CI_AGENT_WECOM_MENTION_MODE=userid` uses `<@userid>` when mapped and falls back to `@owner.name`. `CI_AGENT_WECOM_MENTION_MODE=name` always uses `@owner.name`, which is useful for debugging or compatibility.
