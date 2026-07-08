@@ -8,6 +8,7 @@ from ci_owner_agent.orchestrator import (
     _select_build_level_no_owner_decision,
     _with_precomputed_failure_context,
     analyze_failed_build,
+    analyze_local,
 )
 from ci_owner_agent.schemas import BuildInfo, ChangedFile, CiResponsibilityNotice, FailureFact, FailureFactExtractionResult
 from ci_owner_agent.services.git_client import GitClient
@@ -21,6 +22,33 @@ class NoSummaryProvider:
 
     def find_focused_failure_chunks(self, tail_lines=500, max_chunks=1):
         return {"chunks": [{"content": "src/index.ts(10,27): error TS2305"}]}
+
+
+class RecordingGitClient:
+    def __init__(self):
+        self.commit_ranges = []
+        self.diff_ranges = []
+
+    def sync(self, repo):
+        return {"ok": True}
+
+    def get_commits_between(self, repo, base_commit, head_commit):
+        self.commit_ranges.append((base_commit, head_commit))
+        return {
+            "ok": True,
+            "commits": [
+                {
+                    "hash": head_commit,
+                    "authorName": "Test User",
+                    "authorEmail": "test@example.com",
+                    "subject": "change",
+                }
+            ],
+        }
+
+    def get_diff_files(self, repo, base_commit, head_commit):
+        self.diff_ranges.append((base_commit, head_commit))
+        return {"ok": True, "files": [{"path": "packages/fxp-ai/src/index.ts", "status": "M", "additions": 1, "deletions": 0}]}
 
 
 class SummaryProvider:
@@ -296,6 +324,138 @@ def test_orchestrator_reuses_history_store_for_prechecks(monkeypatch, repo_cache
 
     assert calls["deterministic_store"] is store
     assert calls["ai_store"] is store
+
+
+def test_analyze_failed_build_uses_previous_commit_focus_range(monkeypatch, repo_cache, sample_repo, logs):
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    settings = replace(context.settings, history_enabled=False)
+    git_client = RecordingGitClient()
+    calls = {"agent": 0}
+
+    class DummyAgent:
+        def analyze(self, agent_context):
+            calls["agent"] += 1
+            payload = high_confidence_payload(context)
+            payload["baseCommit"] = "last-success"
+            payload["headCommit"] = "current"
+            return CiResponsibilityNotice.model_validate(payload)
+
+    monkeypatch.setattr("ci_owner_agent.orchestrator.create_responsibility_agent", lambda *args, **kwargs: DummyAgent())
+    build_info = BuildInfo(job=context.job, buildNumber=5088, result="FAILURE", buildUrl="local://job/5088", branch=context.branch, commit="current")
+
+    notice = analyze_failed_build(
+        sample_repo["repo"],
+        build_info,
+        "last-success",
+        "current",
+        SigSummaryProvider("sig-timeout"),
+        git_client,
+        allow_sync_failure=True,
+        settings=settings,
+        last_successful_build_number=5068,
+        previous_build_number=5087,
+        previous_commit="previous",
+    )
+
+    assert git_client.commit_ranges == [("previous", "current")]
+    assert git_client.diff_ranges == [("previous", "current")]
+    assert notice.baseCommit == "last-success"
+    assert notice.headCommit == "current"
+    assert calls["agent"] == 1
+
+
+def test_analyze_failed_build_falls_back_to_full_when_no_previous_commit(monkeypatch, repo_cache, sample_repo, logs):
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    settings = replace(context.settings, history_enabled=False)
+    git_client = RecordingGitClient()
+
+    class DummyAgent:
+        def analyze(self, agent_context):
+            return CiResponsibilityNotice.model_validate(high_confidence_payload(context))
+
+    monkeypatch.setattr("ci_owner_agent.orchestrator.create_responsibility_agent", lambda *args, **kwargs: DummyAgent())
+    build_info = BuildInfo(job=context.job, buildNumber=5088, result="FAILURE", buildUrl="local://job/5088", branch=context.branch, commit="current")
+
+    analyze_failed_build(
+        sample_repo["repo"],
+        build_info,
+        "last-success",
+        "current",
+        SigSummaryProvider("sig-timeout"),
+        git_client,
+        allow_sync_failure=True,
+        settings=settings,
+        last_successful_build_number=5068,
+    )
+
+    assert git_client.commit_ranges == [("last-success", "current")]
+    assert git_client.diff_ranges == [("last-success", "current")]
+
+
+def test_find_previous_build_from_mongo_when_cli_previous_missing(monkeypatch, repo_cache, sample_repo, logs):
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    settings = replace(context.settings, history_enabled=True)
+    store = make_store()
+    previous_notice = CiResponsibilityNotice.model_validate(high_confidence_payload(context))
+    previous_info = BuildInfo(job=context.job, buildNumber=5087, result="FAILURE", buildUrl="local://job/5087", branch=context.branch, commit="previous")
+    store.save_analysis(previous_info, previous_notice, "last-success", "previous", 5068, "last-success", [])
+    git_client = RecordingGitClient()
+
+    class DummyAgent:
+        def analyze(self, agent_context):
+            assert agent_context.changed_files[0].path == "packages/fxp-ai/src/index.ts"
+            return CiResponsibilityNotice.model_validate(high_confidence_payload(context))
+
+    monkeypatch.setattr("ci_owner_agent.orchestrator.create_responsibility_agent", lambda *args, **kwargs: DummyAgent())
+    build_info = BuildInfo(job=context.job, buildNumber=5088, result="FAILURE", buildUrl="local://job/5088", branch=context.branch, commit="current")
+
+    analyze_failed_build(
+        sample_repo["repo"],
+        build_info,
+        "last-success",
+        "current",
+        SigSummaryProvider("sig-timeout"),
+        git_client,
+        allow_sync_failure=True,
+        settings=settings,
+        last_successful_build_number=5068,
+        history_store=store,
+    )
+
+    assert git_client.commit_ranges == [("previous", "current")]
+    assert git_client.diff_ranges == [("previous", "current")]
+
+
+def test_analyze_local_accepts_previous_commit(monkeypatch, repo_cache, sample_repo, logs):
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    settings = replace(context.settings, history_enabled=False)
+    git_client = RecordingGitClient()
+
+    class DummyAgent:
+        def analyze(self, agent_context):
+            return CiResponsibilityNotice.model_validate(high_confidence_payload(context))
+
+    monkeypatch.setattr("ci_owner_agent.orchestrator.create_responsibility_agent", lambda *args, **kwargs: DummyAgent())
+
+    analyze_local(
+        repo=sample_repo["repo"],
+        job=context.job,
+        build=5088,
+        branch=context.branch,
+        base_commit="last-success",
+        head_commit="current",
+        console_file=str(logs["auth_failed"]),
+        build_url="local://job/5088",
+        git_client=git_client,
+        settings=settings,
+        ignore_checkout_commit_mismatch=True,
+        last_successful_build_number=5068,
+        previous_build_number=5087,
+        previous_commit="previous",
+    )
+
+    assert git_client.commit_ranges == [("previous", "current")]
+    assert git_client.diff_ranges == [("previous", "current")]
 
 
 def test_no_owner_decision_short_circuits_agent(monkeypatch, repo_cache, sample_repo, logs):

@@ -134,6 +134,7 @@ class LangChainResponsibilityAgent:
             except Exception as exc:
                 failure_summaries = {"chunks": [], "warning": f"failure summary extraction failed: {exc}"}
         log_tail = self.context.build_info.logTail
+        initial_scope = "focus" if self.context.investigation_scope and self.context.investigation_scope.has_focus_range else "full"
         payload = {
             "job": self.context.job,
             "buildNumber": self.context.build_number,
@@ -143,9 +144,13 @@ class LangChainResponsibilityAgent:
             "baseCommit": self.context.base_commit,
             "headCommit": self.context.head_commit,
             "lastSuccessfulBuildNumber": self.context.last_successful_build_number,
+            "investigationScope": self._compact_investigation_scope(),
+            "initialDiffScope": initial_scope,
+            "changedFilesScope": initial_scope,
             "changedFiles": [item.model_dump() for item in self.context.changed_files[:30]],
             "changedFilesTotal": len(self.context.changed_files),
             "changedFilesTruncated": len(self.context.changed_files) > 30,
+            "commitsScope": initial_scope,
             "commits": [item.model_dump() for item in self.context.commits[:20]],
             "commitsTotal": len(self.context.commits),
             "commitsTruncated": len(self.context.commits) > 20,
@@ -159,6 +164,12 @@ class LangChainResponsibilityAgent:
                 "必须基于工具证据。证据不足输出 no_high_confidence_owner。最终只输出 JSON。"
                 "如需更多 changed files 或 commits，请调用 repo_get_diff_files / repo_get_commits_between。"
                 "当前 Agent 正常只处理 FAILURE / UNSTABLE / UNKNOWN；SUCCESS / ABORTED 已由 orchestrator 处理。"
+                "investigationScope 描述调查范围：fullRange 是 lastSuccessfulBuild -> currentBuild，focusRange 是 previousBuild -> currentBuild。"
+                "当前初始 changedFiles/commits 来自 initialDiffScope，首次出现 failure 必须优先基于 focusRange 分析。"
+                "只有 focusRange 无法解释当前失败，才允许调用 repo_get_diff_files(scope=\"full\") / repo_get_commits_between(scope=\"full\") / repo_get_file_diff(scope=\"full\") 扩大到 fullRange。"
+                "如果调用 fullRange，必须在 reason/evidence 中说明 focusRange 证据不足的原因；不要一开始就全量分析 fullRange。"
+                "如果 focusRange 和 fullRange 都没有直接证据，输出 no_high_confidence_owner。"
+                "仅凭 fullRange 中某个可疑提交，不能 high_confidence 定责，除非能和失败日志直接关联。"
                 "failureSummaries 是当前构建最重要的失败摘要；如果存在，优先基于它判断失败测试名、错误类型、测试文件和栈。"
                 "不要默认读取 log tail；只有 failureSummaries/failureFacts 不足、需要原文证据、或需要验证关键词/文件路径/测试名时，才调用日志工具。"
                 "failureFacts 是 AI 从非结构化日志中提取的内层失败事实；如果 failureSummaries 为空但 failureFacts 非空，"
@@ -186,6 +197,22 @@ class LangChainResponsibilityAgent:
             ),
         }
         return json.dumps(payload, ensure_ascii=False)
+
+    def _compact_investigation_scope(self) -> dict[str, Any] | None:
+        scope = self.context.investigation_scope
+        if scope is None:
+            return None
+        return {
+            "mode": scope.mode,
+            "fullBaseCommit": scope.full_base_commit,
+            "fullHeadCommit": scope.full_head_commit,
+            "focusBaseCommit": scope.focus_base_commit,
+            "focusHeadCommit": scope.focus_head_commit,
+            "previousBuildNumber": scope.previous_build_number,
+            "previousBuildUrl": scope.previous_build_url,
+            "previousBuildResult": scope.previous_build_result,
+            "reason": scope.reason,
+        }
 
     def _compact_failure_summaries(self, summaries: dict[str, Any] | None) -> list[dict[str, Any]]:
         chunks = summaries.get("chunks", []) if isinstance(summaries, dict) else []

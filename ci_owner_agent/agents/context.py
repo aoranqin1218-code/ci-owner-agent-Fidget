@@ -6,6 +6,7 @@ from typing import Any
 from ci_owner_agent.config import Settings
 from ci_owner_agent.schemas import BuildInfo, ChangedFile, CommitInfo
 from ci_owner_agent.services.git_client import GitClient
+from ci_owner_agent.services.investigation_scope import InvestigationScope
 from ci_owner_agent.services.log_provider import LogProvider
 
 
@@ -26,6 +27,7 @@ class AgentRuntimeContext:
     git_client: GitClient
     settings: Settings
     last_successful_build_number: int | None = None
+    investigation_scope: InvestigationScope | None = None
     failure_summaries: dict[str, Any] | None = None
     failure_facts: dict[str, Any] | None = None
     history_precheck: dict[str, Any] | None = None

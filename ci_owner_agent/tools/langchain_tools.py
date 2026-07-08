@@ -143,33 +143,87 @@ def build_langchain_tools(context: AgentRuntimeContext) -> list[Any]:
             return blocked
         return {"status": context.log_provider.detect_final_status()}
 
-    def repo_get_commits_between() -> dict:
-        """Get commits between the context base and head commits."""
-        blocked = _guard_tool_call("repo_get_commits_between", {})
+    def _commit_range_for_scope(scope: str) -> tuple[str | None, str | None, str | None, str | None]:
+        normalized = (scope or "focus").strip().lower()
+        investigation_scope = context.investigation_scope
+        if normalized == "focus":
+            if investigation_scope and investigation_scope.has_focus_range:
+                return investigation_scope.focus_base_commit, investigation_scope.focus_head_commit, "focus", None
+            return context.base_commit, context.head_commit, "full", "focus range unavailable; using full range"
+        if normalized == "full":
+            warning = None
+            if investigation_scope and investigation_scope.has_focus_range:
+                warning = "expanded to fullRange; use only when focusRange evidence is insufficient"
+            return context.base_commit, context.head_commit, "full", warning
+        return None, None, normalized, f"unsupported scope: {scope}"
+
+    def _with_range_metadata(result: dict, *, requested_scope: str, effective_scope: str | None, base_commit: str | None, head_commit: str | None, warning: str | None) -> dict:
+        result = dict(result)
+        result["scope"] = effective_scope
+        result["requestedScope"] = requested_scope
+        result["baseCommit"] = base_commit
+        result["headCommit"] = head_commit
+        if warning:
+            result["warning"] = warning
+        return result
+
+    def repo_get_commits_between(scope: str = "focus") -> dict:
+        """Get commits in the investigation range. Use scope=focus first; use scope=full only when focusRange evidence is insufficient."""
+        blocked = _guard_tool_call("repo_get_commits_between", {"scope": scope})
         if blocked:
             return blocked
+        base_commit, head_commit, effective_scope, warning = _commit_range_for_scope(scope)
+        if warning and str(warning).startswith("unsupported scope"):
+            return {"ok": False, "error": warning, "scope": effective_scope}
         return _limit(
-            context.git_client.get_commits_between(context.repo, context.base_commit or "", context.head_commit or ""),
+            _with_range_metadata(
+                context.git_client.get_commits_between(context.repo, base_commit or "", head_commit or ""),
+                requested_scope=scope,
+                effective_scope=effective_scope,
+                base_commit=base_commit,
+                head_commit=head_commit,
+                warning=warning,
+            ),
             max_chars,
         )
 
-    def repo_get_diff_files() -> dict:
-        """Get files changed between the context base and head commits."""
-        blocked = _guard_tool_call("repo_get_diff_files", {})
+    def repo_get_diff_files(scope: str = "focus") -> dict:
+        """Get changed files in the investigation range. Use scope=focus first; use scope=full only when focusRange evidence is insufficient."""
+        blocked = _guard_tool_call("repo_get_diff_files", {"scope": scope})
         if blocked:
             return blocked
+        base_commit, head_commit, effective_scope, warning = _commit_range_for_scope(scope)
+        if warning and str(warning).startswith("unsupported scope"):
+            return {"ok": False, "error": warning, "scope": effective_scope}
         return _limit(
-            context.git_client.get_diff_files(context.repo, context.base_commit or "", context.head_commit or ""),
+            _with_range_metadata(
+                context.git_client.get_diff_files(context.repo, base_commit or "", head_commit or ""),
+                requested_scope=scope,
+                effective_scope=effective_scope,
+                base_commit=base_commit,
+                head_commit=head_commit,
+                warning=warning,
+            ),
             max_chars,
         )
 
-    def repo_get_file_diff(path: str, contextLines: int = 8) -> dict:
-        """Get the Git diff for one path between the context base and head commits."""
-        blocked = _guard_tool_call("repo_get_file_diff", {"path": path, "contextLines": contextLines})
+    def repo_get_file_diff(path: str, contextLines: int = 8, scope: str = "focus") -> dict:
+        """Get the Git diff for one path. Use scope=focus first; use scope=full only when focusRange evidence is insufficient."""
+        blocked = _guard_tool_call("repo_get_file_diff", {"path": path, "contextLines": contextLines, "scope": scope})
         if blocked:
             return blocked
+        base_commit, head_commit, effective_scope, warning = _commit_range_for_scope(scope)
+        if warning and str(warning).startswith("unsupported scope"):
+            return {"ok": False, "error": warning, "scope": effective_scope}
         return _limit(
-            context.git_client.get_file_diff(context.repo, context.base_commit or "", context.head_commit or "", path, contextLines),
+            _with_range_metadata(
+                context.git_client.get_file_diff(context.repo, base_commit or "", head_commit or "", path, contextLines),
+                requested_scope=scope,
+                effective_scope=effective_scope,
+                base_commit=base_commit,
+                head_commit=head_commit,
+                warning=warning,
+            ),
             max_chars,
         )
 
@@ -203,22 +257,32 @@ def build_langchain_tools(context: AgentRuntimeContext) -> list[Any]:
             max_chars,
         )
 
-    def repo_keyword_search(keywords: list[str], scope: str = "changed_files", paths: list[str] | None = None, maxMatches: int = 50) -> dict:
+    def repo_keyword_search(keywords: list[str], scope: str = "changed_files", paths: list[str] | None = None, maxMatches: int = 50, diffScope: str = "focus") -> dict:
         """Search keywords. Valid scope values: changed_files, paths, whole_repo. Use scope=paths with paths=[...] for specific directories/files. Aliases repo/repository/all are accepted as whole_repo."""
-        blocked = _guard_tool_call("repo_keyword_search", {"keywords": keywords, "scope": scope, "paths": paths or [], "maxMatches": maxMatches})
+        blocked = _guard_tool_call("repo_keyword_search", {"keywords": keywords, "scope": scope, "paths": paths or [], "maxMatches": maxMatches, "diffScope": diffScope})
         if blocked:
             return blocked
+        base_commit, head_commit, effective_scope, warning = _commit_range_for_scope(diffScope)
+        if warning and str(warning).startswith("unsupported scope"):
+            return {"ok": False, "error": warning, "scope": effective_scope}
         return _limit(
-            keyword_search(
-                context.git_client,
-                context.repo,
-                context.head_commit or "",
-                keywords,
-                scope=scope,
-                baseCommit=context.base_commit,
-                headCommit=context.head_commit,
-                paths=paths or [],
-                maxMatches=maxMatches,
+            _with_range_metadata(
+                keyword_search(
+                    context.git_client,
+                    context.repo,
+                    context.head_commit or "",
+                    keywords,
+                    scope=scope,
+                    baseCommit=base_commit,
+                    headCommit=head_commit,
+                    paths=paths or [],
+                    maxMatches=maxMatches,
+                ),
+                requested_scope=diffScope,
+                effective_scope=effective_scope,
+                base_commit=base_commit,
+                head_commit=head_commit,
+                warning=warning,
             ),
             max_chars,
         )
@@ -279,9 +343,9 @@ def build_langchain_tools(context: AgentRuntimeContext) -> list[Any]:
         ("log_read_range", "Read a line range from current build log.", log_read_range),
         ("log_find_error_chunks", "Recall high-signal error chunks from the log.", log_find_error_chunks),
         ("log_detect_final_status", "Detect final Jenkins Finished status from log.", log_detect_final_status),
-        ("repo_get_commits_between", "Get commits in base..head.", repo_get_commits_between),
-        ("repo_get_diff_files", "Get changed files in base..head.", repo_get_diff_files),
-        ("repo_get_file_diff", "Get diff for a changed file.", repo_get_file_diff),
+        ("repo_get_commits_between", "Get commits in the investigation range. Valid scope values: focus, full. Use full only when focusRange evidence is insufficient.", repo_get_commits_between),
+        ("repo_get_diff_files", "Get changed files in the investigation range. Valid scope values: focus, full. Use full only when focusRange evidence is insufficient.", repo_get_diff_files),
+        ("repo_get_file_diff", "Get diff for a changed file. Valid scope values: focus, full. Use full only when focusRange evidence is insufficient.", repo_get_file_diff),
         ("repo_get_file_content", "Get file content at a commit.", repo_get_file_content),
         (
             "repo_find_paths",

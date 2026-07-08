@@ -16,6 +16,7 @@ from ci_owner_agent.config import load_settings
 from ci_owner_agent.orchestrator import analyze_local
 from ci_owner_agent.schemas import BuildInfo, ChangedFile, CiResponsibilityNotice, CommitInfo, LogTail
 from ci_owner_agent.services.git_client import GitClient
+from ci_owner_agent.services.investigation_scope import InvestigationScope
 from ci_owner_agent.services.log_provider import LocalFileLogProvider
 from ci_owner_agent.tools.langchain_tools import _limit, build_langchain_tools
 
@@ -852,6 +853,59 @@ def test_tool_budget_exhausted(repo_cache, sample_repo, logs):
     assert blocked["error"] == "tool call budget exhausted"
 
 
+class ScopedGitClient:
+    def __init__(self):
+        self.calls = []
+
+    def get_commits_between(self, repo, base_commit, head_commit):
+        self.calls.append(("commits", base_commit, head_commit))
+        return {"ok": True, "commits": []}
+
+    def get_diff_files(self, repo, base_commit, head_commit):
+        self.calls.append(("diff_files", base_commit, head_commit))
+        return {"ok": True, "files": []}
+
+    def get_file_diff(self, repo, base_commit, head_commit, path, context_lines):
+        self.calls.append(("file_diff", base_commit, head_commit, path, context_lines))
+        return {"ok": True, "path": path, "diff": ""}
+
+
+def test_repo_tools_scope_focus_and_full(repo_cache, sample_repo, logs):
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    git_client = ScopedGitClient()
+    context = replace(
+        context,
+        git_client=git_client,
+        base_commit="full-base",
+        head_commit="head",
+        investigation_scope=InvestigationScope(
+            mode="focus_then_full",
+            full_base_commit="full-base",
+            full_head_commit="head",
+            focus_base_commit="focus-base",
+            focus_head_commit="head",
+            previous_build_number=5087,
+        ),
+    )
+    tools = {tool.name: tool for tool in build_langchain_tools(context)}
+
+    focus_result = tools["repo_get_diff_files"].invoke({"scope": "focus"})
+    full_result = tools["repo_get_diff_files"].invoke({"scope": "full"})
+    file_result = tools["repo_get_file_diff"].invoke({"path": "packages/fxp-ai/src/index.ts", "scope": "full"})
+    invalid_result = tools["repo_get_commits_between"].invoke({"scope": "wide"})
+
+    assert focus_result["scope"] == "focus"
+    assert focus_result["baseCommit"] == "focus-base"
+    assert full_result["scope"] == "full"
+    assert full_result["baseCommit"] == "full-base"
+    assert "expanded to fullRange" in full_result["warning"]
+    assert file_result["baseCommit"] == "full-base"
+    assert invalid_result["ok"] is False
+    assert "unsupported scope" in invalid_result["error"]
+    assert ("diff_files", "focus-base", "head") in git_client.calls
+    assert ("diff_files", "full-base", "head") in git_client.calls
+
+
 def test_initial_input_is_truncated(repo_cache, sample_repo, logs):
     context = make_lc_context(repo_cache, sample_repo, logs)
     changed_files = [
@@ -870,6 +924,36 @@ def test_initial_input_is_truncated(repo_cache, sample_repo, logs):
     assert len(payload["commits"]) == 20
     assert payload["commitsTotal"] == 35
     assert payload["commitsTruncated"] is True
+
+
+def test_initial_prompt_contains_investigation_scope(repo_cache, sample_repo, logs):
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    context = replace(
+        context,
+        investigation_scope=InvestigationScope(
+            mode="focus_then_full",
+            full_base_commit="full-base",
+            full_head_commit="head",
+            focus_base_commit="focus-base",
+            focus_head_commit="head",
+            previous_build_number=5087,
+            previous_build_url="local://job/5087",
+            previous_build_result="FAILURE",
+            reason="previous build headCommit found in history store",
+        ),
+    )
+    payload = json.loads(LangChainResponsibilityAgent(context.settings, context, [])._initial_input())
+
+    assert payload["investigationScope"]["mode"] == "focus_then_full"
+    assert payload["investigationScope"]["focusBaseCommit"] == "focus-base"
+    assert payload["initialDiffScope"] == "focus"
+    assert payload["changedFilesScope"] == "focus"
+    assert payload["commitsScope"] == "focus"
+    instruction = payload["instruction"]
+    assert "focusRange" in instruction
+    assert "fullRange" in instruction
+    assert "repo_get_diff_files(scope=\"full\")" in instruction
+    assert "不要一开始就全量分析 fullRange" in instruction
 
 
 def test_initial_input_omits_full_log_tail_and_includes_failure_summaries(repo_cache, sample_repo, logs):

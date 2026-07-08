@@ -246,6 +246,23 @@ class MongoHistoryStore:
             )
         return chunks
 
+    def find_previous_build(
+        self,
+        *,
+        job: str,
+        branch: str | None,
+        current_build_number: int,
+    ) -> dict | None:
+        query: dict[str, Any] = {
+            "job": job,
+            "buildNumber": {"$lt": current_build_number},
+            "headCommit": {"$exists": True, "$ne": None},
+        }
+        if branch is not None:
+            query["branch"] = {"$in": [branch, None]}
+        docs = list(self.builds.find(query).sort("buildNumber", -1).limit(1))
+        return docs[0] if docs else None
+
     def find_historical_failure_facts(
         self,
         *,

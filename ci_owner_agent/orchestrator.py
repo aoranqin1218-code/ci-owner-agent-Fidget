@@ -16,6 +16,7 @@ from ci_owner_agent.services.failure_fact_ai import extract_failure_facts_with_a
 from ci_owner_agent.services.git_client import GitClient
 from ci_owner_agent.services.history_inheritance import build_no_owner_item_from_decision
 from ci_owner_agent.services.history_store import MongoHistoryStore, get_history_store
+from ci_owner_agent.services.investigation_scope import InvestigationScope
 from ci_owner_agent.services.jenkins_client import JenkinsClient
 from ci_owner_agent.services.log_provider import JenkinsLogProvider, LocalFileLogProvider, LogProvider, detect_checkout_revision_from_console_log
 from ci_owner_agent.services.metrics import current_metrics_recorder
@@ -120,6 +121,8 @@ def analyze_failed_build(
     settings: Settings | None = None,
     last_successful_build_number: int | None = None,
     history_store: MongoHistoryStore | None = None,
+    previous_build_number: int | None = None,
+    previous_commit: str | None = None,
 ) -> CiResponsibilityNotice:
     settings = settings or load_settings()
     if history_store is None and settings.history_enabled:
@@ -139,12 +142,38 @@ def analyze_failed_build(
             detail=message,
             source="repo_sync",
         )
-    with _metrics_stage("gitDiff"):
-        commits_result = git_client.get_commits_between(repo, base_commit, head_commit)
+    investigation_scope = _resolve_investigation_scope(
+        build_info=build_info,
+        base_commit=base_commit,
+        head_commit=head_commit,
+        history_store=history_store,
+        previous_build_number=previous_build_number,
+        previous_commit=previous_commit,
+    )
+    initial_scope_name = "focus" if investigation_scope.has_focus_range else "full"
+    initial_base, initial_head = investigation_scope.range_for_scope(initial_scope_name)
+    commits_result, diff_result = _read_git_range(
+        git_client=git_client,
+        repo=repo,
+        base_commit=initial_base,
+        head_commit=initial_head,
+        stage_name="gitDiffFocus" if initial_scope_name == "focus" else "gitDiffFull",
+    )
+    if initial_scope_name == "focus" and (not commits_result.get("ok") or not diff_result.get("ok")):
+        message = (
+            "focusRange Git diff 读取失败，已降级 fullRange："
+            f"commits={commits_result.get('error')}; diff={diff_result.get('error')}"
+        )
+        build_info.warnings.append(message)
+        commits_result, diff_result = _read_git_range(
+            git_client=git_client,
+            repo=repo,
+            base_commit=base_commit,
+            head_commit=head_commit,
+            stage_name="gitDiffFull",
+        )
     if not commits_result.get("ok"):
         return failure_without_context(build_info, base_commit, f"Git commit 区间读取失败：{commits_result.get('error')}")
-    with _metrics_stage("gitDiff"):
-        diff_result = git_client.get_diff_files(repo, base_commit, head_commit)
     if not diff_result.get("ok"):
         return failure_without_context(build_info, base_commit, f"Git diff 文件列表读取失败：{diff_result.get('error')}")
     commits = [CommitInfo.model_validate(item) for item in commits_result.get("commits", [])]
@@ -174,6 +203,7 @@ def analyze_failed_build(
         git_client=git_client,
         settings=settings,
         last_successful_build_number=last_successful_build_number,
+        investigation_scope=investigation_scope,
     )
     runtime_context = _with_precomputed_failure_context(runtime_context, history_store=history_store)
     with _metrics_stage("historyNoOwnerDecision"):
@@ -244,6 +274,94 @@ def analyze_failed_build(
         history_store=history_store,
     )
     return notice
+
+
+def _read_git_range(
+    *,
+    git_client: GitClient,
+    repo: str,
+    base_commit: str | None,
+    head_commit: str | None,
+    stage_name: str,
+) -> tuple[dict, dict]:
+    with _metrics_stage("gitDiff"):
+        with _metrics_stage(stage_name):
+            commits_result = git_client.get_commits_between(repo, base_commit or "", head_commit or "")
+            diff_result = git_client.get_diff_files(repo, base_commit or "", head_commit or "")
+    return commits_result, diff_result
+
+
+def _resolve_investigation_scope(
+    *,
+    build_info: BuildInfo,
+    base_commit: str | None,
+    head_commit: str | None,
+    history_store: MongoHistoryStore | None,
+    previous_build_number: int | None = None,
+    previous_commit: str | None = None,
+) -> InvestigationScope:
+    if previous_commit and previous_commit != head_commit:
+        return InvestigationScope(
+            mode="focus_then_full",
+            full_base_commit=base_commit,
+            full_head_commit=head_commit,
+            focus_base_commit=previous_commit,
+            focus_head_commit=head_commit,
+            previous_build_number=previous_build_number,
+            reason="previous commit provided explicitly",
+        )
+    if previous_commit and previous_commit == head_commit:
+        return InvestigationScope(
+            mode="full",
+            full_base_commit=base_commit,
+            full_head_commit=head_commit,
+            previous_build_number=previous_build_number,
+            reason="previous head equals current head; using full range",
+        )
+    if history_store is not None:
+        try:
+            previous_doc = history_store.find_previous_build(
+                job=build_info.job,
+                branch=build_info.branch,
+                current_build_number=build_info.buildNumber,
+            )
+        except Exception as exc:
+            return InvestigationScope(
+                mode="full",
+                full_base_commit=base_commit,
+                full_head_commit=head_commit,
+                reason=f"previous build lookup failed: {exc}",
+            )
+        if isinstance(previous_doc, dict):
+            previous_head = previous_doc.get("headCommit")
+            if previous_head and previous_head != head_commit:
+                return InvestigationScope(
+                    mode="focus_then_full",
+                    full_base_commit=base_commit,
+                    full_head_commit=head_commit,
+                    focus_base_commit=previous_head,
+                    focus_head_commit=head_commit,
+                    previous_build_number=previous_doc.get("buildNumber"),
+                    previous_build_url=previous_doc.get("buildUrl"),
+                    previous_build_result=previous_doc.get("result"),
+                    reason="previous build headCommit found in history store",
+                )
+            if previous_head and previous_head == head_commit:
+                return InvestigationScope(
+                    mode="full",
+                    full_base_commit=base_commit,
+                    full_head_commit=head_commit,
+                    previous_build_number=previous_doc.get("buildNumber"),
+                    previous_build_url=previous_doc.get("buildUrl"),
+                    previous_build_result=previous_doc.get("result"),
+                    reason="previous head equals current head; using full range",
+                )
+    return InvestigationScope(
+        mode="full",
+        full_base_commit=base_commit,
+        full_head_commit=head_commit,
+        reason="previous build headCommit unavailable; using full range",
+    )
 
 
 def _with_precomputed_failure_context(
@@ -598,6 +716,8 @@ def analyze_local(
     settings: Settings | None = None,
     ignore_checkout_commit_mismatch: bool = False,
     last_successful_build_number: int | None = None,
+    previous_build_number: int | None = None,
+    previous_commit: str | None = None,
 ) -> CiResponsibilityNotice:
     settings = settings or load_settings()
     log_provider = LocalFileLogProvider(console_file, max_output_chars=max_output_chars)
@@ -646,6 +766,8 @@ def analyze_local(
         allow_sync_failure=True,
         settings=settings,
         last_successful_build_number=last_successful_build_number,
+        previous_build_number=previous_build_number,
+        previous_commit=previous_commit,
     )
 
 

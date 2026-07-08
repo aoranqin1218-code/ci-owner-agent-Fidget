@@ -78,6 +78,10 @@ def _matches(doc, query):
                 return False
             if "$in" in expected and value not in expected["$in"]:
                 return False
+            if "$exists" in expected and (key in doc) is not expected["$exists"]:
+                return False
+            if "$ne" in expected and value == expected["$ne"]:
+                return False
         elif value != expected:
             return False
     return True
@@ -365,6 +369,25 @@ def test_mongo_history_store_queries_by_last_successful_build(repo_cache, sample
         store.save_analysis(build_info, notice, context.base_commit, context.head_commit, 5068, context.base_commit, [focused_chunk(f"FAIL getJsSdkConfig {build}")])
     chunks = store.find_historical_failure_chunks(context.job, context.branch, current_build_number=5076, last_successful_build_number=5068)
     assert {item["buildNumber"] for item in chunks} == {5072, 5075}
+
+
+def test_history_store_find_previous_build(repo_cache, sample_repo, logs):
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    from ci_owner_agent.schemas import CiResponsibilityNotice
+
+    store = make_store()
+    notice = CiResponsibilityNotice.model_validate(high_confidence_payload(context))
+    old_build = BuildInfo(job=context.job, buildNumber=5086, result="SUCCESS", buildUrl="local://job/5086", branch="dev", commit="old-head")
+    previous_build = BuildInfo(job=context.job, buildNumber=5087, result="FAILURE", buildUrl="local://job/5087", branch="dev", commit="previous-head")
+    other_branch_build = BuildInfo(job=context.job, buildNumber=5088, result="FAILURE", buildUrl="local://job/5088", branch="feature", commit="feature-head")
+    store.save_analysis(old_build, notice, context.base_commit, "old-head", 5086, context.base_commit, [])
+    store.save_analysis(previous_build, notice, context.base_commit, "previous-head", 5086, context.base_commit, [])
+    store.save_analysis(other_branch_build, notice, context.base_commit, "feature-head", 5086, context.base_commit, [])
+
+    result = store.find_previous_build(job=context.job, branch="dev", current_build_number=5088)
+
+    assert result["buildNumber"] == 5087
+    assert result["headCommit"] == "previous-head"
 
 
 def test_mongo_history_store_notice_query_filters_branch(repo_cache, sample_repo, logs):

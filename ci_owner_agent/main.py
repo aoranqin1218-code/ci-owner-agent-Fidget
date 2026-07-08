@@ -62,6 +62,8 @@ def build_parser() -> argparse.ArgumentParser:
     local.add_argument("--result", choices=["SUCCESS", "FAILURE", "UNSTABLE", "ABORTED", "UNKNOWN"], default=None)
     local.add_argument("--ignore-checkout-commit-mismatch", action="store_true")
     local.add_argument("--last-success-build", type=int, default=None)
+    local.add_argument("--previous-build", type=int, default=None)
+    local.add_argument("--previous-commit", default=None)
     local.add_argument("--notify", action="store_true")
     local.add_argument("--notify-dry-run", action="store_true")
     local.add_argument("--force-notify", action="store_true")
@@ -126,6 +128,8 @@ def main(argv: list[str] | None = None) -> int:
                     settings=settings,
                     ignore_checkout_commit_mismatch=args.ignore_checkout_commit_mismatch,
                     last_successful_build_number=args.last_success_build,
+                    previous_build_number=args.previous_build,
+                    previous_commit=args.previous_commit,
                 )
         except ValueError as exc:
             recorder.record_error(exc)
