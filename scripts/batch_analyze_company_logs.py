@@ -748,14 +748,15 @@ def main() -> int:
                 print(f"skip existing: {notice_path}")
                 continue
 
-            cleanup_warnings = cleanup_previous_outputs([notice_path, stdout_path, stderr_path, trace_path])
+            # Per-build metrics file (defined before cleanup so stale metrics get removed)
+            metrics_file = metrics_dir / f"{name}.metrics.jsonl"
+
+            cleanup_warnings = cleanup_previous_outputs([notice_path, stdout_path, stderr_path, trace_path, metrics_file])
             if cleanup_warnings:
                 record["cleanupWarning"] = "; ".join(cleanup_warnings)
 
             started_at = dt.datetime.now(dt.timezone.utc)
 
-            # Per-build metrics file
-            metrics_file = metrics_dir / f"{name}.metrics.jsonl"
             env["CI_AGENT_METRICS_FILE"] = str(metrics_file)
 
             started = time.perf_counter()
@@ -816,7 +817,7 @@ def main() -> int:
                 record["error"] = f"analyze-local timeout after {args.timeout_seconds}s"
                 stdout_path.write_text(exc.stdout or "", encoding="utf-8")
                 stderr_path.write_text(exc.stderr or "", encoding="utf-8")
-                cleanup_warnings = cleanup_previous_outputs([notice_path, trace_path])
+                cleanup_warnings = cleanup_previous_outputs([notice_path, trace_path, metrics_file])
                 if cleanup_warnings:
                     existing = record.get("cleanupWarning")
                     record["cleanupWarning"] = "; ".join(
