@@ -150,6 +150,107 @@ def source_from_correct_owner_feedback(
     }
 
 
+def is_no_owner_decision_item(item: dict) -> bool:
+    if not isinstance(item, dict):
+        return False
+    owner = item.get("owner") if isinstance(item.get("owner"), dict) else {}
+    responsibility_type = str(item.get("responsibilityType") or "")
+    owner_type = str(owner.get("type") or "")
+    return (
+        responsibility_type == "no_high_confidence_owner"
+        or owner_type == "no_high_confidence_owner"
+        or (responsibility_type == "unknown" and owner_type == "no_high_confidence_owner")
+    )
+
+
+def find_no_owner_decision_from_notice(
+    notice: dict | None,
+    failure_signature: str | None = None,
+    *,
+    allow_legacy_top_owner: bool = False,
+) -> dict | None:
+    if not isinstance(notice, dict):
+        return None
+    items = notice.get("responsibilityItems")
+    if isinstance(items, list) and items:
+        if failure_signature:
+            for item in items:
+                if isinstance(item, dict) and item.get("failureSignature") == failure_signature and is_no_owner_decision_item(item):
+                    return item
+            return None
+        for item in items:
+            if isinstance(item, dict) and is_no_owner_decision_item(item):
+                return item
+        return None
+    owner = notice.get("owner") if isinstance(notice.get("owner"), dict) else {}
+    if allow_legacy_top_owner and owner.get("type") == "no_high_confidence_owner":
+        return {
+            "failureId": "legacy-top-owner",
+            "failureTitle": "historical failure",
+            "failureSignature": failure_signature,
+            "owner": owner,
+            "responsibilityType": "no_high_confidence_owner",
+            "confidence": 0,
+            "reason": notice.get("failureReason") or "historical notice top owner is no_high_confidence_owner",
+        }
+    return None
+
+
+def build_no_owner_decision_payload(
+    *,
+    source_build_number: int | None,
+    source_build_url: str | None,
+    match_type: str | None,
+    relationship: str | None,
+    reason: str,
+    feedback_action: str | None = None,
+    signature: dict | None = None,
+    signature_hash: str | None = None,
+) -> dict:
+    return {
+        "found": True,
+        "sourceBuildNumber": source_build_number,
+        "sourceBuildUrl": source_build_url,
+        "matchType": match_type,
+        "relationship": relationship,
+        "reason": reason,
+        "feedbackAction": feedback_action,
+        "signature": signature or {},
+        "signatureHash": signature_hash,
+    }
+
+
+def build_no_owner_item_from_decision(
+    decision: dict,
+    *,
+    failure_title: str,
+    failure_signature: str | None,
+    evidence_id: str,
+) -> dict:
+    return {
+        "failureId": "auto",
+        "failureTitle": failure_title,
+        "failureSignature": failure_signature,
+        "failureSummary": failure_title,
+        "owner": {
+            "type": "no_high_confidence_owner",
+            "name": NO_OWNER_NAME,
+            "email": None,
+            "commit": None,
+            "confidence": 0,
+        },
+        "responsibilityType": "no_high_confidence_owner",
+        "sourceBuildNumber": None,
+        "sourceBuildUrl": None,
+        "sourceCommit": None,
+        "matchType": decision.get("matchType"),
+        "relationship": decision.get("relationship"),
+        "confidence": 0,
+        "reason": decision.get("reason") or "历史同类失败已判定为无高可信责任人。",
+        "evidenceIds": [evidence_id],
+    }
+
+
 def _time_sort_value(value: Any) -> float:
     if isinstance(value, dt.datetime):
         return value.timestamp()

@@ -4,6 +4,7 @@ from dataclasses import replace
 
 from ci_owner_agent.schemas import BuildInfo, FailureFact
 from ci_owner_agent.services.history_store import MongoHistoryStore, find_feedback_override_for_failure_signature, notice_hash
+from ci_owner_agent.services.history_inheritance import is_no_owner_decision_item
 from ci_owner_agent.tools.history_tools import history_search_similar_failures
 from tests.test_langchain_agent import high_confidence_payload, make_lc_context
 
@@ -209,6 +210,26 @@ def inherited_owner_item(
         "relationship": "very_likely_same_failure",
         "confidence": 1.0,
         "reason": "历史持续失败，继承首次失败责任人。",
+        "evidenceIds": ["E1"],
+    }
+
+
+def no_owner_item(*, failure_id: str, failure_title: str, failure_signature: str) -> dict:
+    return {
+        "failureId": failure_id,
+        "failureTitle": failure_title,
+        "failureSignature": failure_signature,
+        "failureSummary": failure_title,
+        "owner": {
+            "type": "no_high_confidence_owner",
+            "name": "无高可信责任人",
+            "email": None,
+            "commit": None,
+            "confidence": 0,
+        },
+        "responsibilityType": "no_high_confidence_owner",
+        "confidence": 0,
+        "reason": "历史分析无高可信责任人",
         "evidenceIds": ["E1"],
     }
 
@@ -577,6 +598,116 @@ def test_history_search_does_not_inherit_unrelated_owner_from_multi_failure_noti
     assert matched_5111["historicalSignatureHash"] == view_chunk["signatureHash"]
     assert matched_5111["inheritedOwner"]["ownerName"] == "Tang.Tangerine-唐嘉伟"
     assert "Li Si" not in str(matched_5111["inheritedOwner"])
+
+
+def test_history_no_owner_decision_item_detected():
+    assert is_no_owner_decision_item(no_owner_item(failure_id="F1", failure_title="Timeout", failure_signature="sig-timeout"))
+
+
+def test_no_owner_decision_does_not_create_inherited_owner(repo_cache, sample_repo, logs):
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    settings = replace(context.settings, history_enabled=True)
+    chunk = focused_chunk("FAIL Timeout\nRun AwaitFunc Timeout")
+    signature = chunk["signature"]["signatureKey"]
+    context = replace(context, settings=settings, build_number=5089, last_successful_build_number=5087, failure_summaries={"chunks": [chunk]})
+    store = make_store()
+    from ci_owner_agent.schemas import CiResponsibilityNotice
+
+    payload = high_confidence_payload(context)
+    payload["owner"] = {"type": "no_high_confidence_owner", "name": "无高可信责任人", "email": None, "commit": None, "confidence": 0}
+    payload["hasHighConfidenceOwner"] = False
+    payload["responsibilityItems"] = [no_owner_item(failure_id="F1", failure_title="Timeout", failure_signature=signature)]
+    notice = CiResponsibilityNotice.model_validate(payload)
+    build_info = BuildInfo(job=context.job, buildNumber=5088, result="FAILURE", buildUrl="local://job/5088", branch=context.branch, commit=context.head_commit)
+    store.save_analysis(build_info, notice, context.base_commit, context.head_commit, 5087, context.base_commit, [chunk])
+
+    result = history_search_similar_failures(context, store=store)
+
+    chunk_result = result["currentChunks"][0]
+    assert chunk_result["inheritedOwner"]["found"] is False
+    assert chunk_result["noOwnerDecision"]["found"] is True
+    assert chunk_result["noOwnerDecision"]["sourceBuildNumber"] == 5088
+
+
+def test_mark_flaky_blocks_owner_and_returns_no_owner_decision(repo_cache, sample_repo, logs):
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    settings = replace(context.settings, history_enabled=True)
+    chunk = focused_chunk("FAIL Timeout\nRun AwaitFunc Timeout")
+    signature = chunk["signature"]["signatureKey"]
+    context = replace(context, settings=settings, build_number=5089, last_successful_build_number=5087, failure_summaries={"chunks": [chunk]})
+    store = make_store()
+    from ci_owner_agent.schemas import CiResponsibilityNotice
+
+    payload = high_confidence_payload(context)
+    payload["responsibilityItems"] = [
+        current_owner_item(
+            failure_id="F1",
+            failure_title="Timeout",
+            failure_signature=signature,
+            owner_name="Charlie.Guo",
+            owner_email="charlie@example.com",
+            owner_commit=context.head_commit,
+        )
+    ]
+    notice = CiResponsibilityNotice.model_validate(payload)
+    build_info = BuildInfo(job=context.job, buildNumber=5088, result="FAILURE", buildUrl="local://job/5088", branch=context.branch, commit=context.head_commit)
+    store.save_analysis(build_info, notice, context.base_commit, context.head_commit, 5087, context.base_commit, [chunk])
+    store.feedback.docs.append(
+        {
+            "job": context.job,
+            "branch": context.branch,
+            "buildNumber": 5088,
+            "failureSignature": signature,
+            "action": "mark_flaky",
+            "isActive": True,
+            "updatedAt": "2026-01-02T00:00:00",
+        }
+    )
+
+    result = history_search_similar_failures(context, store=store)
+
+    chunk_result = result["currentChunks"][0]
+    assert chunk_result["inheritedOwner"]["found"] is False
+    assert chunk_result["noOwnerDecision"]["found"] is True
+    assert chunk_result["noOwnerDecision"]["feedbackAction"] == "mark_flaky"
+
+
+def test_correct_owner_has_priority_over_no_owner(repo_cache, sample_repo, logs):
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    settings = replace(context.settings, history_enabled=True)
+    chunk = focused_chunk("FAIL Timeout\nRun AwaitFunc Timeout")
+    signature = chunk["signature"]["signatureKey"]
+    context = replace(context, settings=settings, build_number=5089, last_successful_build_number=5087, failure_summaries={"chunks": [chunk]})
+    store = make_store()
+    from ci_owner_agent.schemas import CiResponsibilityNotice
+
+    payload = high_confidence_payload(context)
+    payload["owner"] = {"type": "no_high_confidence_owner", "name": "无高可信责任人", "email": None, "commit": None, "confidence": 0}
+    payload["hasHighConfidenceOwner"] = False
+    payload["responsibilityItems"] = [no_owner_item(failure_id="F1", failure_title="Timeout", failure_signature=signature)]
+    notice = CiResponsibilityNotice.model_validate(payload)
+    build_info = BuildInfo(job=context.job, buildNumber=5088, result="FAILURE", buildUrl="local://job/5088", branch=context.branch, commit=context.head_commit)
+    store.save_analysis(build_info, notice, context.base_commit, context.head_commit, 5087, context.base_commit, [chunk])
+    store.feedback.docs.append(
+        {
+            "job": context.job,
+            "branch": context.branch,
+            "buildNumber": 5088,
+            "failureSignature": signature,
+            "action": "correct_owner",
+            "correctedOwner": {"type": "high_confidence", "name": "Alice", "email": "alice@example.com", "commit": "abc", "confidence": 1},
+            "sourceBuildNumber": 5088,
+            "isActive": True,
+            "updatedAt": "2026-01-02T00:00:00",
+        }
+    )
+
+    result = history_search_similar_failures(context, store=store)
+
+    chunk_result = result["currentChunks"][0]
+    assert chunk_result["inheritedOwner"]["found"] is True
+    assert chunk_result["inheritedOwner"]["ownerName"] == "Alice"
+    assert chunk_result["noOwnerDecision"]["found"] is False
 
 
 def test_history_search_signature_structural_match(repo_cache, sample_repo, logs):

@@ -11,8 +11,10 @@ from ci_owner_agent.services.history_store import (
 )
 from ci_owner_agent.services.history_inheritance import (
     build_inherited_owner,
+    build_no_owner_decision_payload,
     feedback_blocks_inheritance,
     feedback_preview,
+    find_no_owner_decision_from_notice,
     find_feedback_override_for_failure_signature,
     source_from_correct_owner_feedback,
     valid_inherited_owner,
@@ -114,6 +116,9 @@ def history_search_similar_failure_facts(
             notice_doc={"notice": historical_doc.get("notice") or {}},
         )
         if feedback_blocks_inheritance(feedback):
+            no_owner_decision = _no_owner_decision_from_historical_doc(historical_doc, comparison, feedback)
+            if no_owner_decision.get("found"):
+                current_view.setdefault("_candidateNoOwnerDecisions", []).append(no_owner_decision)
             diagnostics["skipped"]["blockedByFeedback"] += 1
             current_view["blockedReason"] = f"blocked_by_feedback_{feedback.get('action')}"
             _append_compare_result(diagnostics, current_view["_fact"], historical_fact, historical_doc, comparison, False, f"blocked_by_feedback_{feedback.get('action')}", comparison.reason)
@@ -125,6 +130,11 @@ def history_search_similar_failure_facts(
             feedback,
         )
         if not inherited_owner.get("found"):
+            no_owner_decision = _no_owner_decision_from_historical_doc(historical_doc, comparison, feedback)
+            if no_owner_decision.get("found"):
+                current_view.setdefault("_candidateNoOwnerDecisions", []).append(no_owner_decision)
+                _append_compare_result(diagnostics, current_view["_fact"], historical_fact, historical_doc, comparison, True, "no_owner_decision", comparison.reason)
+                continue
             diagnostics["skipped"]["invalidOwner"] += 1
             _append_compare_result(diagnostics, current_view["_fact"], historical_fact, historical_doc, comparison, False, "invalid_owner", comparison.reason)
             continue
@@ -139,6 +149,9 @@ def history_search_similar_failure_facts(
         if owners:
             current_view.pop("blockedReason", None)
             current_view["inheritedOwner"] = _best_inherited_owner(owners)
+        decisions = current_view.pop("_candidateNoOwnerDecisions", [])
+        if decisions and not current_view.get("inheritedOwner", {}).get("found"):
+            current_view["noOwnerDecision"] = _best_no_owner_decision(decisions)
 
     candidates.sort(
         key=lambda item: (
@@ -250,6 +263,7 @@ def _current_fact_view(fact: FailureFact, min_confidence: float) -> dict:
         "symbol": fact.symbol,
         "confidence": fact.confidence,
         "inheritedOwner": {"found": False},
+        "noOwnerDecision": {"found": False},
         **({"blockedReason": blocked_reason} if blocked_reason else {}),
         "_eligible": blocked_reason is None,
         "_fact": fact,
@@ -263,6 +277,7 @@ def _public_current_views(items: list[dict]) -> list[dict]:
         clean.pop("_fact", None)
         clean.pop("_eligible", None)
         clean.pop("_candidateOwners", None)
+        clean.pop("_candidateNoOwnerDecisions", None)
         public.append(clean)
     return public
 
@@ -420,6 +435,57 @@ def _inherited_owner_from_historical_doc(
     )
 
 
+def _no_owner_decision_from_historical_doc(
+    historical_doc: dict,
+    comparison: FailureFactComparison,
+    feedback: dict | None,
+) -> dict:
+    if source_from_correct_owner_feedback(
+        feedback,
+        fallback_build_number=historical_doc.get("buildNumber"),
+        fallback_build_url=historical_doc.get("buildUrl"),
+    ):
+        return {"found": False}
+    historical_fact = historical_doc.get("fact") if isinstance(historical_doc.get("fact"), dict) else {}
+    signature_key = historical_fact.get("signatureKey") or historical_doc.get("signatureKey")
+    if feedback_blocks_inheritance(feedback):
+        return build_no_owner_decision_payload(
+            source_build_number=historical_doc.get("buildNumber"),
+            source_build_url=historical_doc.get("buildUrl"),
+            match_type="ai_fact_semantic",
+            relationship=comparison.relationship,
+            reason=(
+                f"historical same failure was blocked by feedback action {feedback.get('action')}; "
+                "treating current same failure as no_high_confidence_owner"
+            ),
+            feedback_action=feedback.get("action"),
+            signature={"signatureKey": signature_key} if signature_key else {},
+            signature_hash=signature_key,
+        )
+    notice = historical_doc.get("notice")
+    item = find_no_owner_decision_from_notice(notice, signature_key, allow_legacy_top_owner=_allow_legacy_no_owner_fallback(historical_doc))
+    if item is None:
+        return {"found": False}
+    return build_no_owner_decision_payload(
+        source_build_number=historical_doc.get("buildNumber"),
+        source_build_url=historical_doc.get("buildUrl"),
+        match_type="ai_fact_semantic",
+        relationship=comparison.relationship,
+        reason="historical same failure fact was previously classified as no_high_confidence_owner",
+        signature={"signatureKey": signature_key} if signature_key else {},
+        signature_hash=signature_key,
+    )
+
+
+def _allow_legacy_no_owner_fallback(historical_doc: dict) -> bool:
+    notice = historical_doc.get("notice")
+    if isinstance(notice, dict):
+        items = notice.get("responsibilityItems")
+        if isinstance(items, list) and items:
+            return False
+    return True
+
+
 def _matching_notice_item_source(historical_doc: dict) -> dict | None:
     notice = historical_doc.get("notice")
     if not isinstance(notice, dict):
@@ -441,6 +507,11 @@ def _best_inherited_owner(owners: list[dict]) -> dict:
         reverse=True,
     )
     return owners[0]
+
+
+def _best_no_owner_decision(decisions: list[dict]) -> dict:
+    decisions.sort(key=lambda item: item.get("sourceBuildNumber") or 0)
+    return decisions[0]
 
 
 def _candidate_dict(

@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from ci_owner_agent.orchestrator import _save_history, _with_precomputed_failure_context
-from ci_owner_agent.schemas import BuildInfo, CiResponsibilityNotice, FailureFact, FailureFactExtractionResult
-from tests.test_history_store import high_confidence_payload, make_store
+from ci_owner_agent.orchestrator import _has_new_strong_evidence, _save_history, _with_precomputed_failure_context, analyze_failed_build
+from ci_owner_agent.schemas import BuildInfo, ChangedFile, CiResponsibilityNotice, FailureFact, FailureFactExtractionResult
+from ci_owner_agent.services.git_client import GitClient
+from tests.test_history_store import high_confidence_payload, make_store, no_owner_item
 from tests.test_langchain_agent import make_lc_context
 
 
@@ -33,6 +34,36 @@ class SummaryProvider:
 
     def find_focused_failure_chunks(self, tail_lines=500, max_chunks=1):
         raise AssertionError("focused chunks should not be read when summaries exist")
+
+
+class SigSummaryProvider:
+    def __init__(self, signature_key: str = "sig-timeout", test_file: str = "modules/automation/tests/venv.ts"):
+        self.signature_key = signature_key
+        self.test_file = test_file
+
+    def find_test_failure_summaries(self, tail_lines=500, max_chunks=5):
+        return {
+            "chunks": [
+                {
+                    "chunkIndex": 0,
+                    "schemaVersion": 3,
+                    "chunkSource": "local_test_failure_summary",
+                    "content": "✖ Webhook触发\nRun\nAwaitFunc\nTimeout!",
+                    "signature": {
+                        "signatureKey": self.signature_key,
+                        "testName": "Webhook触发",
+                        "errorType": "Timeout",
+                        "errorMessage": "run awaitfunc timeout",
+                        "testFile": self.test_file,
+                        "topStackFile": self.test_file,
+                    },
+                    "signatureHash": self.signature_key,
+                }
+            ]
+        }
+
+    def find_focused_failure_chunks(self, tail_lines=500, max_chunks=1):
+        return {"chunks": [{"content": "✖ Webhook触发\nRun\nAwaitFunc\nTimeout!"}]}
 
 
 def _save_existing_failure_fact(store, context, fact: FailureFact) -> tuple[BuildInfo, CiResponsibilityNotice]:
@@ -66,6 +97,18 @@ def _save_existing_failure_fact(store, context, fact: FailureFact) -> tuple[Buil
     )
     store.save_analysis(build_info, notice, context.base_commit, context.head_commit, 6, context.base_commit, [])
     store.save_failure_facts(build_info=build_info, notice=notice, facts=[fact])
+    return build_info, notice
+
+
+def _save_historical_no_owner(store, context, *, signature_key: str = "sig-timeout", build: int = 5088):
+    payload = high_confidence_payload(context)
+    payload["owner"] = {"type": "no_high_confidence_owner", "name": "无高可信责任人", "email": None, "commit": None, "confidence": 0}
+    payload["hasHighConfidenceOwner"] = False
+    payload["responsibilityItems"] = [no_owner_item(failure_id="F1", failure_title="Webhook触发", failure_signature=signature_key)]
+    notice = CiResponsibilityNotice.model_validate(payload)
+    build_info = BuildInfo(job=context.job, buildNumber=build, result="FAILURE", buildUrl=f"local://job/{build}", branch=context.branch, commit=context.head_commit)
+    chunk = SigSummaryProvider(signature_key).find_test_failure_summaries()["chunks"][0]
+    store.save_analysis(build_info, notice, context.base_commit, context.head_commit, build - 1, context.base_commit, [chunk])
     return build_info, notice
 
 
@@ -202,6 +245,89 @@ def test_orchestrator_reuses_history_store_for_prechecks(monkeypatch, repo_cache
 
     assert calls["deterministic_store"] is store
     assert calls["ai_store"] is store
+
+
+def test_no_owner_decision_short_circuits_agent(monkeypatch, repo_cache, sample_repo, logs):
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    settings = replace(context.settings, history_enabled=True, history_inherit_no_owner_enabled=True)
+    store = make_store()
+    _save_historical_no_owner(store, context, signature_key="sig-timeout", build=5088)
+
+    def fail_agent(*args, **kwargs):
+        raise AssertionError("agent should be skipped by historical no-owner decision")
+
+    monkeypatch.setattr("ci_owner_agent.orchestrator.create_responsibility_agent", fail_agent)
+    build_info = BuildInfo(job=context.job, buildNumber=5089, result="FAILURE", buildUrl="local://job/5089", branch=context.branch, commit=context.head_commit)
+
+    notice = analyze_failed_build(
+        sample_repo["repo"],
+        build_info,
+        context.base_commit,
+        context.head_commit,
+        SigSummaryProvider("sig-timeout"),
+        GitClient(repo_cache),
+        allow_sync_failure=True,
+        settings=settings,
+        last_successful_build_number=5087,
+        history_store=store,
+    )
+
+    assert notice.owner.type == "no_high_confidence_owner"
+    assert notice.responsibilityItems[0].responsibilityType == "no_high_confidence_owner"
+    assert "历史构建 #5088" in notice.failureReason
+
+
+def test_no_owner_decision_disabled_falls_back_to_agent(monkeypatch, repo_cache, sample_repo, logs):
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    settings = replace(context.settings, history_enabled=True, history_inherit_no_owner_enabled=False)
+    store = make_store()
+    _save_historical_no_owner(store, context, signature_key="sig-timeout", build=5088)
+    calls = {"agent": 0}
+
+    class DummyAgent:
+        def analyze(self, agent_context):
+            calls["agent"] += 1
+            return CiResponsibilityNotice.model_validate(high_confidence_payload(context))
+
+    monkeypatch.setattr("ci_owner_agent.orchestrator.create_responsibility_agent", lambda *args, **kwargs: DummyAgent())
+    build_info = BuildInfo(job=context.job, buildNumber=5089, result="FAILURE", buildUrl="local://job/5089", branch=context.branch, commit=context.head_commit)
+
+    analyze_failed_build(
+        sample_repo["repo"],
+        build_info,
+        context.base_commit,
+        context.head_commit,
+        SigSummaryProvider("sig-timeout"),
+        GitClient(repo_cache),
+        allow_sync_failure=True,
+        settings=settings,
+        last_successful_build_number=5087,
+        history_store=store,
+    )
+
+    assert calls["agent"] == 1
+
+
+def test_no_owner_decision_reanalyzes_when_new_strong_evidence():
+    assert _has_new_strong_evidence(
+        decision={"signature": {"signatureKey": "sig-timeout", "errorType": "Timeout", "errorMessage": "run awaitfunc timeout"}},
+        failure_summaries={
+            "chunks": [
+                {
+                    "signature": {
+                        "signatureKey": "sig-timeout",
+                        "errorType": "Timeout",
+                        "errorMessage": "run awaitfunc timeout",
+                        "testFile": "modules/automation/tests/venv.ts",
+                        "topStackFile": "modules/automation/tests/venv.ts",
+                    },
+                    "signatureHash": "sig-timeout",
+                }
+            ]
+        },
+        failure_facts=None,
+        changed_files=[ChangedFile(path="modules/automation/tests/venv.ts", status="M")],
+    )
 
 
 def test_orchestrator_skips_ai_history_when_summaries_exist(monkeypatch, repo_cache, sample_repo, logs):

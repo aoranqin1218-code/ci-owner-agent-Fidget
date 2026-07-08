@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from contextlib import nullcontext
 from dataclasses import replace
+import json
+import re
 from typing import ContextManager
 
 from ci_owner_agent.agents.context import AgentRuntimeContext
@@ -12,6 +14,7 @@ from ci_owner_agent.config import Settings, load_settings
 from ci_owner_agent.schemas import BuildInfo, ChangedFile, CiResponsibilityNotice, CommitInfo, EvidenceItem, FailureFact
 from ci_owner_agent.services.failure_fact_ai import extract_failure_facts_with_ai
 from ci_owner_agent.services.git_client import GitClient
+from ci_owner_agent.services.history_inheritance import build_no_owner_item_from_decision
 from ci_owner_agent.services.history_store import MongoHistoryStore, get_history_store
 from ci_owner_agent.services.jenkins_client import JenkinsClient
 from ci_owner_agent.services.log_provider import JenkinsLogProvider, LocalFileLogProvider, LogProvider, detect_checkout_revision_from_console_log
@@ -173,6 +176,40 @@ def analyze_failed_build(
         last_successful_build_number=last_successful_build_number,
     )
     runtime_context = _with_precomputed_failure_context(runtime_context, history_store=history_store)
+    no_owner_decision = _select_best_no_owner_decision(runtime_context.history_precheck, runtime_context.ai_history_precheck)
+    if settings.history_inherit_no_owner_enabled and no_owner_decision and not _has_new_strong_evidence(
+        decision=no_owner_decision,
+        failure_summaries=runtime_context.failure_summaries,
+        failure_facts=runtime_context.failure_facts,
+        changed_files=changed_files,
+    ):
+        recorder = current_metrics_recorder()
+        if recorder is not None:
+            recorder.warnings.append(
+                f"short-circuited by historical no-owner decision from build #{no_owner_decision.get('sourceBuildNumber')}"
+            )
+        notice = _build_no_owner_notice_from_history_decision(
+            build_info=build_info,
+            base_commit=base_commit,
+            head_commit=head_commit,
+            decision=no_owner_decision,
+            failure_summaries=runtime_context.failure_summaries,
+            failure_facts=runtime_context.failure_facts,
+        )
+        notice = validate_notice(notice)
+        _save_history(
+            settings,
+            build_info,
+            notice,
+            log_provider,
+            base_commit,
+            head_commit,
+            last_successful_build_number,
+            runtime_context.failure_summaries,
+            runtime_context.failure_facts,
+            history_store=history_store,
+        )
+        return notice
     try:
         with _metrics_stage("agentAnalyze"):
             agent = create_responsibility_agent(settings, runtime_context)
@@ -276,6 +313,154 @@ def _with_precomputed_failure_context(
             }
         enriched = replace(enriched, ai_history_precheck=ai_history_precheck)
     return enriched
+
+
+def _select_best_no_owner_decision(history_precheck: dict | None, ai_history_precheck: dict | None) -> dict | None:
+    decisions: list[dict] = []
+    for item in (history_precheck or {}).get("currentChunks") or []:
+        decision = item.get("noOwnerDecision") if isinstance(item, dict) else None
+        if isinstance(decision, dict) and decision.get("found"):
+            decisions.append({**decision, "source": "historyPrecheck"})
+    for item in (ai_history_precheck or {}).get("currentFacts") or []:
+        decision = item.get("noOwnerDecision") if isinstance(item, dict) else None
+        if isinstance(decision, dict) and decision.get("found"):
+            decisions.append({**decision, "source": "aiHistoryPrecheck"})
+    if not decisions:
+        return None
+    decisions.sort(
+        key=lambda item: (
+            1 if item.get("feedbackAction") in {"mark_flaky", "mark_no_owner"} else 0,
+            -(item.get("sourceBuildNumber") or 0),
+        ),
+        reverse=True,
+    )
+    return decisions[0]
+
+
+def _has_new_strong_evidence(
+    *,
+    decision: dict,
+    failure_summaries: dict | None,
+    failure_facts: dict | None,
+    changed_files: list[ChangedFile],
+) -> bool:
+    current_signature = _current_failure_signature(failure_summaries, failure_facts)
+    source_signature = _decision_signature(decision)
+    if current_signature and source_signature and current_signature != source_signature:
+        return True
+    summary = _first_failure_summary_signature(failure_summaries)
+    facts = (failure_facts or {}).get("facts") if isinstance(failure_facts, dict) else []
+    changed_paths = {item.path for item in changed_files}
+    for path in _failure_paths(summary, facts):
+        if path in changed_paths:
+            return True
+    text = " ".join(
+        [
+            str((summary or {}).get("errorType") or ""),
+            str((summary or {}).get("errorMessage") or ""),
+            " ".join(str((fact or {}).get("errorCode") or "") + " " + str((fact or {}).get("errorType") or "") for fact in facts or [] if isinstance(fact, dict)),
+        ]
+    )
+    source_text = json.dumps(decision.get("signature") or {}, ensure_ascii=False)
+    strong_codes = re.findall(r"\b(?:TS\d{4}|AssertionError|ReferenceError|MODULE_NOT_FOUND|ERR_[A-Z0-9_]+)\b", text)
+    return any(code not in source_text for code in strong_codes)
+
+
+def _build_no_owner_notice_from_history_decision(
+    *,
+    build_info: BuildInfo,
+    base_commit: str,
+    head_commit: str,
+    decision: dict,
+    failure_summaries: dict | None,
+    failure_facts: dict | None,
+) -> CiResponsibilityNotice:
+    source_build = decision.get("sourceBuildNumber")
+    match_type = decision.get("matchType") or "history_same_failure"
+    relationship = decision.get("relationship") or "very_likely_same_failure"
+    reason = (
+        f"该失败与历史构建 #{source_build} 已分析为无高可信责任人的失败一致，"
+        "当前构建没有新的强证据改变结论，因此直接继承历史 no-owner 判定。"
+    )
+    evidence = EvidenceItem(
+        id="E_HISTORY_NO_OWNER",
+        type="reasoning",
+        summary="历史同类失败已判定为无高可信责任人",
+        detail=(
+            f"sourceBuildNumber={source_build}; sourceBuildUrl={decision.get('sourceBuildUrl')}; "
+            f"matchType={match_type}; relationship={relationship}; reason={decision.get('reason')}"
+        ),
+        source="history_no_owner_decision",
+    )
+    item = build_no_owner_item_from_decision(
+        {**decision, "reason": reason},
+        failure_title=_failure_title(failure_summaries, failure_facts),
+        failure_signature=_current_failure_signature(failure_summaries, failure_facts),
+        evidence_id=evidence.id,
+    )
+    return CiResponsibilityNotice(
+        job=build_info.job,
+        buildNumber=build_info.buildNumber,
+        buildUrl=build_info.buildUrl,
+        result=build_info.result,
+        branch=build_info.branch,
+        headCommit=head_commit,
+        baseCommit=base_commit,
+        owner=no_owner(),
+        failureReason=reason,
+        evidence=[evidence],
+        suggestions=["如需强制重新分析，可设置 CI_AGENT_HISTORY_INHERIT_NO_OWNER_ENABLED=false。"],
+        responsibilityItems=[item],
+        hasHighConfidenceOwner=False,
+    )
+
+
+def _current_failure_signature(failure_summaries: dict | None, failure_facts: dict | None) -> str | None:
+    summary = _first_failure_summary_signature(failure_summaries)
+    if summary:
+        return summary.get("signatureKey") or summary.get("signatureHash")
+    facts = (failure_facts or {}).get("facts") if isinstance(failure_facts, dict) else []
+    for fact in facts or []:
+        if isinstance(fact, dict) and fact.get("signatureKey"):
+            return fact.get("signatureKey")
+    return None
+
+
+def _decision_signature(decision: dict) -> str | None:
+    signature = decision.get("signature") if isinstance(decision.get("signature"), dict) else {}
+    return signature.get("signatureKey") or decision.get("signatureHash")
+
+
+def _first_failure_summary_signature(failure_summaries: dict | None) -> dict | None:
+    chunks = (failure_summaries or {}).get("chunks") if isinstance(failure_summaries, dict) else []
+    for chunk in chunks or []:
+        if isinstance(chunk, dict):
+            signature = chunk.get("signature") if isinstance(chunk.get("signature"), dict) else {}
+            if signature:
+                return {**signature, "signatureHash": chunk.get("signatureHash")}
+    return None
+
+
+def _failure_paths(summary: dict | None, facts: list | None) -> set[str]:
+    paths = {
+        str((summary or {}).get("testFile") or ""),
+        str((summary or {}).get("topStackFile") or ""),
+    }
+    for item in facts or []:
+        if isinstance(item, dict):
+            paths.add(str(item.get("filePath") or ""))
+    return {path for path in paths if path}
+
+
+def _failure_title(failure_summaries: dict | None, failure_facts: dict | None) -> str:
+    summary = _first_failure_summary_signature(failure_summaries)
+    if summary:
+        return str(summary.get("testName") or summary.get("testCase") or summary.get("errorType") or "historical same failure")
+    facts = (failure_facts or {}).get("facts") if isinstance(failure_facts, dict) else []
+    for fact in facts or []:
+        if isinstance(fact, dict):
+            return str(fact.get("rootCauseSummary") or fact.get("message") or fact.get("failureKind") or "historical same failure")
+    return "historical same failure"
 
 
 def _save_history(

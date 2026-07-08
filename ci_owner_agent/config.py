@@ -36,6 +36,7 @@ class Settings:
     history_mongo_uri: str
     history_mongo_db: str
     history_max_candidates: int
+    history_inherit_no_owner_enabled: bool
     failure_chunk_tail_lines: int
     ai_failure_facts_enabled: bool
     ai_failure_fact_min_confidence: float
@@ -138,6 +139,7 @@ def load_settings(env_file: str | Path | None = None) -> Settings:
         history_mongo_uri=os.getenv("CI_AGENT_HISTORY_MONGO_URI", "mongodb://localhost:27017"),
         history_mongo_db=os.getenv("CI_AGENT_HISTORY_MONGO_DB", "ci_owner_agent"),
         history_max_candidates=_int_env_or_default("CI_AGENT_HISTORY_MAX_CANDIDATES", 5),
+        history_inherit_no_owner_enabled=_bool_env("CI_AGENT_HISTORY_INHERIT_NO_OWNER_ENABLED", True),
         failure_chunk_tail_lines=_int_env_min_or_default("CI_AGENT_FAILURE_CHUNK_TAIL_LINES", 500, 50),
         ai_failure_facts_enabled=_bool_env("CI_AGENT_AI_FAILURE_FACTS_ENABLED", False),
         ai_failure_fact_min_confidence=max(0, min(_float_env_or_default("CI_AGENT_AI_FAILURE_FACT_MIN_CONFIDENCE", 0.70), 1)),

@@ -9,7 +9,9 @@ from ci_owner_agent.services.failure_similarity import (
 )
 from ci_owner_agent.services.history_inheritance import (
     build_inherited_owner,
+    build_no_owner_decision_payload,
     feedback_blocks_inheritance,
+    find_no_owner_decision_from_notice,
     source_from_correct_owner_feedback,
 )
 from ci_owner_agent.services.history_store import MongoHistoryStore, get_history_store
@@ -139,8 +141,16 @@ def history_search_similar_failures(
             chunk_index: _find_inherited_owner_for_chunk(chunk_candidates, context.build_number)
             for chunk_index, chunk_candidates in candidates_by_chunk.items()
         }
+        no_owner_by_chunk = {
+            chunk_index: _find_no_owner_decision_for_chunk(chunk_candidates, context.build_number)
+            for chunk_index, chunk_candidates in candidates_by_chunk.items()
+        }
         for candidate in candidates:
             candidate["inheritedOwner"] = inherited_by_chunk.get(
+                candidate.get("currentChunkIndex"),
+                {"found": False},
+            )
+            candidate["noOwnerDecision"] = no_owner_by_chunk.get(
                 candidate.get("currentChunkIndex"),
                 {"found": False},
             )
@@ -166,6 +176,7 @@ def history_search_similar_failures(
                     "preview": item["preview"],
                     "signature": item["signature"],
                     "inheritedOwner": inherited_by_chunk.get(item["chunkIndex"], {"found": False}),
+                    "noOwnerDecision": no_owner_by_chunk.get(item["chunkIndex"], {"found": False}),
                 }
                 for item in current_chunks
             ],
@@ -222,6 +233,66 @@ def _find_inherited_owner_for_chunk(candidates: list[dict], current_build_number
             fallback_build_url=candidate.get("buildUrl"),
             match_type=candidate.get("matchType"),
             relationship=candidate.get("relationship"),
+        )
+    return {"found": False}
+
+
+def _find_no_owner_decision_for_chunk(candidates: list[dict], current_build_number: int) -> dict:
+    eligible = [
+        candidate
+        for candidate in candidates
+        if candidate.get("buildNumber") is not None
+        and candidate.get("buildNumber") < current_build_number
+        and candidate.get("matchType") in {"signature_exact", "signature_structural"}
+        and candidate.get("relationship") == "very_likely_same_failure"
+    ]
+    eligible.sort(key=lambda item: item.get("buildNumber") or 0)
+    for candidate in eligible:
+        feedback = candidate.get("feedbackOverride")
+        if source_from_correct_owner_feedback(
+            feedback,
+            fallback_build_number=candidate.get("buildNumber"),
+            fallback_build_url=candidate.get("buildUrl"),
+        ):
+            continue
+        if feedback_blocks_inheritance(feedback):
+            return build_no_owner_decision_payload(
+                source_build_number=candidate.get("buildNumber"),
+                source_build_url=candidate.get("buildUrl"),
+                match_type=candidate.get("matchType"),
+                relationship=candidate.get("relationship"),
+                reason=(
+                    f"historical same failure was blocked by feedback action {feedback.get('action')}; "
+                    "treating current same failure as no_high_confidence_owner"
+                ),
+                feedback_action=feedback.get("action"),
+                signature=candidate.get("signature") or {},
+                signature_hash=candidate.get("historicalSignatureHash"),
+            )
+        notice_doc = candidate.get("_noticeDoc") or {}
+        notice = notice_doc.get("notice") if isinstance(notice_doc, dict) else None
+        historical_signature = candidate.get("historicalSignature") or {}
+        item = find_no_owner_decision_from_notice(
+            notice,
+            historical_signature.get("signatureKey") or candidate.get("historicalSignatureHash"),
+            allow_legacy_top_owner=_allow_legacy_top_owner_fallback(candidate),
+        )
+        if item is None and historical_signature.get("signatureHash"):
+            item = find_no_owner_decision_from_notice(
+                notice,
+                historical_signature.get("signatureHash"),
+                allow_legacy_top_owner=_allow_legacy_top_owner_fallback(candidate),
+            )
+        if item is None:
+            continue
+        return build_no_owner_decision_payload(
+            source_build_number=candidate.get("buildNumber"),
+            source_build_url=candidate.get("buildUrl"),
+            match_type=candidate.get("matchType"),
+            relationship=candidate.get("relationship"),
+            reason="historical same failure was previously classified as no_high_confidence_owner",
+            signature=candidate.get("signature") or {},
+            signature_hash=candidate.get("historicalSignatureHash"),
         )
     return {"found": False}
 
