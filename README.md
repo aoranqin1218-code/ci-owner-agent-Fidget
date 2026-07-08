@@ -42,6 +42,8 @@ CI_AGENT_HISTORY_MONGO_URI=mongodb://localhost:27017
 CI_AGENT_HISTORY_MONGO_DB=ci_owner_agent
 CI_AGENT_HISTORY_MAX_CANDIDATES=5
 CI_AGENT_FAILURE_CHUNK_TAIL_LINES=500
+CI_AGENT_METRICS_ENABLED=false
+CI_AGENT_METRICS_FILE=./runs/metrics/ci_analysis_metrics.jsonl
 ```
 
 `CI_AGENT_MODEL_PROVIDER=fake` is the default offline test mode. It uses a fixed no-owner fake agent to verify CLI, toolchain, persistence, notification, and pytest flows; it is not the formal analysis mode and does not attempt responsibility attribution.
@@ -90,6 +92,8 @@ Tracing is enabled only when both `LANGSMITH_TRACING=true` and `LANGSMITH_API_KE
 Historical failure recall is optional and disabled by default. When `CI_AGENT_HISTORY_ENABLED=true`, the agent stores build metadata, notices, and normalized focused failure chunks in MongoDB, then exposes `history_search_similar_failures` to detect pre-existing failures. MongoDB write/search failures do not block analysis.
 
 MongoDB history chunks use schemaVersion 3 failure summaries and signatures extracted from focused Test stage / `make docker-test` logs. The older generic `find_error_chunks` windows and schemaVersion 2 Test-stage tails are still available to the Agent for log exploration, but are not written as primary history chunks and are ignored by history search. `CI_AGENT_FAILURE_CHUNK_TAIL_LINES` controls the focused Test stage tail size used before summary extraction and defaults to 500 lines.
+
+Metrics are optional and disabled by default. When `CI_AGENT_METRICS_ENABLED=true`, each `analyze` / `analyze-local` run appends one JSONL record to `CI_AGENT_METRICS_FILE` (default `./runs/metrics/ci_analysis_metrics.jsonl`). The record includes total duration, stage timings, LLM calls, returned token usage, and responsibility item counts. Metrics write failures are reported as warnings and do not fail analysis.
 
 After switching to schemaVersion 3, clear old noisy or schemaVersion 2 chunks manually:
 

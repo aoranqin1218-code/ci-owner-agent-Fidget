@@ -13,7 +13,7 @@ from ci_owner_agent.agents.prompts import (
 from ci_owner_agent.config import Settings, validate_model_settings
 from ci_owner_agent.schemas import CiResponsibilityNotice
 from ci_owner_agent.services.llm_client import build_chat_model
-from ci_owner_agent.services.metrics import TokenUsageCallbackHandler, current_metrics_recorder
+from ci_owner_agent.services.metrics import TokenUsageCallbackHandler, current_metrics_recorder, llm_invoke_with_metrics
 from ci_owner_agent.services.scorer import downgrade_to_no_high_confidence, validate_notice
 
 
@@ -118,7 +118,7 @@ class LangChainResponsibilityAgent:
                 f"{CI_RESPONSIBILITY_NOTICE_JSON_SCHEMA_PROMPT}\n\n"
                 f"原始输出:\n{raw}"
             )
-            response = model.invoke(prompt)
+            response = llm_invoke_with_metrics(model, prompt)
             return str(getattr(response, "content", response))
         except Exception:
             return ""

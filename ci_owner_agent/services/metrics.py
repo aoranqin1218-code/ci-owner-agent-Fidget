@@ -185,7 +185,26 @@ class TokenUsageCallbackHandler(BaseCallbackHandler):
         self.recorder = recorder
 
     def on_llm_end(self, response: Any, **kwargs: Any) -> None:
-        self.recorder.record_token_usage(_extract_token_usage(response))
+        try:
+            self.recorder.record_token_usage(_extract_token_usage(response))
+        except Exception as exc:
+            self.recorder.warnings.append(f"token usage callback failed: {exc}")
+
+
+def llm_invoke_with_metrics(model: Any, input: Any, **kwargs: Any) -> Any:
+    recorder = current_metrics_recorder()
+    if recorder is None or not recorder.enabled:
+        return model.invoke(input, **kwargs)
+    config = dict(kwargs.pop("config", {}) or {})
+    callbacks = list(config.get("callbacks") or [])
+    handler = TokenUsageCallbackHandler(recorder)
+    callbacks.append(handler)
+    config["callbacks"] = callbacks
+    before_calls = recorder.llmCalls
+    response = model.invoke(input, config=config, **kwargs)
+    if recorder.llmCalls == before_calls:
+        handler.on_llm_end(response)
+    return response
 
 
 def _extract_token_usage(obj: Any) -> dict[str, int | None]:
@@ -217,11 +236,15 @@ def _find_usage(obj: Any, depth: int = 0) -> dict[str, Any] | None:
             if found:
                 return found
         return None
-    for attr in ("usage_metadata", "response_metadata", "llm_output"):
+    for attr in ("usage_metadata", "response_metadata", "llm_output", "generations", "message", "text", "content"):
         value = getattr(obj, attr, None)
         if isinstance(value, dict):
             if _looks_like_usage(value):
                 return value
+            found = _find_usage(value, depth + 1)
+            if found:
+                return found
+        elif value is not None and not isinstance(value, (str, bytes)):
             found = _find_usage(value, depth + 1)
             if found:
                 return found

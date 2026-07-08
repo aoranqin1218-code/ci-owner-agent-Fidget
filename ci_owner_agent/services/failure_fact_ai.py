@@ -6,6 +6,7 @@ from typing import Any
 from ci_owner_agent.config import Settings, validate_model_settings
 from ci_owner_agent.schemas import ChangedFile, CommitInfo, FailureFactExtractionResult
 from ci_owner_agent.services.llm_client import build_chat_model
+from ci_owner_agent.services.metrics import llm_invoke_with_metrics
 
 
 def extract_failure_facts_with_ai(
@@ -40,7 +41,7 @@ def extract_failure_facts_with_ai(
     )
     try:
         model = build_chat_model(settings)
-        response = model.invoke(prompt)
+        response = llm_invoke_with_metrics(model, prompt)
         raw = str(getattr(response, "content", response))
         data = _parse_json_object(raw)
         if data is None:
