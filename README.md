@@ -626,9 +626,9 @@ use ci_owner_agent
 db.ci_failure_chunks.deleteMany({})
 ```
 
-### 6.4 ???????????`scripts/rerun_analyze_local.py`
+### 6.4 重复运行分析：`scripts/rerun_analyze_local.py`
 
-?????????????? N ? `analyze-local`??? Agent ???????
+重复运行 N 次 `analyze-local` 以评估 Agent 稳定性。
 
 ```powershell
 python .\scripts\rerun_analyze_local.py `
@@ -646,34 +646,31 @@ python .\scripts\rerun_analyze_local.py `
   --out-dir .\runs\rerun-5088-focus
 ```
 
-?????
+主要参数：
 
-| ?? | ?? |
+| 参数 | 说明 |
 | --- | --- |
-| `--runs` | ??????? |
-| `--timeout-sec` | ????????? |
-| `--repo` | repo cache ?????? |
-| `--job` | Jenkins job ?? |
-| `--build` | ?????? |
-| `--branch` | ???? |
-| `--base-commit` | lastSuccessfulBuild commit??? fullRange ? notice.baseCommit? |
-| `--head-commit` | ???? commit? |
-| `--console-file` | ????????? |
-| `--last-success-build` | ????????????????? |
-| `--previous-build` | ??????????? focusRange ??? |
-| `--previous-commit` | ?????? head commit???????????? `previousCommit..headCommit`? |
-| `--out-dir` | ????? |
-| `--fetch-trace` | ?? LangSmith trace? |
-| `--notify` | ???????? |
-| `--force-notify` | ??????????? |
+| `--runs` | 运行次数。 |
+| `--timeout-sec` | 单次运行超时秒数。 |
+| `--repo` | repo cache 中的仓库名。 |
+| `--job` | Jenkins job 名。 |
+| `--build` | 当前构建号。 |
+| `--branch` | 分支名。 |
+| `--base-commit` | lastSuccessfulBuild commit，即 fullRange 和 notice.baseCommit。 |
+| `--head-commit` | 当前构建 commit。 |
+| `--console-file` | 本地控制台日志文件。 |
+| `--last-success-build` | 上次成功构建号（用于获取 base commit）。 |
+| `--previous-build` | 上一个构建号（用于 focusRange 查询）。 |
+| `--previous-commit` | 上一个构建的 head commit，用于缩小 diff 范围到 `previousCommit..headCommit`。 |
+| `--out-dir` | 输出目录。 |
+| `--fetch-trace` | 拉取 LangSmith trace。 |
+| `--notify` | 分析后发送通知。 |
+| `--force-notify` | 强制发送通知。 |
 
-???
-- `--base-commit` ?? lastSuccessfulBuild commit??? fullRange ? notice.baseCommit?
-- `--previous-commit` ?? focusRange???????? Mongo `ci_builds` ????? build ? headCommit?
-- ??????? `batch_analyze_company_logs.py` ???`index.jsonl`?`summary.csv`?`notices/`?`stdout/`?`stderr/`??
-
----
-
+说明：
+- `--base-commit` 为 lastSuccessfulBuild commit，即 fullRange 和 notice.baseCommit。
+- `--previous-commit` 为 focusRange 起点，优先从 Mongo `ci_builds` 查找上一个 build 的 headCommit。
+- 输出目录结构与 `batch_analyze_company_logs.py` 相同：`index.jsonl`、`summary.csv`、`notices/`、`stdout/`、`stderr/`。
 ## 7. 输出结果说明
 
 CLI 会输出严格 JSON，主要字段包括：
