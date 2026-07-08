@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from contextlib import nullcontext
 from pathlib import Path
 
 from ci_owner_agent.constants import NO_OWNER_NAME
@@ -13,6 +14,7 @@ from ci_owner_agent.services.feedback_store import FeedbackStore
 from ci_owner_agent.services.git_client import GitClient
 from ci_owner_agent.services.history_store import get_history_store, notice_hash
 from ci_owner_agent.services.jenkins_client import JenkinsClient
+from ci_owner_agent.services.metrics import AnalysisMetricsRecorder, current_metrics_recorder, use_metrics_recorder
 from ci_owner_agent.services.notification_formatter import format_wecom_markdown_notice
 from ci_owner_agent.services.wecom_mongo_user_mapping import build_wecom_notice_mapper
 from ci_owner_agent.services.wecom_notifier import send_wecom_markdown
@@ -105,31 +107,39 @@ def main(argv: list[str] | None = None) -> int:
         return int(exc.code or 0)
     if args.command == "analyze-local":
         git_client = GitClient(settings.repo_cache_dir, max_output_chars=settings.max_tool_output_chars)
+        recorder = _start_metrics(settings, args.job, args.build, args.repo, "analyze-local")
         try:
-            notice = analyze_local(
-                repo=args.repo,
-                job=args.job,
-                build=args.build,
-                branch=args.branch,
-                base_commit=args.base_commit,
-                head_commit=args.head_commit,
-                console_file=args.console_file,
-                build_url=args.build_url,
-                git_client=git_client,
-                log_tail_lines=args.log_tail_lines or settings.default_log_tail_lines,
-                result=args.result,
-                max_output_chars=settings.max_tool_output_chars,
-                settings=settings,
-                ignore_checkout_commit_mismatch=args.ignore_checkout_commit_mismatch,
-                last_successful_build_number=args.last_success_build,
-            )
+            with use_metrics_recorder(recorder):
+                notice = analyze_local(
+                    repo=args.repo,
+                    job=args.job,
+                    build=args.build,
+                    branch=args.branch,
+                    base_commit=args.base_commit,
+                    head_commit=args.head_commit,
+                    console_file=args.console_file,
+                    build_url=args.build_url,
+                    git_client=git_client,
+                    log_tail_lines=args.log_tail_lines or settings.default_log_tail_lines,
+                    result=args.result,
+                    max_output_chars=settings.max_tool_output_chars,
+                    settings=settings,
+                    ignore_checkout_commit_mismatch=args.ignore_checkout_commit_mismatch,
+                    last_successful_build_number=args.last_success_build,
+                )
         except ValueError as exc:
+            recorder.record_error(exc)
+            _finish_metrics(recorder, settings)
             print(f"ERROR: {exc}", file=sys.stderr)
             return 2
+        recorder.record_notice(notice)
         _print_json(notice)
-        _maybe_notify_notice(notice, settings, args.notify, args.notify_dry_run, args.force_notify)
+        with use_metrics_recorder(recorder):
+            _maybe_notify_notice(notice, settings, args.notify, args.notify_dry_run, args.force_notify)
+        _finish_metrics(recorder, settings)
         return 0
     if args.command == "analyze":
+        recorder = _start_metrics(settings, args.job, args.build, args.repo, "analyze")
         if not settings.jenkins_url:
             notice = failure_without_context(
                 BuildInfo(
@@ -145,8 +155,11 @@ def main(argv: list[str] | None = None) -> int:
                 None,
                 "JENKINS_URL 未配置，无法访问 Jenkins 获取构建信息。",
             )
+            recorder.record_notice(notice)
             _print_json(notice)
-            _maybe_notify_notice(notice, settings, args.notify, args.notify_dry_run, args.force_notify)
+            with use_metrics_recorder(recorder):
+                _maybe_notify_notice(notice, settings, args.notify, args.notify_dry_run, args.force_notify)
+            _finish_metrics(recorder, settings)
             return 0
         git_client = GitClient(settings.repo_cache_dir, max_output_chars=settings.max_tool_output_chars)
         jenkins_client = JenkinsClient(
@@ -155,17 +168,21 @@ def main(argv: list[str] | None = None) -> int:
             token=settings.jenkins_token,
             max_output_chars=settings.max_tool_output_chars,
         )
-        notice = analyze_jenkins(
-            repo=args.repo,
-            job=args.job,
-            build=args.build,
-            jenkins_client=jenkins_client,
-            git_client=git_client,
-            log_tail_lines=args.log_tail_lines or settings.default_log_tail_lines,
-            settings=settings,
-        )
+        with use_metrics_recorder(recorder):
+            notice = analyze_jenkins(
+                repo=args.repo,
+                job=args.job,
+                build=args.build,
+                jenkins_client=jenkins_client,
+                git_client=git_client,
+                log_tail_lines=args.log_tail_lines or settings.default_log_tail_lines,
+                settings=settings,
+            )
+        recorder.record_notice(notice)
         _print_json(notice)
-        _maybe_notify_notice(notice, settings, args.notify, args.notify_dry_run, args.force_notify)
+        with use_metrics_recorder(recorder):
+            _maybe_notify_notice(notice, settings, args.notify, args.notify_dry_run, args.force_notify)
+        _finish_metrics(recorder, settings)
         return 0
     if args.command == "notify-notice":
         notice_path = Path(args.notice_file)
@@ -270,40 +287,64 @@ def _has_responsible_item_owner(notice: CiResponsibilityNotice) -> bool:
     return False
 
 
-def _notify_notice(notice: CiResponsibilityNotice, settings, *, dry_run: bool, force: bool, feedback_base_url: str | None) -> dict:
-    store = get_history_store(settings)
-    mapper = build_wecom_notice_mapper(settings, store)
-    markdown = format_wecom_markdown_notice(
-        notice,
-        feedback_base_url=feedback_base_url,
-        feedback_token=settings.feedback_shared_token,
-        user_mapper=mapper,
-        mention_mode=settings.wecom_mention_mode,
+def _start_metrics(settings, job: str, build: int, repo: str, command: str) -> AnalysisMetricsRecorder:
+    return AnalysisMetricsRecorder.start(
+        enabled=settings.metrics_enabled,
+        job=job,
+        buildNumber=build,
+        repo=repo,
+        command=command,
+        model_provider=settings.model_provider,
+        model_name=settings.model_name,
     )
-    digest = notice_hash(notice)
-    if store and settings.notification_dedup_enabled and not force and store.notification_sent(
-        job=notice.job, branch=notice.branch, build_number=notice.buildNumber, notice_hash=digest
-    ):
-        return {"ok": True, "status": "skipped", "markdown": markdown}
-    if dry_run:
-        if store:
-            store.save_notification(notice=notice, notice_hash=digest, channel="wecom", status="dry_run", message=markdown)
-        return {"ok": True, "status": "dry_run", "markdown": markdown}
-    if not settings.wecom_webhook_url:
-        if store:
-            store.save_notification(notice=notice, notice_hash=digest, channel="wecom", status="failed", message=markdown, error="CI_AGENT_WECOM_WEBHOOK_URL is not configured")
-        return {"ok": False, "error": "CI_AGENT_WECOM_WEBHOOK_URL is not configured", "markdown": markdown}
-    send_result = send_wecom_markdown(settings.wecom_webhook_url, markdown)
-    if store:
-        store.save_notification(
-            notice=notice,
-            notice_hash=digest,
-            channel="wecom",
-            status="sent" if send_result.get("ok") else "failed",
-            message=markdown,
-            error=send_result.get("error"),
+
+
+def _finish_metrics(recorder: AnalysisMetricsRecorder, settings) -> None:
+    try:
+        recorder.finish()
+        recorder.append_jsonl(settings.metrics_file)
+    except Exception as exc:
+        recorder.record_error(exc)
+        print(f"WARNING: metrics write failed: {exc}", file=sys.stderr)
+
+
+def _notify_notice(notice: CiResponsibilityNotice, settings, *, dry_run: bool, force: bool, feedback_base_url: str | None) -> dict:
+    recorder = current_metrics_recorder()
+    stage = recorder.stage("notify") if recorder is not None else None
+    with stage if stage is not None else nullcontext():
+        store = get_history_store(settings)
+        mapper = build_wecom_notice_mapper(settings, store)
+        markdown = format_wecom_markdown_notice(
+            notice,
+            feedback_base_url=feedback_base_url,
+            feedback_token=settings.feedback_shared_token,
+            user_mapper=mapper,
+            mention_mode=settings.wecom_mention_mode,
         )
-    return {**send_result, "markdown": markdown}
+        digest = notice_hash(notice)
+        if store and settings.notification_dedup_enabled and not force and store.notification_sent(
+            job=notice.job, branch=notice.branch, build_number=notice.buildNumber, notice_hash=digest
+        ):
+            return {"ok": True, "status": "skipped", "markdown": markdown}
+        if dry_run:
+            if store:
+                store.save_notification(notice=notice, notice_hash=digest, channel="wecom", status="dry_run", message=markdown)
+            return {"ok": True, "status": "dry_run", "markdown": markdown}
+        if not settings.wecom_webhook_url:
+            if store:
+                store.save_notification(notice=notice, notice_hash=digest, channel="wecom", status="failed", message=markdown, error="CI_AGENT_WECOM_WEBHOOK_URL is not configured")
+            return {"ok": False, "error": "CI_AGENT_WECOM_WEBHOOK_URL is not configured", "markdown": markdown}
+        send_result = send_wecom_markdown(settings.wecom_webhook_url, markdown)
+        if store:
+            store.save_notification(
+                notice=notice,
+                notice_hash=digest,
+                channel="wecom",
+                status="sent" if send_result.get("ok") else "failed",
+                message=markdown,
+                error=send_result.get("error"),
+            )
+        return {**send_result, "markdown": markdown}
 
 
 if __name__ == "__main__":

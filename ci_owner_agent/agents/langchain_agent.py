@@ -13,6 +13,7 @@ from ci_owner_agent.agents.prompts import (
 from ci_owner_agent.config import Settings, validate_model_settings
 from ci_owner_agent.schemas import CiResponsibilityNotice
 from ci_owner_agent.services.llm_client import build_chat_model
+from ci_owner_agent.services.metrics import TokenUsageCallbackHandler, current_metrics_recorder
 from ci_owner_agent.services.scorer import downgrade_to_no_high_confidence, validate_notice
 
 
@@ -51,13 +52,17 @@ class LangChainResponsibilityAgent:
 
     def _invoke_agent(self) -> str:
         agent = self._create_v1_agent(self._model())
+        config = {
+            "metadata": self._metadata(),
+            "run_name": "ci-owner-agent-langchain-v1",
+            "recursion_limit": self.settings.agent_recursion_limit,
+        }
+        recorder = current_metrics_recorder()
+        if recorder is not None and recorder.enabled:
+            config["callbacks"] = [TokenUsageCallbackHandler(recorder)]
         result = agent.invoke(
             {"messages": [{"role": "user", "content": self._initial_input()}]},
-            config={
-                "metadata": self._metadata(),
-                "run_name": "ci-owner-agent-langchain-v1",
-                "recursion_limit": self.settings.agent_recursion_limit,
-            },
+            config=config,
         )
         structured = result.get("structured_response") if isinstance(result, dict) else None
         if structured is not None:

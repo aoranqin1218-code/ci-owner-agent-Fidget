@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import replace
+from typing import ContextManager
 
 from ci_owner_agent.agents.context import AgentRuntimeContext
 from ci_owner_agent.agents.factory import AgentConfigurationError, create_responsibility_agent
@@ -13,10 +15,16 @@ from ci_owner_agent.services.git_client import GitClient
 from ci_owner_agent.services.history_store import MongoHistoryStore, get_history_store
 from ci_owner_agent.services.jenkins_client import JenkinsClient
 from ci_owner_agent.services.log_provider import JenkinsLogProvider, LocalFileLogProvider, LogProvider, detect_checkout_revision_from_console_log
+from ci_owner_agent.services.metrics import current_metrics_recorder
 from ci_owner_agent.services.scorer import no_owner, validate_notice
 from ci_owner_agent.tools.ai_history_tools import history_search_similar_failure_facts
 from ci_owner_agent.tools.history_tools import history_search_similar_failures
 from ci_owner_agent.tools.jenkins_tools import jenkins_get_build_info, jenkins_get_last_successful_build_info
+
+
+def _metrics_stage(name: str) -> ContextManager[None]:
+    recorder = current_metrics_recorder()
+    return recorder.stage(name) if recorder is not None else nullcontext()
 
 
 def success_notice(build_info: BuildInfo, base_commit: str | None = None) -> CiResponsibilityNotice:
@@ -113,7 +121,8 @@ def analyze_failed_build(
     settings = settings or load_settings()
     if history_store is None and settings.history_enabled:
         history_store = get_history_store(settings)
-    sync_result = git_client.sync(repo)
+    with _metrics_stage("gitSync"):
+        sync_result = git_client.sync(repo)
     sync_warning: EvidenceItem | None = None
     if not sync_result.get("ok"):
         message = f"repo_sync 失败：{sync_result.get('error') or sync_result.get('command', {}).get('error') or 'unknown error'}"
@@ -127,10 +136,12 @@ def analyze_failed_build(
             detail=message,
             source="repo_sync",
         )
-    commits_result = git_client.get_commits_between(repo, base_commit, head_commit)
+    with _metrics_stage("gitDiff"):
+        commits_result = git_client.get_commits_between(repo, base_commit, head_commit)
     if not commits_result.get("ok"):
         return failure_without_context(build_info, base_commit, f"Git commit 区间读取失败：{commits_result.get('error')}")
-    diff_result = git_client.get_diff_files(repo, base_commit, head_commit)
+    with _metrics_stage("gitDiff"):
+        diff_result = git_client.get_diff_files(repo, base_commit, head_commit)
     if not diff_result.get("ok"):
         return failure_without_context(build_info, base_commit, f"Git diff 文件列表读取失败：{diff_result.get('error')}")
     commits = [CommitInfo.model_validate(item) for item in commits_result.get("commits", [])]
@@ -163,11 +174,12 @@ def analyze_failed_build(
     )
     runtime_context = _with_precomputed_failure_context(runtime_context, history_store=history_store)
     try:
-        agent = create_responsibility_agent(settings, runtime_context)
-        if isinstance(agent, LangChainResponsibilityAgent):
-            notice = agent.analyze()
-        else:
-            notice = agent.analyze(context)
+        with _metrics_stage("agentAnalyze"):
+            agent = create_responsibility_agent(settings, runtime_context)
+            if isinstance(agent, LangChainResponsibilityAgent):
+                notice = agent.analyze()
+            else:
+                notice = agent.analyze(context)
     except AgentConfigurationError as exc:
         return failure_without_context(build_info, base_commit, f"LLM 配置错误：{exc}")
     if sync_warning is not None:
@@ -193,42 +205,45 @@ def _with_precomputed_failure_context(
     history_store: MongoHistoryStore | None = None,
 ) -> AgentRuntimeContext:
     try:
-        failure_summaries = context.log_provider.find_test_failure_summaries(
-            tail_lines=context.settings.failure_chunk_tail_lines,
-            max_chunks=5,
-        )
+        with _metrics_stage("failureSummary"):
+            failure_summaries = context.log_provider.find_test_failure_summaries(
+                tail_lines=context.settings.failure_chunk_tail_lines,
+                max_chunks=5,
+            )
     except Exception as exc:
         failure_summaries = {"chunks": [], "warning": f"failure summary extraction failed: {exc}"}
     enriched = replace(context, failure_summaries=failure_summaries)
     if not (failure_summaries.get("chunks") if isinstance(failure_summaries, dict) else None) and context.settings.ai_failure_facts_enabled:
         try:
-            focused = context.log_provider.find_focused_failure_chunks(
-                tail_lines=context.settings.failure_chunk_tail_lines,
-                max_chunks=1,
-            )
-            chunks = focused.get("chunks", []) if isinstance(focused, dict) else []
-            log_excerpt = str(chunks[0].get("content") or "") if chunks else ""
-            if len(log_excerpt) > context.settings.ai_failure_fact_max_log_chars:
-                log_excerpt = log_excerpt[-context.settings.ai_failure_fact_max_log_chars :]
-            facts_result = extract_failure_facts_with_ai(
-                settings=context.settings,
-                job=context.job,
-                build_number=context.build_number,
-                build_url=context.build_url,
-                branch=context.branch,
-                log_excerpt=log_excerpt,
-                changed_files=context.changed_files,
-                commits=context.commits,
-            )
+            with _metrics_stage("failureFacts"):
+                focused = context.log_provider.find_focused_failure_chunks(
+                    tail_lines=context.settings.failure_chunk_tail_lines,
+                    max_chunks=1,
+                )
+                chunks = focused.get("chunks", []) if isinstance(focused, dict) else []
+                log_excerpt = str(chunks[0].get("content") or "") if chunks else ""
+                if len(log_excerpt) > context.settings.ai_failure_fact_max_log_chars:
+                    log_excerpt = log_excerpt[-context.settings.ai_failure_fact_max_log_chars :]
+                facts_result = extract_failure_facts_with_ai(
+                    settings=context.settings,
+                    job=context.job,
+                    build_number=context.build_number,
+                    build_url=context.build_url,
+                    branch=context.branch,
+                    log_excerpt=log_excerpt,
+                    changed_files=context.changed_files,
+                    commits=context.commits,
+                )
             enriched = replace(enriched, failure_facts=facts_result.model_dump(mode="json"))
         except Exception as exc:
             enriched = replace(enriched, failure_facts={"ok": False, "facts": [], "warning": f"AI failure facts extraction failed: {exc}"})
     try:
-        history_precheck = history_search_similar_failures(
-            enriched,
-            maxCandidates=enriched.settings.history_max_candidates,
-            store=history_store,
-        )
+        with _metrics_stage("historyPrecheck"):
+            history_precheck = history_search_similar_failures(
+                enriched,
+                maxCandidates=enriched.settings.history_max_candidates,
+                store=history_store,
+            )
     except Exception as exc:
         history_precheck = {
             "ok": False,
@@ -248,7 +263,8 @@ def _with_precomputed_failure_context(
         and enriched.settings.ai_history_compare_enabled
     ):
         try:
-            ai_history_precheck = history_search_similar_failure_facts(enriched, store=history_store)
+            with _metrics_stage("aiHistoryPrecheck"):
+                ai_history_precheck = history_search_similar_failure_facts(enriched, store=history_store)
         except Exception as exc:
             ai_history_precheck = {
                 "ok": False,
@@ -274,38 +290,39 @@ def _save_history(
     failure_facts: dict | None = None,
     history_store: MongoHistoryStore | None = None,
 ) -> None:
-    store = history_store or get_history_store(settings)
-    if store is None:
-        return
-    try:
-        summaries = failure_summaries
-        if summaries is None:
-            summaries = log_provider.find_test_failure_summaries(
-                tail_lines=settings.failure_chunk_tail_lines,
-                max_chunks=5,
+    with _metrics_stage("saveHistory"):
+        store = history_store or get_history_store(settings)
+        if store is None:
+            return
+        try:
+            summaries = failure_summaries
+            if summaries is None:
+                summaries = log_provider.find_test_failure_summaries(
+                    tail_lines=settings.failure_chunk_tail_lines,
+                    max_chunks=5,
+                )
+            chunks = summaries.get("chunks", [])
+            store.save_analysis(
+                build_info=build_info,
+                notice=notice,
+                base_commit=base_commit,
+                head_commit=head_commit,
+                last_successful_build_number=last_successful_build_number,
+                last_successful_commit=base_commit,
+                error_chunks=chunks,
             )
-        chunks = summaries.get("chunks", [])
-        store.save_analysis(
-            build_info=build_info,
-            notice=notice,
-            base_commit=base_commit,
-            head_commit=head_commit,
-            last_successful_build_number=last_successful_build_number,
-            last_successful_commit=base_commit,
-            error_chunks=chunks,
-        )
-        failure_facts_ok = isinstance(failure_facts, dict) and failure_facts.get("ok") is True
-        if failure_facts_ok:
-            facts = [
-                fact if isinstance(fact, FailureFact) else FailureFact.model_validate(fact)
-                for fact in ((failure_facts or {}).get("facts") or [])
-            ]
-            store.save_failure_facts(build_info=build_info, notice=notice, facts=facts)
-        elif isinstance(failure_facts, dict) and failure_facts.get("ok") is False:
-            warning = failure_facts.get("warning") or "AI failure facts extraction failed"
-            build_info.warnings.append(f"failure facts not saved: {warning}")
-    except Exception as exc:
-        build_info.warnings.append(f"history save failed: {exc}")
+            failure_facts_ok = isinstance(failure_facts, dict) and failure_facts.get("ok") is True
+            if failure_facts_ok:
+                facts = [
+                    fact if isinstance(fact, FailureFact) else FailureFact.model_validate(fact)
+                    for fact in ((failure_facts or {}).get("facts") or [])
+                ]
+                store.save_failure_facts(build_info=build_info, notice=notice, facts=facts)
+            elif isinstance(failure_facts, dict) and failure_facts.get("ok") is False:
+                warning = failure_facts.get("warning") or "AI failure facts extraction failed"
+                build_info.warnings.append(f"failure facts not saved: {warning}")
+        except Exception as exc:
+            build_info.warnings.append(f"history save failed: {exc}")
 
 
 def analyze_local(
@@ -385,7 +402,8 @@ def analyze_jenkins(
     settings: Settings | None = None,
 ) -> CiResponsibilityNotice:
     settings = settings or load_settings()
-    build_result = jenkins_get_build_info(jenkins_client, job, build, log_tail_lines)
+    with _metrics_stage("jenkinsFetch"):
+        build_result = jenkins_get_build_info(jenkins_client, job, build, log_tail_lines)
     if not build_result.get("ok"):
         build_info = BuildInfo(
             job=job,
@@ -414,12 +432,13 @@ def analyze_jenkins(
     if build_info.result not in {"FAILURE", "UNSTABLE", "UNKNOWN"}:
         return failure_without_context(build_info, None, f"不支持的 Jenkins 构建结果：{build_info.result}")
 
-    last_success_result = jenkins_get_last_successful_build_info(
-        jenkins_client,
-        job,
-        branch=build_info.branch,
-        beforeBuildNumber=build_info.buildNumber,
-    )
+    with _metrics_stage("jenkinsFetch"):
+        last_success_result = jenkins_get_last_successful_build_info(
+            jenkins_client,
+            job,
+            branch=build_info.branch,
+            beforeBuildNumber=build_info.buildNumber,
+        )
     if not last_success_result.get("ok"):
         return failure_without_context(
             build_info,

@@ -56,6 +56,9 @@ class Settings:
     feedback_server_port: int
     feedback_shared_token: str | None
     notification_dedup_enabled: bool
+    metrics_enabled: bool
+    metrics_file: Path
+    metrics_mongo_enabled: bool
 
 
 def _int_env(name: str, default: int) -> int:
@@ -158,6 +161,9 @@ def load_settings(env_file: str | Path | None = None) -> Settings:
         feedback_server_port=_int_env_or_default("CI_AGENT_FEEDBACK_SERVER_PORT", 8765),
         feedback_shared_token=os.getenv("CI_AGENT_FEEDBACK_SHARED_TOKEN") or None,
         notification_dedup_enabled=_bool_env("CI_AGENT_NOTIFICATION_DEDUP_ENABLED", True),
+        metrics_enabled=_bool_env("CI_AGENT_METRICS_ENABLED", False),
+        metrics_file=Path(os.getenv("CI_AGENT_METRICS_FILE", "./runs/metrics/ci_analysis_metrics.jsonl")).expanduser(),
+        metrics_mongo_enabled=_bool_env("CI_AGENT_METRICS_MONGO_ENABLED", False),
     )
 
 
