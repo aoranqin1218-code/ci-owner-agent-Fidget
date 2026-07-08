@@ -176,13 +176,22 @@ def analyze_failed_build(
         last_successful_build_number=last_successful_build_number,
     )
     runtime_context = _with_precomputed_failure_context(runtime_context, history_store=history_store)
-    no_owner_decision = _select_best_no_owner_decision(runtime_context.history_precheck, runtime_context.ai_history_precheck)
-    if settings.history_inherit_no_owner_enabled and no_owner_decision and not _has_new_strong_evidence(
-        decision=no_owner_decision,
-        failure_summaries=runtime_context.failure_summaries,
-        failure_facts=runtime_context.failure_facts,
-        changed_files=changed_files,
-    ):
+    with _metrics_stage("historyNoOwnerDecision"):
+        no_owner_decision = _select_build_level_no_owner_decision(
+            runtime_context.history_precheck,
+            runtime_context.ai_history_precheck,
+        )
+        should_short_circuit_no_owner = bool(
+            settings.history_inherit_no_owner_enabled
+            and no_owner_decision
+            and not _has_new_strong_evidence(
+                decision=no_owner_decision,
+                failure_summaries=runtime_context.failure_summaries,
+                failure_facts=runtime_context.failure_facts,
+                changed_files=changed_files,
+            )
+        )
+    if should_short_circuit_no_owner and no_owner_decision:
         recorder = current_metrics_recorder()
         if recorder is not None:
             recorder.warnings.append(
@@ -315,16 +324,29 @@ def _with_precomputed_failure_context(
     return enriched
 
 
-def _select_best_no_owner_decision(history_precheck: dict | None, ai_history_precheck: dict | None) -> dict | None:
+def _select_build_level_no_owner_decision(history_precheck: dict | None, ai_history_precheck: dict | None) -> dict | None:
+    history_items = (history_precheck or {}).get("currentChunks") or []
+    if history_items:
+        return _select_all_failures_no_owner_decision(history_items, source="historyPrecheck")
+
+    ai_items = (ai_history_precheck or {}).get("currentFacts") or []
+    if ai_items:
+        return _select_all_failures_no_owner_decision(ai_items, source="aiHistoryPrecheck")
+    return None
+
+
+def _select_all_failures_no_owner_decision(items: list, *, source: str) -> dict | None:
     decisions: list[dict] = []
-    for item in (history_precheck or {}).get("currentChunks") or []:
-        decision = item.get("noOwnerDecision") if isinstance(item, dict) else None
-        if isinstance(decision, dict) and decision.get("found"):
-            decisions.append({**decision, "source": "historyPrecheck"})
-    for item in (ai_history_precheck or {}).get("currentFacts") or []:
-        decision = item.get("noOwnerDecision") if isinstance(item, dict) else None
-        if isinstance(decision, dict) and decision.get("found"):
-            decisions.append({**decision, "source": "aiHistoryPrecheck"})
+    for item in items:
+        if not isinstance(item, dict):
+            return None
+        inherited = item.get("inheritedOwner") if isinstance(item.get("inheritedOwner"), dict) else {}
+        if inherited.get("found"):
+            return None
+        decision = item.get("noOwnerDecision") if isinstance(item.get("noOwnerDecision"), dict) else None
+        if not decision or not decision.get("found"):
+            return None
+        decisions.append({**decision, "source": source})
     if not decisions:
         return None
     decisions.sort(
@@ -334,7 +356,18 @@ def _select_best_no_owner_decision(history_precheck: dict | None, ai_history_pre
         ),
         reverse=True,
     )
-    return decisions[0]
+    selected = dict(decisions[0])
+    selected["allFailuresNoOwnerDecision"] = True
+    selected["coveredFailureCount"] = len(decisions)
+    selected["coveredSourceBuildNumbers"] = sorted(
+        {number for number in (item.get("sourceBuildNumber") for item in decisions) if number is not None}
+    )
+    selected["coveredSignatures"] = [
+        signature
+        for signature in (_decision_signature(item) for item in decisions)
+        if signature
+    ]
+    return selected
 
 
 def _has_new_strong_evidence(
@@ -346,7 +379,12 @@ def _has_new_strong_evidence(
 ) -> bool:
     current_signature = _current_failure_signature(failure_summaries, failure_facts)
     source_signature = _decision_signature(decision)
-    if current_signature and source_signature and current_signature != source_signature:
+    if (
+        not decision.get("allFailuresNoOwnerDecision")
+        and current_signature
+        and source_signature
+        and current_signature != source_signature
+    ):
         return True
     summary = _first_failure_summary_signature(failure_summaries)
     facts = (failure_facts or {}).get("facts") if isinstance(failure_facts, dict) else []
@@ -378,17 +416,25 @@ def _build_no_owner_notice_from_history_decision(
     source_build = decision.get("sourceBuildNumber")
     match_type = decision.get("matchType") or "history_same_failure"
     relationship = decision.get("relationship") or "very_likely_same_failure"
-    reason = (
-        f"该失败与历史构建 #{source_build} 已分析为无高可信责任人的失败一致，"
-        "当前构建没有新的强证据改变结论，因此直接继承历史 no-owner 判定。"
-    )
+    if decision.get("allFailuresNoOwnerDecision"):
+        covered = decision.get("coveredFailureCount") or 1
+        reason = (
+            f"所有当前失败项（共 {covered} 个）均与历史构建 #{source_build} 等已分析为无高可信责任人的同类失败一致，"
+            "且当前构建没有新的强证据改变结论，因此直接继承历史 no-owner 判定。"
+        )
+    else:
+        reason = (
+            f"该失败与历史构建 #{source_build} 已分析为无高可信责任人的失败一致，"
+            "当前构建没有新的强证据改变结论，因此直接继承历史 no-owner 判定。"
+        )
     evidence = EvidenceItem(
         id="E_HISTORY_NO_OWNER",
         type="reasoning",
         summary="历史同类失败已判定为无高可信责任人",
         detail=(
             f"sourceBuildNumber={source_build}; sourceBuildUrl={decision.get('sourceBuildUrl')}; "
-            f"matchType={match_type}; relationship={relationship}; reason={decision.get('reason')}"
+            f"matchType={match_type}; relationship={relationship}; "
+            f"coveredFailureCount={decision.get('coveredFailureCount')}; reason={decision.get('reason')}"
         ),
         source="history_no_owner_decision",
     )

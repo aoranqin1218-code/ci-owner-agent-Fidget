@@ -312,10 +312,10 @@ CI_AGENT_FAILURE_CHUNK_TAIL_LINES=500
 | `CI_AGENT_HISTORY_MONGO_URI` | MongoDB URI。 |
 | `CI_AGENT_HISTORY_MONGO_DB` | 数据库名。 |
 | `CI_AGENT_HISTORY_MAX_CANDIDATES` | 历史候选失败最大数量。 |
-| `CI_AGENT_HISTORY_INHERIT_NO_OWNER_ENABLED` | 历史同类失败已判定为 `no_high_confidence_owner` 且当前没有新强证据时，直接继承 no-owner 判定并跳过完整 Agent 分析。 |
+| `CI_AGENT_HISTORY_INHERIT_NO_OWNER_ENABLED` | 当所有当前失败项都匹配历史 `no_high_confidence_owner` 判定、没有 inherited owner、且当前没有新强证据时，直接继承 no-owner 判定并跳过完整 Agent 分析。 |
 | `CI_AGENT_FAILURE_CHUNK_TAIL_LINES` | 提取 focused failure summaries 前读取的测试阶段尾部行数。 |
 
-历史不仅可以继承责任人，也可以继承 no-owner 判定。这个短路主要用于 Timeout / AwaitFunc / 环境抖动 / 异步等待类失败；如果需要强制重新分析，可设置 `CI_AGENT_HISTORY_INHERIT_NO_OWNER_ENABLED=false`。
+历史不仅可以继承责任人，也可以继承 no-owner 判定。这个短路主要用于 Timeout / AwaitFunc / 环境抖动 / 异步等待类失败；只有当前 build 的所有失败项都被历史 no-owner 覆盖、没有可继承责任人、且没有新的错误码/失败路径等强证据时才会触发。多失败 build 中如果还有未覆盖的新失败项，会继续进入 Agent 分析；如果需要强制重新分析，可设置 `CI_AGENT_HISTORY_INHERIT_NO_OWNER_ENABLED=false`。
 
 ### 4.7 metrics 配置
 

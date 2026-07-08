@@ -2,7 +2,13 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from ci_owner_agent.orchestrator import _has_new_strong_evidence, _save_history, _with_precomputed_failure_context, analyze_failed_build
+from ci_owner_agent.orchestrator import (
+    _has_new_strong_evidence,
+    _save_history,
+    _select_build_level_no_owner_decision,
+    _with_precomputed_failure_context,
+    analyze_failed_build,
+)
 from ci_owner_agent.schemas import BuildInfo, ChangedFile, CiResponsibilityNotice, FailureFact, FailureFactExtractionResult
 from ci_owner_agent.services.git_client import GitClient
 from tests.test_history_store import high_confidence_payload, make_store, no_owner_item
@@ -66,6 +72,34 @@ class SigSummaryProvider:
         return {"chunks": [{"content": "✖ Webhook触发\nRun\nAwaitFunc\nTimeout!"}]}
 
 
+class MultiSigSummaryProvider:
+    def __init__(self, signatures: list[str]):
+        self.signatures = signatures
+
+    def find_test_failure_summaries(self, tail_lines=500, max_chunks=5):
+        chunks = []
+        for index, signature_key in enumerate(self.signatures):
+            chunks.append(
+                {
+                    "chunkIndex": index,
+                    "schemaVersion": 3,
+                    "chunkSource": "local_test_failure_summary",
+                    "content": f"✖ failure {index}\nRun\nAwaitFunc\nTimeout!",
+                    "signature": {
+                        "signatureKey": signature_key,
+                        "testName": f"failure {index}",
+                        "errorType": "Timeout",
+                        "errorMessage": "run awaitfunc timeout",
+                    },
+                    "signatureHash": signature_key,
+                }
+            )
+        return {"chunks": chunks}
+
+    def find_focused_failure_chunks(self, tail_lines=500, max_chunks=1):
+        return {"chunks": [{"content": "multiple timeout failures"}]}
+
+
 def _save_existing_failure_fact(store, context, fact: FailureFact) -> tuple[BuildInfo, CiResponsibilityNotice]:
     payload = high_confidence_payload(context)
     payload["buildNumber"] = 7
@@ -109,6 +143,21 @@ def _save_historical_no_owner(store, context, *, signature_key: str = "sig-timeo
     build_info = BuildInfo(job=context.job, buildNumber=build, result="FAILURE", buildUrl=f"local://job/{build}", branch=context.branch, commit=context.head_commit)
     chunk = SigSummaryProvider(signature_key).find_test_failure_summaries()["chunks"][0]
     store.save_analysis(build_info, notice, context.base_commit, context.head_commit, build - 1, context.base_commit, [chunk])
+    return build_info, notice
+
+
+def _save_historical_no_owner_chunks(store, context, *, signature_keys: list[str], build: int = 5088):
+    payload = high_confidence_payload(context)
+    payload["owner"] = {"type": "no_high_confidence_owner", "name": "无高可信责任人", "email": None, "commit": None, "confidence": 0}
+    payload["hasHighConfidenceOwner"] = False
+    payload["responsibilityItems"] = [
+        no_owner_item(failure_id=f"F{index + 1}", failure_title=f"failure {index}", failure_signature=signature_key)
+        for index, signature_key in enumerate(signature_keys)
+    ]
+    notice = CiResponsibilityNotice.model_validate(payload)
+    build_info = BuildInfo(job=context.job, buildNumber=build, result="FAILURE", buildUrl=f"local://job/{build}", branch=context.branch, commit=context.head_commit)
+    chunks = MultiSigSummaryProvider(signature_keys).find_test_failure_summaries()["chunks"]
+    store.save_analysis(build_info, notice, context.base_commit, context.head_commit, build - 1, context.base_commit, chunks)
     return build_info, notice
 
 
@@ -277,6 +326,66 @@ def test_no_owner_decision_short_circuits_agent(monkeypatch, repo_cache, sample_
     assert "历史构建 #5088" in notice.failureReason
 
 
+def test_inherited_owner_has_priority_over_no_owner_decision():
+    decision = _select_build_level_no_owner_decision(
+        {
+            "currentChunks": [
+                {
+                    "inheritedOwner": {"found": True, "ownerName": "Tang"},
+                    "noOwnerDecision": {"found": True, "sourceBuildNumber": 5088},
+                }
+            ]
+        },
+        None,
+    )
+
+    assert decision is None
+
+
+def test_single_no_owner_decision_does_not_short_circuit_multi_failure_build():
+    decision = _select_build_level_no_owner_decision(
+        {
+            "currentChunks": [
+                {"inheritedOwner": {"found": False}, "noOwnerDecision": {"found": True, "sourceBuildNumber": 5088}},
+                {"inheritedOwner": {"found": False}, "noOwnerDecision": {"found": False}},
+            ]
+        },
+        None,
+    )
+
+    assert decision is None
+
+
+def test_all_chunks_no_owner_decision_short_circuits_agent(monkeypatch, repo_cache, sample_repo, logs):
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    settings = replace(context.settings, history_enabled=True, history_inherit_no_owner_enabled=True)
+    store = make_store()
+    _save_historical_no_owner_chunks(store, context, signature_keys=["sig-timeout-a", "sig-timeout-b"], build=5088)
+
+    def fail_agent(*args, **kwargs):
+        raise AssertionError("agent should be skipped when all failures are historical no-owner")
+
+    monkeypatch.setattr("ci_owner_agent.orchestrator.create_responsibility_agent", fail_agent)
+    build_info = BuildInfo(job=context.job, buildNumber=5089, result="FAILURE", buildUrl="local://job/5089", branch=context.branch, commit=context.head_commit)
+
+    notice = analyze_failed_build(
+        sample_repo["repo"],
+        build_info,
+        context.base_commit,
+        context.head_commit,
+        MultiSigSummaryProvider(["sig-timeout-a", "sig-timeout-b"]),
+        GitClient(repo_cache),
+        allow_sync_failure=True,
+        settings=settings,
+        last_successful_build_number=5087,
+        history_store=store,
+    )
+
+    assert notice.owner.type == "no_high_confidence_owner"
+    assert "所有当前失败项" in notice.failureReason
+    assert "coveredFailureCount=2" in notice.evidence[0].detail
+
+
 def test_no_owner_decision_disabled_falls_back_to_agent(monkeypatch, repo_cache, sample_repo, logs):
     context = make_lc_context(repo_cache, sample_repo, logs)
     settings = replace(context.settings, history_enabled=True, history_inherit_no_owner_enabled=False)
@@ -327,6 +436,47 @@ def test_no_owner_decision_reanalyzes_when_new_strong_evidence():
         },
         failure_facts=None,
         changed_files=[ChangedFile(path="modules/automation/tests/venv.ts", status="M")],
+    )
+
+
+def test_no_owner_decision_no_new_strong_evidence_for_same_timeout():
+    assert not _has_new_strong_evidence(
+        decision={"signature": {"signatureKey": "sig-timeout", "errorType": "Timeout", "errorMessage": "run awaitfunc timeout"}},
+        failure_summaries={
+            "chunks": [
+                {
+                    "signature": {
+                        "signatureKey": "sig-timeout",
+                        "errorType": "Timeout",
+                        "errorMessage": "run awaitfunc timeout",
+                        "testFile": "modules/automation/tests/venv.ts",
+                    },
+                    "signatureHash": "sig-timeout",
+                }
+            ]
+        },
+        failure_facts=None,
+        changed_files=[ChangedFile(path="packages/fxp-ai/src/index.ts", status="M")],
+    )
+
+
+def test_no_owner_decision_detects_new_strong_error_code():
+    assert _has_new_strong_evidence(
+        decision={"signature": {"signatureKey": "sig-timeout", "errorType": "Timeout", "errorMessage": "run awaitfunc timeout"}},
+        failure_summaries={
+            "chunks": [
+                {
+                    "signature": {
+                        "signatureKey": "sig-timeout",
+                        "errorType": "TypeScriptCompileError",
+                        "errorMessage": "error TS2305: missing export",
+                    },
+                    "signatureHash": "sig-timeout",
+                }
+            ]
+        },
+        failure_facts=None,
+        changed_files=[],
     )
 
 

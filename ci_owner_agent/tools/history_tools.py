@@ -141,10 +141,15 @@ def history_search_similar_failures(
             chunk_index: _find_inherited_owner_for_chunk(chunk_candidates, context.build_number)
             for chunk_index, chunk_candidates in candidates_by_chunk.items()
         }
-        no_owner_by_chunk = {
-            chunk_index: _find_no_owner_decision_for_chunk(chunk_candidates, context.build_number)
-            for chunk_index, chunk_candidates in candidates_by_chunk.items()
-        }
+        no_owner_by_chunk = {}
+        for chunk_index, chunk_candidates in candidates_by_chunk.items():
+            if inherited_by_chunk.get(chunk_index, {}).get("found"):
+                no_owner_by_chunk[chunk_index] = {"found": False}
+            else:
+                no_owner_by_chunk[chunk_index] = _find_no_owner_decision_for_chunk(
+                    chunk_candidates,
+                    context.build_number,
+                )
         for candidate in candidates:
             candidate["inheritedOwner"] = inherited_by_chunk.get(
                 candidate.get("currentChunkIndex"),
