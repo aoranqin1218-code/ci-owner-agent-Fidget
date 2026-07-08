@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import argparse
 import csv
@@ -31,6 +31,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--console-file", required=True)
     parser.add_argument("--build-url", default=None)
     parser.add_argument("--last-success-build", type=int, default=None)
+    parser.add_argument("--previous-build", type=int, default=None)
+    parser.add_argument("--previous-commit", default=None)
     parser.add_argument(
         "--result",
         choices=["SUCCESS", "FAILURE", "UNSTABLE", "ABORTED", "UNKNOWN"],
@@ -137,6 +139,12 @@ def build_command(args: argparse.Namespace) -> list[str]:
 
     if args.last_success_build is not None:
         command += ["--last-success-build", str(args.last_success_build)]
+
+    if args.previous_build is not None:
+        command += ["--previous-build", str(args.previous_build)]
+
+    if args.previous_commit:
+        command += ["--previous-commit", args.previous_commit]
 
     if args.result:
         command += ["--result", args.result]
@@ -308,7 +316,7 @@ def run_to_dict(run: Any) -> dict[str, Any]:
         if value is not None:
             data[field] = to_jsonable(value)
 
-    # 有些 LangSmith Run 把 metadata 放在 extra.metadata
+    # 鏈変簺 LangSmith Run 鎶?metadata 鏀惧湪 extra.metadata
     if "metadata" not in data:
         metadata = get_run_metadata(run)
         if metadata:

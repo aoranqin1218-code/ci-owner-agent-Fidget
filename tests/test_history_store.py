@@ -1066,3 +1066,143 @@ def test_find_historical_failure_facts_limits_max_facts(repo_cache, sample_repo,
     )
 
     assert [item["buildNumber"] for item in facts] == [7, 6]
+from ci_owner_agent.schemas import BuildInfo, CiResponsibilityNotice
+from tests.test_history_store import make_store
+from tests.test_langchain_agent import high_confidence_payload, make_lc_context
+
+
+def test_history_store_find_previous_build(repo_cache, sample_repo, logs):
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    store = make_store()
+
+    notice = CiResponsibilityNotice.model_validate(high_confidence_payload(context))
+
+    # Save #5086 with headCommit="old"
+    build_5086 = BuildInfo(
+        job=context.job,
+        buildNumber=5086,
+        result="SUCCESS",
+        buildUrl="local://job/5086",
+        branch="dev",
+        commit="old",
+    )
+    store.save_analysis(build_5086, notice, "base", "old", 5068, "base", [])
+
+    # Save #5087 with headCommit="previous"
+    build_5087 = BuildInfo(
+        job=context.job,
+        buildNumber=5087,
+        result="FAILURE",
+        buildUrl="local://job/5087",
+        branch="dev",
+        commit="previous",
+    )
+    store.save_analysis(build_5087, notice, "base", "previous", 5068, "base", [])
+
+    # Save #5087 on branch "other" with headCommit="other-previous"
+    build_5087_other = BuildInfo(
+        job=context.job,
+        buildNumber=5087,
+        result="FAILURE",
+        buildUrl="local://job/5087-other",
+        branch="other",
+        commit="other-previous",
+    )
+    store.save_analysis(build_5087_other, notice, "base", "other-previous", 5068, "base", [])
+
+    # Query for branch="dev" should return #5087 with headCommit="previous"
+    result = store.find_previous_build(
+        job=context.job,
+        branch="dev",
+        current_build_number=5088,
+    )
+    assert result is not None
+    assert result["buildNumber"] == 5087
+    assert result["headCommit"] == "previous"
+
+
+def test_history_store_find_previous_build_matches_branch_none(repo_cache, sample_repo, logs):
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    store = make_store()
+
+    notice = CiResponsibilityNotice.model_validate(high_confidence_payload(context))
+
+    # Save #5086 with branch=None
+    build_5086 = BuildInfo(
+        job=context.job,
+        buildNumber=5086,
+        result="FAILURE",
+        buildUrl="local://job/5086",
+        branch=None,
+        commit="previous",
+    )
+    store.save_analysis(build_5086, notice, "base", "previous", 5068, "base", [])
+
+    # branch="dev" query should match branch=None builds
+    result = store.find_previous_build(
+        job=context.job,
+        branch="dev",
+        current_build_number=5087,
+    )
+    assert result is not None
+    assert result["buildNumber"] == 5086
+    assert result["headCommit"] == "previous"
+
+
+def test_history_store_find_previous_build_skips_missing_head_commit(repo_cache, sample_repo, logs):
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    store = make_store()
+
+    notice = CiResponsibilityNotice.model_validate(high_confidence_payload(context))
+
+    # #5087 with headCommit=None should be skipped
+    store.builds.update_one(
+        {"job": context.job, "branch": "dev", "buildNumber": 5087},
+        {
+            "$set": {
+                "job": context.job,
+                "branch": "dev",
+                "buildNumber": 5087,
+                "result": "FAILURE",
+                "baseCommit": "base",
+                "headCommit": None,
+                "lastSuccessfulBuildNumber": 5068,
+                "lastSuccessfulCommit": "base",
+                "buildUrl": "local://job/5087",
+                "createdAt": None,
+            }
+        },
+        upsert=True,
+    )
+
+    # #5086 with headCommit="previous"
+    build_5086 = BuildInfo(
+        job=context.job,
+        buildNumber=5086,
+        result="FAILURE",
+        buildUrl="local://job/5086",
+        branch="dev",
+        commit="previous",
+    )
+    store.save_analysis(build_5086, notice, "base", "previous", 5068, "base", [])
+
+    result = store.find_previous_build(
+        job=context.job,
+        branch="dev",
+        current_build_number=5088,
+    )
+    assert result is not None
+    assert result["buildNumber"] == 5086
+    assert result["headCommit"] == "previous"
+
+
+def test_history_store_find_previous_build_returns_none_when_no_match(repo_cache, sample_repo, logs):
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    store = make_store()
+
+    result = store.find_previous_build(
+        job=context.job,
+        branch="dev",
+        current_build_number=5088,
+    )
+    assert result is None
