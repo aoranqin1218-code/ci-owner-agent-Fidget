@@ -10,6 +10,7 @@ from scripts.batch_analyze_company_logs import (
     filter_logs_by_build_range,
     load_logs,
     main,
+    read_last_jsonl,
     should_skip_for_resume,
 )
 
@@ -258,3 +259,160 @@ def test_extract_responsibility_stats_backward_compatible_without_items():
     assert stats["responsibilityItemCount"] == 0
     assert stats["responsibleOwners"] == ""
     assert stats["unresolvedFailureCount"] == 0
+
+def test_load_logs_sets_previous_commit_for_consecutive_failures(tmp_path):
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    success_commit = "a" * 40
+    fail1_commit = "b" * 40
+    fail2_commit = "c" * 40
+
+    (log_dir / "company-unittest-5075.log").write_text(
+        f"Checking out Revision {success_commit}\nFinished: SUCCESS\n",
+        encoding="utf-8",
+    )
+    (log_dir / "company-unittest-5076.log").write_text(
+        f"Checking out Revision {fail1_commit}\nAssertionError\nFinished: FAILURE\n",
+        encoding="utf-8",
+    )
+    (log_dir / "company-unittest-5077.log").write_text(
+        f"Checking out Revision {fail2_commit}\nAssertionError\nFinished: FAILURE\n",
+        encoding="utf-8",
+    )
+
+    logs = load_logs(log_dir, "*.log")
+
+    fail1 = next(item for item in logs if item.build == 5076)
+    assert fail1.base_commit == success_commit
+    assert fail1.last_success_build_number == 5075
+    # Previous build is the last SUCCESS (#5075)
+    assert fail1.previous_build_number == 5075
+    assert fail1.previous_commit == success_commit
+
+    fail2 = next(item for item in logs if item.build == 5077)
+    assert fail2.base_commit == success_commit
+    assert fail2.last_success_build_number == 5075
+    # Previous build is the FAILURE #5076
+    assert fail2.previous_build_number == 5076
+    assert fail2.previous_commit == fail1_commit
+
+
+def test_load_logs_previous_commit_none_when_no_prior_build_with_head_commit(tmp_path):
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    fail_commit = "a" * 40
+
+    (log_dir / "company-unittest-5076.log").write_text(
+        f"Checking out Revision {fail_commit}\nAssertionError\nFinished: FAILURE\n",
+        encoding="utf-8",
+    )
+
+    # No initial_base_commit and no prior SUCCESS -> skip_reason
+    logs = load_logs(log_dir, "*.log")
+    fail = next(item for item in logs if item.build == 5076)
+    assert fail.skip_reason is not None  # missing previous successful commit
+    assert fail.previous_build_number is None
+    assert fail.previous_commit is None
+
+
+def test_load_logs_previous_commit_with_initial_base_commit(tmp_path):
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    fail_commit = "a" * 40
+    initial = "i" * 40
+
+    (log_dir / "company-unittest-5076.log").write_text(
+        f"Checking out Revision {fail_commit}\nAssertionError\nFinished: FAILURE\n",
+        encoding="utf-8",
+    )
+
+    logs = load_logs(log_dir, "*.log", initial_base_commit=initial)
+    fail = next(item for item in logs if item.build == 5076)
+    assert fail.base_commit == initial
+    # No prior build with headCommit, so previous fields are None
+    assert fail.previous_build_number is None
+    assert fail.previous_commit is None
+
+
+def test_build_analyze_command_includes_previous_args(tmp_path):
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    success_commit = "a" * 40
+    fail_commit = "b" * 40
+
+    (log_dir / "company-unittest-5075.log").write_text(
+        f"Checking out Revision {success_commit}\nFinished: SUCCESS\n",
+        encoding="utf-8",
+    )
+    (log_dir / "company-unittest-5076.log").write_text(
+        f"Checking out Revision {fail_commit}\nAssertionError\nFinished: FAILURE\n",
+        encoding="utf-8",
+    )
+
+    logs = load_logs(log_dir, "*.log")
+    failure = next(item for item in logs if item.build == 5076)
+
+    command = build_analyze_command(
+        item=failure,
+        repo="fx-code",
+        job="services/fx-code-unittest",
+        branch="dev",
+        build_url_prefix="local://services/fx-code-unittest",
+    )
+
+    assert "--last-success-build" in command
+    assert command[command.index("--last-success-build") + 1] == "5075"
+    assert "--previous-build" in command
+    assert command[command.index("--previous-build") + 1] == "5075"
+    assert "--previous-commit" in command
+    assert command[command.index("--previous-commit") + 1] == success_commit
+
+
+def test_build_analyze_command_omits_previous_when_none(tmp_path):
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    initial = "i" * 40
+    fail_commit = "a" * 40
+
+    (log_dir / "company-unittest-5076.log").write_text(
+        f"Checking out Revision {fail_commit}\nAssertionError\nFinished: FAILURE\n",
+        encoding="utf-8",
+    )
+
+    logs = load_logs(log_dir, "*.log", initial_base_commit=initial)
+    failure = next(item for item in logs if item.build == 5076)
+
+    command = build_analyze_command(
+        item=failure,
+        repo="fx-code",
+        job="services/fx-code-unittest",
+        branch="dev",
+        build_url_prefix="local://services/fx-code-unittest",
+    )
+
+    assert "--previous-build" not in command
+    assert "--previous-commit" not in command
+
+
+def test_read_last_jsonl_reads_last_line(tmp_path):
+    metrics_file = tmp_path / "test.metrics.jsonl"
+    metrics_file.write_text(
+        '{"durationMs": 100}\n{"durationMs": 200, "llmCalls": 3}\n',
+        encoding="utf-8",
+    )
+    result = read_last_jsonl(metrics_file)
+    assert result is not None
+    assert result["durationMs"] == 200
+    assert result["llmCalls"] == 3
+
+
+def test_read_last_jsonl_returns_none_for_missing_file(tmp_path):
+    result = read_last_jsonl(tmp_path / "nonexistent.jsonl")
+    assert result is None
+
+
+def test_read_last_jsonl_returns_none_for_empty_file(tmp_path):
+    metrics_file = tmp_path / "empty.jsonl"
+    metrics_file.write_text("", encoding="utf-8")
+    result = read_last_jsonl(metrics_file)
+    assert result is None

@@ -37,6 +37,8 @@ class BuildLog:
     head_commit: str | None
     base_commit: str | None = None
     last_success_build_number: int | None = None
+    previous_build_number: int | None = None
+    previous_commit: str | None = None
     skip_reason: str | None = None
 
 
@@ -128,12 +130,16 @@ def load_logs(log_dir: Path, log_glob: str, initial_base_commit: str | None = No
 
     last_success_commit = initial_base_commit
     last_success_build_number: int | None = None
+    previous_build_number: int | None = None
+    previous_commit: str | None = None
 
     for item in logs:
         if item.status == "SUCCESS":
             if item.head_commit:
                 last_success_commit = item.head_commit
                 last_success_build_number = item.build
+                previous_build_number = item.build
+                previous_commit = item.head_commit
             else:
                 item.skip_reason = "success build missing head commit"
             continue
@@ -156,6 +162,12 @@ def load_logs(log_dir: Path, log_glob: str, initial_base_commit: str | None = No
 
         item.base_commit = last_success_commit
         item.last_success_build_number = last_success_build_number
+        if previous_build_number is not None:
+            item.previous_build_number = previous_build_number
+            item.previous_commit = previous_commit
+
+        previous_build_number = item.build
+        previous_commit = item.head_commit
 
     return logs
 
@@ -395,6 +407,10 @@ def build_analyze_command(
     ]
     if item.last_success_build_number is not None:
         command.extend(["--last-success-build", str(item.last_success_build_number)])
+    if item.previous_build_number is not None:
+        command.extend(["--previous-build", str(item.previous_build_number)])
+    if item.previous_commit is not None:
+        command.extend(["--previous-commit", item.previous_commit])
     return command
 
 
@@ -534,6 +550,22 @@ def fetch_langsmith_trace(
     }
 
 
+def read_last_jsonl(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    lines = [
+        line.strip()
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines()
+        if line.strip()
+    ]
+    if not lines:
+        return None
+    try:
+        return json.loads(lines[-1])
+    except Exception:
+        return None
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
 
@@ -582,8 +614,9 @@ def main() -> int:
     stdout_dir = out_dir / "stdout"
     stderr_dir = out_dir / "stderr"
     traces_dir = out_dir / "traces"
+    metrics_dir = out_dir / "metrics"
 
-    for d in [out_dir, notices_dir, stdout_dir, stderr_dir, traces_dir]:
+    for d in [out_dir, notices_dir, stdout_dir, stderr_dir, traces_dir, metrics_dir]:
         d.mkdir(parents=True, exist_ok=True)
 
     project_name = (
@@ -623,6 +656,9 @@ def main() -> int:
     env.setdefault("LANGCHAIN_TRACING_V2", "true")
     env.setdefault("LANGSMITH_TRACING", "true")
 
+    # Metrics: enabled per-build, each build writes its own metrics file
+    env["CI_AGENT_METRICS_ENABLED"] = "true" 
+
     print(f"repo_root={repo_root}")
     print(f"log_dir={log_dir}")
     print(f"out_dir={out_dir}")
@@ -645,6 +681,8 @@ def main() -> int:
                     "headCommit": item.head_commit,
                     "baseCommit": item.base_commit,
                     "lastSuccessfulBuildNumber": item.last_success_build_number,
+                    "previousBuildNumber": item.previous_build_number,
+                    "previousCommit": item.previous_commit,
                     "consoleFile": str(item.path),
                     "skipped": True,
                     "skipReason": item.skip_reason or f"skip status {item.status}",
@@ -680,6 +718,8 @@ def main() -> int:
                 "baseCommit": item.base_commit,
                 "headCommit": item.head_commit,
                 "lastSuccessfulBuildNumber": item.last_success_build_number,
+                "previousBuildNumber": item.previous_build_number,
+                "previousCommit": item.previous_commit,
                 "consoleFile": str(item.path),
                 "noticeFile": str(notice_path),
                 "stdoutFile": str(stdout_path),
@@ -714,6 +754,11 @@ def main() -> int:
 
             started_at = dt.datetime.now(dt.timezone.utc)
 
+            # Per-build metrics file
+            metrics_file = metrics_dir / f"{name}.metrics.jsonl"
+            env["CI_AGENT_METRICS_FILE"] = str(metrics_file)
+
+            started = time.perf_counter()
             try:
                 cp = run_analyze_local(
                     item=item,
@@ -730,6 +775,7 @@ def main() -> int:
                 stderr_path.write_text(cp.stderr, encoding="utf-8")
 
                 record["returnCode"] = cp.returncode
+                record["durationSec"] = round(time.perf_counter() - started, 3)
 
                 notice = extract_first_json_object(cp.stdout)
                 if notice is not None:
@@ -766,6 +812,7 @@ def main() -> int:
                     record["trace"] = trace_result
 
             except subprocess.TimeoutExpired as exc:
+                record["durationSec"] = round(time.perf_counter() - started, 3)
                 record["error"] = f"analyze-local timeout after {args.timeout_seconds}s"
                 stdout_path.write_text(exc.stdout or "", encoding="utf-8")
                 stderr_path.write_text(exc.stderr or "", encoding="utf-8")
@@ -777,7 +824,20 @@ def main() -> int:
                     )
 
             except Exception as exc:
+                record["durationSec"] = round(time.perf_counter() - started, 3)
                 record["error"] = str(exc)
+
+            # Read metrics after each build (success, timeout, or exception)
+            metrics = read_last_jsonl(metrics_file)
+            if metrics:
+                record["metricsDurationMs"] = metrics.get("durationMs")
+                record["llmCalls"] = metrics.get("llmCalls")
+                record["inputTokens"] = metrics.get("inputTokens")
+                record["outputTokens"] = metrics.get("outputTokens")
+                record["totalTokens"] = metrics.get("totalTokens")
+                record["tokenWarning"] = metrics.get("tokenWarning")
+                record["stageCount"] = len(metrics.get("stages") or []) if metrics else None
+            record["metricsFile"] = str(metrics_file)
 
             index_file.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
             index_file.flush()
@@ -791,6 +851,9 @@ def main() -> int:
         "baseCommit",
         "headCommit",
         "lastSuccessfulBuildNumber",
+        "previousBuildNumber",
+        "previousCommit",
+        "durationSec",
         "historyEnabled",
         "historicalMatchCount",
         "topHistoricalMatchBuild",
@@ -811,6 +874,14 @@ def main() -> int:
         "noticeFile",
         "traceFile",
         "failureReason",
+        "metricsDurationMs",
+        "llmCalls",
+        "inputTokens",
+        "outputTokens",
+        "totalTokens",
+        "tokenWarning",
+        "stageCount",
+        "metricsFile",
         "cleanupWarning",
         "error",
     ]
