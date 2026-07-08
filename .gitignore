@@ -12,3 +12,5 @@ htmlcov/
 ts-analyzer/node_modules/
 .idea/
 runs/
+bugs.txt
+git_author_wecom_mapping.xlsx

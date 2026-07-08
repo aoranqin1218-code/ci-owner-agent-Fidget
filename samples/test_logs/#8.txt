@@ -1,0 +1,173 @@
+Started by user matureleek
+Obtained jenkins/jenkinsfile.unittest.gvy from git https://code.fineres.com/scm/~matureleek/fx-code.git
+[Pipeline] Start of Pipeline
+[Pipeline] node
+Running on node03 in /var/lib/jenkins/workspace/CI-test/unintest-MatureLeek
+[Pipeline] {
+[Pipeline] stage
+[Pipeline] { (Declarative: Checkout SCM)
+[Pipeline] checkout
+The recommended git tool is: git
+using credential bitbucket-winfred
+Fetching changes from the remote Git repository
+Checking out Revision 08d712c3baed1b22075968d694dfc9e44bd43d72 (refs/remotes/origin/dev)
+Enabling Git LFS pull
+ > git rev-parse --resolve-git-dir /var/lib/jenkins/workspace/CI-test/unintest-MatureLeek/.git # timeout=10
+ > git config remote.origin.url https://code.fineres.com/scm/~matureleek/fx-code.git # timeout=10
+Fetching upstream changes from https://code.fineres.com/scm/~matureleek/fx-code.git
+ > git --version # timeout=10
+ > git --version # 'git version 2.43.5'
+using GIT_ASKPASS to set credentials Winfred临时使用
+ > git fetch --tags --force --progress -- https://code.fineres.com/scm/~matureleek/fx-code.git +refs/heads/*:refs/remotes/origin/* # timeout=10
+ > git rev-parse refs/remotes/origin/dev^{commit} # timeout=10
+ > git config core.sparsecheckout # timeout=10
+ > git checkout -f 08d712c3baed1b22075968d694dfc9e44bd43d72 # timeout=10
+ > git config --get remote.origin.url # timeout=10
+using GIT_ASKPASS to set credentials Winfred临时使用
+ > git lfs pull origin # timeout=10
+Commit message: "test: dependency version error - @ai-sdk/provider set to nonexistent version"
+ > git rev-list --no-walk b2a54a70043d6a5c5812cbb3f0569033abae919c # timeout=10
+[Pipeline] }
+[Pipeline] // stage
+[Pipeline] withEnv
+[Pipeline] {
+[Pipeline] withCredentials
+Masking supported pattern matches of $MINIO_AK or $NX_CACHE_KEY or $MINIO_SK
+[Pipeline] {
+[Pipeline] withEnv
+[Pipeline] {
+[Pipeline] stage
+[Pipeline] { (ci-prepare)
+[Pipeline] sh
++ make ci-prepare
+rm -rf ci-dependencies/ ci-fonts/
+mkdir ci-dependencies ci-fonts/
+cp --parents modules/*/package.json packages/*/package.json ./ci-dependencies
+mv resources/fonts ./ci-fonts
+[Pipeline] }
+[Pipeline] // stage
+[Pipeline] stage
+[Pipeline] { (Test)
+[Pipeline] lock
+Trying to acquire lock on [Resource: fx-mongodb]
+Lock acquired on [Resource: fx-mongodb]
+[Pipeline] {
+[Pipeline] sh
++ make docker-test
+docker build --target test-report -o report --build-arg NX_CACHE_STAGE=enable-nx-cache --build-arg NX_CACHE_KEY=**** --build-arg MINIO_SK=**** --build-arg MINIO_AK=**** --build-arg PRE_STAGE=lint .
+2026/07/06 15:29:11 in: []string{}
+2026/07/06 15:29:11 Parsed entitlements: []
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 4.99kB done
+#1 DONE 0.1s
+
+#2 [internal] load metadata for harbor.dev.jdydevelop.com/devops-images/node:22.20.0-alpine
+#2 DONE 0.2s
+
+#3 [internal] load .dockerignore
+#3 transferring context: 313B done
+#3 DONE 0.1s
+
+#4 [base-env 1/7] FROM harbor.dev.jdydevelop.com/devops-images/node:22.20.0-alpine@sha256:a910cb6f5cf1a770e16dc6cca1d889c579bf8c47de3dfed521461b46f9953dfc
+#4 DONE 0.0s
+
+#5 [internal] load build context
+#5 transferring context: 2.36MB 1.3s done
+#5 DONE 1.4s
+
+#6 [base-env 2/7] WORKDIR /var/app
+#6 CACHED
+
+#7 [base-env 3/7] COPY ci-fonts/fonts ./resources/fonts
+#7 CACHED
+
+#8 [base-env 4/7] COPY resources/ ./resources
+#8 CACHED
+
+#9 [base-env 5/7] COPY .npmrc package.json package-lock.json ci-dependencies ./
+#9 DONE 0.4s
+
+#10 [base-env 6/7] COPY patches ./patches
+#10 DONE 0.2s
+
+#11 [base-env 7/7] RUN npm install --production
+#11 0.591 npm warn config production Use `--omit=dev` instead.
+#11 8.396 npm error code ETARGET
+#11 8.396 npm error notarget No matching version found for @ai-sdk/provider@99.0.0-nonexistent.
+#11 8.396 npm error notarget In most cases you or one of your dependencies are requesting
+#11 8.396 npm error notarget a package version that doesn't exist.
+#11 8.397 npm notice
+#11 8.397 npm notice New major version of npm available! 10.9.3 -> 11.18.0
+#11 8.397 npm notice Changelog: https://github.com/npm/cli/releases/tag/v11.18.0
+#11 8.397 npm notice To update run: npm install -g npm@11.18.0
+#11 8.397 npm notice
+#11 8.397 npm error A complete log of this run can be found in: /root/.npm/_logs/2026-07-06T07_29_14_485Z-debug-0.log
+#11 ERROR: process "/bin/sh -c npm install --production" did not complete successfully: exit code: 1
+------
+ > [base-env 7/7] RUN npm install --production:
+8.396 npm error code ETARGET
+8.396 npm error notarget No matching version found for @ai-sdk/provider@99.0.0-nonexistent.
+8.396 npm error notarget In most cases you or one of your dependencies are requesting
+8.396 npm error notarget a package version that doesn't exist.
+8.397 npm notice
+8.397 npm notice New major version of npm available! 10.9.3 -> 11.18.0
+8.397 npm notice Changelog: https://github.com/npm/cli/releases/tag/v11.18.0
+8.397 npm notice To update run: npm install -g npm@11.18.0
+8.397 npm notice
+8.397 npm error A complete log of this run can be found in: /root/.npm/_logs/2026-07-06T07_29_14_485Z-debug-0.log
+------
+Dockerfile:24
+--------------------
+  22 |     COPY .npmrc package.json package-lock.json ci-dependencies ./
+  23 |     COPY patches ./patches
+  24 | >>> RUN npm install --production
+  25 |     
+  26 |     # 禁用 nx 守护进程，否则很容易失败
+--------------------
+ERROR: failed to solve: process "/bin/sh -c npm install --production" did not complete successfully: exit code: 1
+exit status 1
+make: *** [makefile:68: docker-test] Error 1
+[Pipeline] }
+Lock released on resource [Resource: fx-mongodb]
+[Pipeline] // lock
+[Pipeline] }
+[Pipeline] // stage
+[Pipeline] stage
+[Pipeline] { (Declarative: Post Actions)
+[Pipeline] sh
++ make ci-restore
+mv ./ci-fonts/fonts ./resources
+rm -rf ci-dependencies/ ci-fonts/
+[Pipeline] sh
++ make clean
+rm -rf tmp/ public/app/ public/platform/ public/static/ views/ digest.txt report/ geojsonVersion arm_node.txt
+[Pipeline] sh
++ source jenkins/scripts/post-unittest.sh failure
+++ '[' failure == fixed ']'
+++ '[' failure == failure ']'
+++ status=失败
+++ mentioned_list='["James.Long","Lizijun","vista","dust"]'
+++ curl 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=b2f387bf-fab4-4a8d-8371-2958853a6c53' -H 'Content-Type: application/json' -s -d '
+    {
+        "msgtype": "text",
+        "text": {
+            "content": "[CI-test/unintest-MatureLeek] 单元测试构建 失败: https://jenkins.jdydevelop.com/job/CI-test/job/unintest-MatureLeek/8/",
+            "mentioned_list": ["James.Long","Lizijun","vista","dust"]
+        }
+    }'
+{"errcode":0,"errmsg":"ok"}
+[Pipeline] }
+[Pipeline] // stage
+[Pipeline] }
+[Pipeline] // withEnv
+[Pipeline] }
+[Pipeline] // withCredentials
+[Pipeline] }
+[Pipeline] // withEnv
+[Pipeline] }
+[Pipeline] // node
+[Pipeline] End of Pipeline
+ERROR: script returned exit code 2
+Finished: FAILURE
