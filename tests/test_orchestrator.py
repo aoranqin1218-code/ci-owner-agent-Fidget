@@ -90,6 +90,8 @@ class MultiSigSummaryProvider:
                         "testName": f"failure {index}",
                         "errorType": "Timeout",
                         "errorMessage": "run awaitfunc timeout",
+                        "testFile": f"modules/automation/tests/{signature_key}.ts",
+                        "topStackFile": f"modules/automation/tests/{signature_key}.ts",
                     },
                     "signatureHash": signature_key,
                 }
@@ -458,6 +460,129 @@ def test_no_owner_decision_no_new_strong_evidence_for_same_timeout():
         failure_facts=None,
         changed_files=[ChangedFile(path="packages/fxp-ai/src/index.ts", status="M")],
     )
+
+
+def test_no_owner_decision_detects_changed_path_in_second_summary():
+    assert _has_new_strong_evidence(
+        decision={
+            "allFailuresNoOwnerDecision": True,
+            "coveredSignatures": ["sig-a", "sig-b"],
+            "signature": {"signatureKey": "sig-a"},
+        },
+        failure_summaries={
+            "chunks": [
+                {
+                    "signature": {
+                        "signatureKey": "sig-a",
+                        "errorType": "Timeout",
+                        "errorMessage": "run awaitfunc timeout",
+                        "testFile": "modules/automation/tests/a.ts",
+                        "topStackFile": "modules/automation/tests/a.ts",
+                    },
+                    "signatureHash": "sig-a",
+                },
+                {
+                    "signature": {
+                        "signatureKey": "sig-b",
+                        "errorType": "Timeout",
+                        "errorMessage": "run awaitfunc timeout",
+                        "testFile": "modules/automation/tests/b.ts",
+                        "topStackFile": "modules/automation/tests/b.ts",
+                    },
+                    "signatureHash": "sig-b",
+                },
+            ]
+        },
+        failure_facts=None,
+        changed_files=[ChangedFile(path="modules/automation/tests/b.ts", status="M")],
+    )
+
+
+def test_no_owner_decision_no_new_strong_evidence_checks_all_summaries():
+    assert not _has_new_strong_evidence(
+        decision={
+            "allFailuresNoOwnerDecision": True,
+            "coveredSignatures": ["sig-a", "sig-b"],
+            "signature": {"signatureKey": "sig-a"},
+        },
+        failure_summaries={
+            "chunks": [
+                {
+                    "signature": {
+                        "signatureKey": "sig-a",
+                        "errorType": "Timeout",
+                        "errorMessage": "run awaitfunc timeout",
+                        "testFile": "modules/automation/tests/a.ts",
+                        "topStackFile": "modules/automation/tests/a.ts",
+                    },
+                    "signatureHash": "sig-a",
+                },
+                {
+                    "signature": {
+                        "signatureKey": "sig-b",
+                        "errorType": "Timeout",
+                        "errorMessage": "run awaitfunc timeout",
+                        "testFile": "modules/automation/tests/b.ts",
+                        "topStackFile": "modules/automation/tests/b.ts",
+                    },
+                    "signatureHash": "sig-b",
+                },
+            ]
+        },
+        failure_facts=None,
+        changed_files=[ChangedFile(path="packages/fxp-ai/src/index.ts", status="M")],
+    )
+
+
+def test_all_chunks_no_owner_but_second_path_changed_falls_back_to_agent(monkeypatch, repo_cache, sample_repo, logs):
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    settings = replace(context.settings, history_enabled=True, history_inherit_no_owner_enabled=True)
+    store = make_store()
+    _save_historical_no_owner_chunks(store, context, signature_keys=["sig-timeout-a", "sig-timeout-b"], build=5088)
+    calls = {"agent": 0}
+
+    class ChangedPathGitClient:
+        def sync(self, repo):
+            return {"ok": True}
+
+        def get_commits_between(self, repo, base_commit, head_commit):
+            return {"ok": True, "commits": []}
+
+        def get_diff_files(self, repo, base_commit, head_commit):
+            return {
+                "ok": True,
+                "files": [
+                    {
+                        "path": "modules/automation/tests/sig-timeout-b.ts",
+                        "status": "M",
+                        "additions": 1,
+                        "deletions": 0,
+                    }
+                ],
+            }
+
+    class DummyAgent:
+        def analyze(self, agent_context):
+            calls["agent"] += 1
+            return CiResponsibilityNotice.model_validate(high_confidence_payload(context))
+
+    monkeypatch.setattr("ci_owner_agent.orchestrator.create_responsibility_agent", lambda *args, **kwargs: DummyAgent())
+    build_info = BuildInfo(job=context.job, buildNumber=5089, result="FAILURE", buildUrl="local://job/5089", branch=context.branch, commit=context.head_commit)
+
+    analyze_failed_build(
+        sample_repo["repo"],
+        build_info,
+        context.base_commit,
+        context.head_commit,
+        MultiSigSummaryProvider(["sig-timeout-a", "sig-timeout-b"]),
+        ChangedPathGitClient(),
+        allow_sync_failure=True,
+        settings=settings,
+        last_successful_build_number=5087,
+        history_store=store,
+    )
+
+    assert calls["agent"] == 1
 
 
 def test_no_owner_decision_detects_new_strong_error_code():

@@ -386,17 +386,36 @@ def _has_new_strong_evidence(
         and current_signature != source_signature
     ):
         return True
-    summary = _first_failure_summary_signature(failure_summaries)
+    summaries = _failure_summary_signatures(failure_summaries)
     facts = (failure_facts or {}).get("facts") if isinstance(failure_facts, dict) else []
     changed_paths = {item.path for item in changed_files}
-    for path in _failure_paths(summary, facts):
-        if path in changed_paths:
-            return True
+    if summaries:
+        for summary in summaries:
+            for path in _failure_paths(summary, facts):
+                if path in changed_paths:
+                    return True
+    else:
+        for path in _failure_paths(None, facts):
+            if path in changed_paths:
+                return True
+    summary_text = " ".join(
+        " ".join(
+            [
+                str(summary.get("errorType") or ""),
+                str(summary.get("errorMessage") or ""),
+            ]
+        )
+        for summary in summaries
+    )
+    fact_text = " ".join(
+        str((fact or {}).get("errorCode") or "") + " " + str((fact or {}).get("errorType") or "")
+        for fact in facts or []
+        if isinstance(fact, dict)
+    )
     text = " ".join(
         [
-            str((summary or {}).get("errorType") or ""),
-            str((summary or {}).get("errorMessage") or ""),
-            " ".join(str((fact or {}).get("errorCode") or "") + " " + str((fact or {}).get("errorType") or "") for fact in facts or [] if isinstance(fact, dict)),
+            summary_text,
+            fact_text,
         ]
     )
     source_text = json.dumps(decision.get("signature") or {}, ensure_ascii=False)
@@ -477,14 +496,21 @@ def _decision_signature(decision: dict) -> str | None:
     return signature.get("signatureKey") or decision.get("signatureHash")
 
 
-def _first_failure_summary_signature(failure_summaries: dict | None) -> dict | None:
+def _failure_summary_signatures(failure_summaries: dict | None) -> list[dict]:
     chunks = (failure_summaries or {}).get("chunks") if isinstance(failure_summaries, dict) else []
+    result: list[dict] = []
     for chunk in chunks or []:
-        if isinstance(chunk, dict):
-            signature = chunk.get("signature") if isinstance(chunk.get("signature"), dict) else {}
-            if signature:
-                return {**signature, "signatureHash": chunk.get("signatureHash")}
-    return None
+        if not isinstance(chunk, dict):
+            continue
+        signature = chunk.get("signature") if isinstance(chunk.get("signature"), dict) else {}
+        if signature:
+            result.append({**signature, "signatureHash": chunk.get("signatureHash")})
+    return result
+
+
+def _first_failure_summary_signature(failure_summaries: dict | None) -> dict | None:
+    summaries = _failure_summary_signatures(failure_summaries)
+    return summaries[0] if summaries else None
 
 
 def _failure_paths(summary: dict | None, facts: list | None) -> set[str]:
