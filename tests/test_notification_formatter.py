@@ -507,16 +507,26 @@ def test_analyze_notify_exception_stays_json(monkeypatch, capsys):
 def test_fallback_userids_appended_when_no_owner():
     no_owner = item("无高可信责任人", "no_high_confidence_owner", "no_high_confidence_owner", "证据不足。")
     notice = CiResponsibilityNotice.model_validate(notice_payload([no_owner]))
-    markdown = format_wecom_markdown_notice(notice, fallback_userids=("user001", "user002"))
-    assert "无高可信责任人，兜底通知 <@user001>、<@user002>" in markdown
+    markdown = format_wecom_markdown_notice(notice, fallback_userids=("ci.owner", "team.leader"))
+    # Top line with bold markers
+    assert "**责任人**：无高可信责任人，兜底通知 <@ci.owner>、<@team.leader>" in markdown
+    # Item detail line still shows no-owner without fallback
+    item_lines = [l for l in markdown.split("\n") if l.strip().startswith("- 👤 责任人")]
+    assert len(item_lines) >= 1
+    assert "无高可信责任人" in item_lines[0]
+    assert "ci.owner" not in item_lines[0]
 
 
 def test_fallback_not_appended_when_has_real_owner():
     real = item("Tang", "inherited_failure_owner", "inherited_failure_owner", "历史持续失败。")
     notice = CiResponsibilityNotice.model_validate(notice_payload([real]))
-    markdown = format_wecom_markdown_notice(notice, fallback_userids=("user001",))
+    markdown = format_wecom_markdown_notice(notice, fallback_userids=("ci.owner",))
+    # Top line shows @Tang (real owner), not fallback
+    assert "**责任人**：" in markdown
+    assert "@Tang" in markdown
+    # No fallback text or userid
     assert "兜底通知" not in markdown
-    assert "Tang" in markdown
+    assert "<@ci.owner>" not in markdown
 
 
 def test_fallback_not_appended_when_mixed_owners():
@@ -576,3 +586,26 @@ def test_notify_notice_passes_fallback_from_settings(monkeypatch):
 
     assert len(markdowns) == 1
     assert "兜底通知 <@fb1>、<@fb2>" in markdowns[0]
+
+
+def test_notify_notice_dry_run_with_fallback(monkeypatch):
+    from ci_owner_agent.main import _notify_notice
+    from ci_owner_agent.config import load_settings
+    from dataclasses import replace
+
+    no_owner = item("无高可信责任人", "no_high_confidence_owner", "no_high_confidence_owner", "证据不足。")
+    notice = CiResponsibilityNotice.model_validate(notice_payload([no_owner]))
+    settings = replace(
+        load_settings(),
+        notification_dedup_enabled=False,
+        wecom_user_mapping_file=None,
+        wecom_fallback_userids=("ci.owner",),
+    )
+
+    monkeypatch.setattr("ci_owner_agent.main.get_history_store", lambda s: make_store())
+    monkeypatch.setattr("ci_owner_agent.main.build_wecom_notice_mapper", lambda s, store: None)
+
+    result = _notify_notice(notice, settings, dry_run=True, force=False, feedback_base_url=None)
+
+    assert result["status"] == "dry_run"
+    assert "无高可信责任人，兜底通知 <@ci.owner>" in result["markdown"]
