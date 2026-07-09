@@ -609,3 +609,53 @@ def test_notify_notice_dry_run_with_fallback(monkeypatch):
 
     assert result["status"] == "dry_run"
     assert "无高可信责任人，兜底通知 <@ci.owner>" in result["markdown"]
+
+def test_no_owner_notice_mentions_fallback_userids_only_at_top():
+    no_owner = item("无高可信责任人", "no_high_confidence_owner", "no_high_confidence_owner", "证据不足。")
+    notice = CiResponsibilityNotice.model_validate(notice_payload([no_owner]))
+
+    markdown = format_wecom_markdown_notice(notice, fallback_userids=("ci.owner", "team.leader"))
+
+    assert " **责任人**：无高可信责任人，兜底通知 <@ci.owner>、<@team.leader>" in markdown
+    assert "   - 👤 责任人：无高可信责任人" in markdown
+
+
+def test_fallback_userids_are_not_used_when_real_owner_exists():
+    notice = CiResponsibilityNotice.model_validate(notice_payload([item("Tang")]))
+    markdown = format_wecom_markdown_notice(notice, fallback_userids=("ci.owner",))
+
+    assert " **责任人**：@Tang" in markdown
+    assert "兜底通知" not in markdown
+    assert "<@ci.owner>" not in markdown
+
+
+def test_fallback_userids_are_cleaned_by_formatter():
+    no_owner = item("无高可信责任人", "no_high_confidence_owner", "no_high_confidence_owner", "证据不足。")
+    notice = CiResponsibilityNotice.model_validate(notice_payload([no_owner]))
+
+    markdown = format_wecom_markdown_notice(notice, fallback_userids=(" ci.owner ", "", "ci.owner", "team.leader"))
+
+    assert " **责任人**：无高可信责任人，兜底通知 <@ci.owner>、<@team.leader>" in markdown
+    assert "<@>" not in markdown
+
+
+def test_notify_notice_passes_fallback_userids_from_settings(monkeypatch):
+    from ci_owner_agent.main import _notify_notice
+    from ci_owner_agent.config import load_settings
+    from dataclasses import replace
+
+    store = make_store()
+    no_owner = item("无高可信责任人", "no_high_confidence_owner", "no_high_confidence_owner", "证据不足。")
+    notice = CiResponsibilityNotice.model_validate(notice_payload([no_owner]))
+    settings = replace(
+        load_settings(),
+        notification_dedup_enabled=False,
+        wecom_user_mapping_file=None,
+        wecom_fallback_userids=("ci.owner",),
+    )
+    monkeypatch.setattr("ci_owner_agent.main.get_history_store", lambda settings: store)
+
+    result = _notify_notice(notice, settings, dry_run=True, force=False, feedback_base_url=None)
+
+    assert "无高可信责任人，兜底通知 <@ci.owner>" in result["markdown"]
+    assert "   - 👤 责任人：无高可信责任人" in result["markdown"]

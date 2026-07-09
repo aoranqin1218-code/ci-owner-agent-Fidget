@@ -79,6 +79,18 @@ def collect_responsible_display_names(notice: CiResponsibilityNotice) -> list[st
     return [owner.name for owner in collect_responsible_owners(notice)]
 
 
+def format_fallback_userid_mentions(userids: tuple[str, ...] | list[str] | None) -> str:
+    result: list[str] = []
+    seen: set[str] = set()
+    for userid in userids or ():
+        value = str(userid or "").strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        result.append(f"<@{value}>")
+    return "、".join(result)
+
+
 def format_responsible_mentions(
     owners: list[Owner],
     mapper: WeComUserMapper | None = None,
@@ -88,9 +100,9 @@ def format_responsible_mentions(
     mapper = mapper or WeComUserMapper([])
     if owners:
         return "、".join(mapper.mention_owner(owner.name, owner.email, mode=mention_mode) for owner in owners)
-    if fallback_userids:
-        at_mentions = "、".join(f"<@{uid}>" for uid in fallback_userids)
-        return f"{NO_OWNER_NAME}，兜底通知 {at_mentions}"
+    fallback_mentions = format_fallback_userid_mentions(fallback_userids)
+    if fallback_mentions:
+        return f"{NO_OWNER_NAME}，兜底通知 {fallback_mentions}"
     return NO_OWNER_NAME
 
 

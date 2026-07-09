@@ -37,3 +37,10 @@ def test_parse_fallback_userids_default_empty(monkeypatch):
     monkeypatch.delenv("CI_AGENT_WECOM_FALLBACK_USERIDS", raising=False)
     settings = load_settings()
     assert settings.wecom_fallback_userids == ()
+
+def test_wecom_fallback_userids_are_parsed_from_env(monkeypatch):
+    monkeypatch.setenv("CI_AGENT_WECOM_FALLBACK_USERIDS", " ci.owner, team.leader,ci.owner,, ")
+
+    settings = load_settings()
+
+    assert settings.wecom_fallback_userids == ("ci.owner", "team.leader")
