@@ -52,6 +52,7 @@ class Settings:
     wecom_notify_on_no_owner: bool
     wecom_user_mapping_file: Path | None
     wecom_mention_mode: str
+    wecom_fallback_userids: tuple[str, ...]
     feedback_base_url: str | None
     feedback_server_host: str
     feedback_server_port: int
@@ -108,6 +109,19 @@ def _float_env_or_default(name: str, default: float) -> float:
         return default
 
 
+def _parse_fallback_userids(raw: str | None) -> tuple[str, ...]:
+    if not raw:
+        return ()
+    parts = [p.strip() for p in raw.split(",")]
+    seen: set[str] = set()
+    result: list[str] = []
+    for p in parts:
+        if p and p not in seen:
+            seen.add(p)
+            result.append(p)
+    return tuple(result)
+
+
 def load_settings(env_file: str | Path | None = None) -> Settings:
     if load_dotenv is not None:
         load_dotenv(dotenv_path=env_file, override=False)
@@ -157,6 +171,7 @@ def load_settings(env_file: str | Path | None = None) -> Settings:
         wecom_mention_mode=os.getenv("CI_AGENT_WECOM_MENTION_MODE", "userid").lower()
         if os.getenv("CI_AGENT_WECOM_MENTION_MODE", "userid").lower() in {"userid", "name"}
         else "userid",
+        wecom_fallback_userids=_parse_fallback_userids(os.getenv("CI_AGENT_WECOM_FALLBACK_USERIDS")),
         feedback_base_url=os.getenv("CI_AGENT_FEEDBACK_BASE_URL") or None,
         feedback_server_host=os.getenv("CI_AGENT_FEEDBACK_SERVER_HOST", "127.0.0.1"),
         feedback_server_port=_int_env_or_default("CI_AGENT_FEEDBACK_SERVER_PORT", 8765),
@@ -192,4 +207,5 @@ def public_settings(settings: Settings) -> dict[str, object]:
     data["repo_cache_dir"] = str(settings.repo_cache_dir)
     data["ts_analyzer_dir"] = str(settings.ts_analyzer_dir)
     data["wecom_user_mapping_file"] = str(settings.wecom_user_mapping_file) if settings.wecom_user_mapping_file else None
+    data["wecom_fallback_userids"] = list(settings.wecom_fallback_userids)
     return data

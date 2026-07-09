@@ -324,6 +324,7 @@ def _notify_notice(notice: CiResponsibilityNotice, settings, *, dry_run: bool, f
             feedback_token=settings.feedback_shared_token,
             user_mapper=mapper,
             mention_mode=settings.wecom_mention_mode,
+            fallback_userids=settings.wecom_fallback_userids,
         )
         digest = notice_hash(notice)
         if store and settings.notification_dedup_enabled and not force and store.notification_sent(

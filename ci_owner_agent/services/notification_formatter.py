@@ -16,6 +16,7 @@ def format_wecom_markdown_notice(
     max_evidence_chars: int = 500,
     user_mapper: WeComUserMapper | None = None,
     mention_mode: str = "userid",
+    fallback_userids: tuple[str, ...] = (),
 ) -> str:
     mapper = user_mapper or WeComUserMapper([])
     owners = collect_responsible_owners(notice)
@@ -23,7 +24,7 @@ def format_wecom_markdown_notice(
     lines = [
         f"### {result_icon(notice.result)} CI 单测{result_label(notice.result)} | {notice.job} #{notice.buildNumber}",
         "",
-        f"👤 **责任人**：{format_responsible_mentions(owners, mapper, mention_mode)}",
+        f"👤 **责任人**：{format_responsible_mentions(owners, mapper, mention_mode, fallback_userids)}",
         f"🧭 **原因**：{public_single_line(notice.failureReason, max_reason_chars)}",
         responsibility_item_stats(notice.responsibilityItems),
         "",
@@ -78,9 +79,19 @@ def collect_responsible_display_names(notice: CiResponsibilityNotice) -> list[st
     return [owner.name for owner in collect_responsible_owners(notice)]
 
 
-def format_responsible_mentions(owners: list[Owner], mapper: WeComUserMapper | None = None, mention_mode: str = "userid") -> str:
+def format_responsible_mentions(
+    owners: list[Owner],
+    mapper: WeComUserMapper | None = None,
+    mention_mode: str = "userid",
+    fallback_userids: tuple[str, ...] = (),
+) -> str:
     mapper = mapper or WeComUserMapper([])
-    return "、".join(mapper.mention_owner(owner.name, owner.email, mode=mention_mode) for owner in owners) if owners else NO_OWNER_NAME
+    if owners:
+        return "、".join(mapper.mention_owner(owner.name, owner.email, mode=mention_mode) for owner in owners)
+    if fallback_userids:
+        at_mentions = "、".join(f"<@{uid}>" for uid in fallback_userids)
+        return f"{NO_OWNER_NAME}，兜底通知 {at_mentions}"
+    return NO_OWNER_NAME
 
 
 def format_item_owner(owner: Owner, mapper: WeComUserMapper, mention_mode: str) -> str:
