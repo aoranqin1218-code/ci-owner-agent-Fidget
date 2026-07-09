@@ -16,6 +16,7 @@ Jenkins / 本地日志
   -> SUCCESS / ABORTED 状态门控
   -> FAILURE / UNSTABLE / UNKNOWN 进入失败分析
   -> Git 同步与 baseCommit..headCommit diff
+  -> 通过 previousCommit 缩小 diff 范围（focusRange）
   -> 提取当前构建失败摘要 failureSummaries
   -> 必要时提取 AI failureFacts
   -> 查询 Mongo 历史失败 historyPrecheck / aiHistoryPrecheck
@@ -42,7 +43,7 @@ Jenkins / 本地日志
 
 失败分析主要分为几层：
 
-1. **Git 上下文**：读取 `baseCommit..headCommit` 之间的 commits 和 changed files。
+1. **Git 上下文**：读取 `baseCommit..headCommit` 之间的 commits 和 changed files。当指定 `--previous-commit` 或通过 Mongo 查到上一个构建的 headCommit 时，优先以 `previousCommit..headCommit` 作为窄 diff（focusRange），用于首次失败优先分析。
 2. **失败摘要**：从日志中提取更聚焦的失败块，例如测试失败、Japa/Mocha 失败、TypeScript 编译错误等。
 3. **AI failure facts**：当确定性失败摘要不足时，可用 LLM 从非结构化日志中提取内层真实失败事实，避免把 Docker / Jenkins / shell wrapper 当成根因。
 4. **历史失败查询**：从 MongoDB 查询此前失败构建的 failure chunks / failure facts，判断当前失败是否是历史持续失败。
@@ -89,7 +90,7 @@ Jenkins / 本地日志
 
 ### 1.7 metrics 记录
 
-开启 metrics 后，每次 `analyze` / `analyze-local` 会追加一行 JSONL，记录：
+设置 `CI_AGENT_METRICS_ENABLED=true` 后，每次 `analyze` / `analyze-local` 会追加一行 JSONL，记录：
 
 - 总耗时。
 - 阶段耗时。
@@ -98,6 +99,8 @@ Jenkins / 本地日志
 - 责任项数量。
 - inherited / current owner 数量。
 - 错误和 warning。
+
+批量脚本 `batch_analyze_company_logs.py` 会自动为每个构建启用 metrics 并写入独立文件，`summary.csv` 中汇总 token 和耗时。
 
 metrics 只用于调试和性能分析，写入失败不会导致分析失败。
 
@@ -512,7 +515,7 @@ python -m ci_owner_agent serve-feedback --host 0.0.0.0 --port 8765
 
 ### 6.1 批量分析本地日志：`scripts/batch_analyze_company_logs.py`
 
-适用于已经下载到本地的一批 Jenkins console log。脚本会按构建号排序，自动从成功构建推导后续失败构建的 base commit。
+适用于已经下载到本地的一批 Jenkins console log。脚本会按构建号排序，自动从成功构建推导后续失败构建的 base commit，同时自动追踪上一个构建的 headCommit 作为 focusRange 的 `--previous-commit`，并为每个构建自动启用 metrics 记录 token 与耗时。
 
 示例：
 
@@ -562,9 +565,10 @@ runs/company-log-batch-xxxx/
   stdout/*.stdout.txt
   stderr/*.stderr.txt
   traces/*.trace.json
+  metrics/*.metrics.jsonl
 ```
 
-`summary.csv` 会包含 owner、责任项数量、继承责任人、当前构建责任人、unresolved 数量、历史匹配信息等字段。
+`summary.csv` 会包含 owner、责任项数量、继承责任人、当前构建责任人、unresolved 数量、历史匹配信息、previousBuildNumber、previousCommit、durationSec、llmCalls、totalTokens 等字段。
 
 ### 6.2 批量分析 Jenkins 构建号：`scripts/batch_analyze_jenkins_builds.py`
 
