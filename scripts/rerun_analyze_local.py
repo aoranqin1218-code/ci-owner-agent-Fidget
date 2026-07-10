@@ -13,6 +13,11 @@ import time
 from pathlib import Path
 from typing import Any
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except Exception:
+    pass
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
