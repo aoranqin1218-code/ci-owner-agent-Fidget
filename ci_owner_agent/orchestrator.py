@@ -481,19 +481,29 @@ def _select_all_failures_no_owner_decision(items: list, *, source: str) -> dict 
         decision = item.get("noOwnerDecision") if isinstance(item.get("noOwnerDecision"), dict) else None
         if not decision or not decision.get("found"):
             return None
-        decisions.append({**decision, "source": source})
+        decisions.append(
+            {
+                **decision,
+                "source": source,
+                "failureSignature": _current_item_signature(item, source),
+                "failureTitle": _current_item_title(item, source),
+                "failureSummary": _current_item_summary(item, source),
+            }
+        )
     if not decisions:
         return None
-    decisions.sort(
+    ranked = sorted(
+        decisions,
         key=lambda item: (
             1 if item.get("feedbackAction") in {"mark_flaky", "mark_no_owner"} else 0,
             -(item.get("sourceBuildNumber") or 0),
         ),
         reverse=True,
     )
-    selected = dict(decisions[0])
+    selected = dict(ranked[0])
     selected["allFailuresNoOwnerDecision"] = True
     selected["coveredFailureCount"] = len(decisions)
+    selected["decisions"] = decisions
     selected["coveredSourceBuildNumbers"] = sorted(
         {number for number in (item.get("sourceBuildNumber") for item in decisions) if number is not None}
     )
@@ -503,6 +513,45 @@ def _select_all_failures_no_owner_decision(items: list, *, source: str) -> dict 
         if signature
     ]
     return selected
+
+
+def _current_item_signature(item: dict, source: str) -> str | None:
+    if source == "historyPrecheck":
+        signature = item.get("signature") if isinstance(item.get("signature"), dict) else {}
+        return signature.get("signatureKey") or signature.get("signatureHash") or item.get("normalizedHash")
+    return item.get("signatureKey") or item.get("factId")
+
+
+def _current_item_title(item: dict, source: str) -> str:
+    if source == "historyPrecheck":
+        signature = item.get("signature") if isinstance(item.get("signature"), dict) else {}
+        return str(
+            signature.get("testName")
+            or signature.get("testCase")
+            or signature.get("errorType")
+            or _first_nonempty_line(item.get("preview"))
+            or "historical same failure"
+        )
+    return " | ".join(
+        str(value)
+        for value in (item.get("failureKind"), item.get("errorCode"), item.get("symbol") or item.get("packageName"))
+        if value
+    ) or "historical same failure fact"
+
+
+def _current_item_summary(item: dict, source: str) -> str | None:
+    if source == "historyPrecheck":
+        return str(item.get("preview") or "").strip() or None
+    parts = [item.get("failureKind"), item.get("errorCode"), item.get("filePath"), item.get("symbol"), item.get("packageName")]
+    text = " | ".join(str(value) for value in parts if value)
+    return text or None
+
+
+def _first_nonempty_line(value: object) -> str | None:
+    for line in str(value or "").splitlines():
+        if line.strip():
+            return line.strip()
+    return None
 
 
 def _has_new_strong_evidence(
@@ -592,12 +641,26 @@ def _build_no_owner_notice_from_history_decision(
         ),
         source="history_no_owner_decision",
     )
-    item = build_no_owner_item_from_decision(
-        {**decision, "reason": reason},
-        failure_title=_failure_title(failure_summaries, failure_facts),
-        failure_signature=_current_failure_signature(failure_summaries, failure_facts),
-        evidence_id=evidence.id,
-    )
+    item_decisions = decision.get("decisions") if isinstance(decision.get("decisions"), list) else []
+    if not item_decisions:
+        item_decisions = [
+            {
+                **decision,
+                "failureTitle": _failure_title(failure_summaries, failure_facts),
+                "failureSignature": _current_failure_signature(failure_summaries, failure_facts),
+                "failureSummary": _failure_title(failure_summaries, failure_facts),
+            }
+        ]
+    items = [
+        build_no_owner_item_from_decision(
+            item_decision,
+            failure_title=str(item_decision.get("failureTitle") or "historical same failure"),
+            failure_signature=item_decision.get("failureSignature"),
+            failure_summary=item_decision.get("failureSummary"),
+            evidence_id=evidence.id,
+        )
+        for item_decision in item_decisions
+    ]
     return CiResponsibilityNotice(
         job=build_info.job,
         buildNumber=build_info.buildNumber,
@@ -610,7 +673,7 @@ def _build_no_owner_notice_from_history_decision(
         failureReason=reason,
         evidence=[evidence],
         suggestions=["如需强制重新分析，可设置 CI_AGENT_HISTORY_INHERIT_NO_OWNER_ENABLED=false。"],
-        responsibilityItems=[item],
+        responsibilityItems=items,
         hasHighConfidenceOwner=False,
     )
 

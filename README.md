@@ -343,7 +343,7 @@ CI_AGENT_WECOM_NOTIFY_DRY_RUN=true
 CI_AGENT_WECOM_NOTIFY_ON_SUCCESS=false
 CI_AGENT_WECOM_NOTIFY_ON_NO_OWNER=true
 CI_AGENT_WECOM_USER_MAPPING_FILE=
-CI_AGENT_TEST_MAINTAINER_MAPPING_FILE=./config/test-maintainers.yml
+CI_AGENT_TEST_MAINTAINER_MAPPING_FILE=/实际部署路径/test-maintainers.yml
 CI_AGENT_WECOM_MENTION_MODE=userid
 CI_AGENT_WECOM_FALLBACK_USERIDS=
 CI_AGENT_FEEDBACK_BASE_URL=
@@ -364,9 +364,9 @@ CI_AGENT_NOTIFICATION_DEDUP_ENABLED=true
 | `CI_AGENT_FEEDBACK_BASE_URL` | 反馈页基础 URL，用于通知中生成反馈链接。 |
 | `CI_AGENT_NOTIFICATION_DEDUP_ENABLED` | 是否根据 notice 与维护人路由结果的通知 digest 做去重。 |
 
-测试维护人不是本次失败的责任人。`ResponsibilityItem.owner` 和顶层 `owner` 对 no-owner 项仍保持 `no_high_confidence_owner / 无高可信责任人`；维护人仅显示在企业微信的“待确认维护人”区域，用于邀请相关测试维护者确认问题。
+测试维护人不是本次失败的责任人。`ResponsibilityItem.owner` 和顶层 `owner` 对 no-owner 项仍保持 `no_high_confidence_owner / 无高可信责任人`；维护人仅显示在企业微信的“待确认维护人”区域，用于邀请相关测试维护者确认问题。默认不启用维护人配置，正式环境必须显式设置 `CI_AGENT_TEST_MAINTAINER_MAPPING_FILE`。
 
-配置文件按 `rules` 顺序匹配，第一条同时满足 `repo`、`job` 和任一 `paths` glob 的规则生效。`repo`、`job` 可省略作为通配；`paths` 和 `maintainers` 不可为空，企业微信 `wecomUserId` 必填：
+仓库提供 [config/test-maintainers.example.yml](config/test-maintainers.example.yml) 作为格式参考。示例中的 userid 仅为占位值，不代表真实企业微信 userid；部署前必须复制到实际配置路径并替换成真实 userid。配置文件按 `rules` 顺序匹配，第一条同时满足 `repo`、`job` 和任一 `paths` glob 的规则生效。`repo`、`job` 可省略作为通配；`paths` 和 `maintainers` 不可为空，企业微信 `wecomUserId` 必填：
 
 ```yaml
 version: 1

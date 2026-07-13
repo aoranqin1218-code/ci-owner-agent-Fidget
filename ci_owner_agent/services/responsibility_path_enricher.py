@@ -64,16 +64,21 @@ def enrich_responsibility_item_paths(
         signature = str(item.failureSignature or "")
         summary = summary_by_signature.get(signature)
         if summary:
-            item.testFilePath = normalize_repository_path(summary.get("testFile")) or item.testFilePath
-            item.failureFilePath = normalize_repository_path(summary.get("topStackFile")) or item.failureFilePath
+            summary_test_path = normalize_repository_path(summary.get("testFile"))
+            summary_failure_path = normalize_repository_path(summary.get("topStackFile"))
+            if summary_test_path and not item.testFilePath:
+                item.testFilePath = summary_test_path
+            if summary_failure_path and not item.failureFilePath:
+                item.failureFilePath = summary_failure_path
 
         fact = fact_by_signature.get(signature)
         if fact:
             fact_path = normalize_repository_path(fact.get("filePath"))
             if is_test_file_path(fact_path):
-                item.testFilePath = fact_path or item.testFilePath
-            else:
-                item.failureFilePath = fact_path or item.failureFilePath
+                if fact_path and not item.testFilePath:
+                    item.testFilePath = fact_path
+            elif fact_path and not item.failureFilePath:
+                item.failureFilePath = fact_path
 
         if not item.testFilePath:
             texts = [item.failureTitle, item.failureSummary, item.reason]

@@ -305,6 +305,16 @@ def _normalize_responsibility_item(item: ResponsibilityItem, notice: CiResponsib
         return
 
     if item.responsibilityType in {"no_high_confidence_owner", "unknown"}:
+        if (
+            item.responsibilityType == "no_high_confidence_owner"
+            and item.sourceBuildNumber
+            and item.sourceBuildNumber > 0
+            and item.matchType
+        ):
+            item.owner = _no_owner()
+            item.sourceCommit = None
+            item.confidence = 0
+            return
         _downgrade_item(item, item.reason or "证据不足，无法确定高可信责任人。")
 
 

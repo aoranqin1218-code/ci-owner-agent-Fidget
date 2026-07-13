@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 
+import pytest
+
 from ci_owner_agent.schemas import CiResponsibilityNotice
 from ci_owner_agent.config import load_settings
 from ci_owner_agent.main import _maybe_notify_notice, _notify_notice, main
@@ -574,6 +576,30 @@ def test_legacy_notice_without_items_still_routes_fallback():
     assert "**待确认维护人**：<@legacy.fallback>" in markdown
 
 
+@pytest.mark.parametrize("result", ["SUCCESS", "ABORTED"])
+def test_success_and_aborted_legacy_notice_do_not_route_fallback_or_change_digest(result):
+    payload = notice_payload([])
+    payload["result"] = result
+    notice = CiResponsibilityNotice.model_validate(payload)
+
+    markdown = format_wecom_markdown_notice(notice, fallback_userids=("fallback",))
+    without_fallback = notification_digest(notice, fallback_userids=())
+    with_fallback = notification_digest(notice, fallback_userids=("fallback",))
+
+    assert "待确认维护人" not in markdown
+    assert "<@fallback>" not in markdown
+    assert without_fallback == with_fallback
+
+
+@pytest.mark.parametrize("result", ["FAILURE", "UNSTABLE", "UNKNOWN"])
+def test_failed_legacy_notice_routes_fallback(result):
+    payload = notice_payload([])
+    payload["result"] = result
+    notice = CiResponsibilityNotice.model_validate(payload)
+    markdown = format_wecom_markdown_notice(notice, fallback_userids=("fallback",))
+    assert "**待确认维护人**：<@fallback>" in markdown
+
+
 def test_single_fallback_userid():
     no_owner = item("无高可信责任人", "no_high_confidence_owner", "no_high_confidence_owner", "证据不足。")
     notice = CiResponsibilityNotice.model_validate(notice_payload([no_owner]))
@@ -765,6 +791,12 @@ def test_unmatched_and_missing_test_path_route_fallback(tmp_path):
     assert "未识别失败测试文件" in missing_markdown
     assert "<@default.userid>" in unmatched_markdown
     assert "<@default.userid>" in missing_markdown
+
+    evidence_pos = unmatched_markdown.index("   - 🔎 证据：")
+    path_pos = unmatched_markdown.index("   - 📁 测试文件：")
+    maintainer_pos = unmatched_markdown.index("   - 📣 待确认维护人：")
+    reason_pos = unmatched_markdown.index("   - ℹ️ 路由说明：")
+    assert evidence_pos < path_pos < maintainer_pos < reason_pos
 
 
 def test_multiple_no_owner_routes_are_deduplicated_and_mixed_owner_is_preserved(tmp_path):

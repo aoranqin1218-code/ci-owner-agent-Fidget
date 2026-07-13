@@ -225,13 +225,14 @@ def build_no_owner_item_from_decision(
     *,
     failure_title: str,
     failure_signature: str | None,
+    failure_summary: str | None = None,
     evidence_id: str,
 ) -> dict:
     return {
         "failureId": "auto",
         "failureTitle": failure_title,
         "failureSignature": failure_signature,
-        "failureSummary": failure_title,
+        "failureSummary": failure_summary or failure_title,
         "owner": {
             "type": "no_high_confidence_owner",
             "name": NO_OWNER_NAME,
@@ -240,8 +241,8 @@ def build_no_owner_item_from_decision(
             "confidence": 0,
         },
         "responsibilityType": "no_high_confidence_owner",
-        "sourceBuildNumber": None,
-        "sourceBuildUrl": None,
+        "sourceBuildNumber": decision.get("sourceBuildNumber"),
+        "sourceBuildUrl": decision.get("sourceBuildUrl"),
         "sourceCommit": None,
         "matchType": decision.get("matchType"),
         "relationship": decision.get("relationship"),

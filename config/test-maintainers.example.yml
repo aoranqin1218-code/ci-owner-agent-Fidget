@@ -1,5 +1,8 @@
 version: 1
 
+# 仅为格式示例。部署前请替换为真实测试路径、维护人姓名和企业微信 userid。
+# 下列 userid 均为占位值，不保证可用于任何企业微信环境。
+
 rules:
   - repo: fx-code
     job: services/fx-code-unittest

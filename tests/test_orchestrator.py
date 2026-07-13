@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 
 from ci_owner_agent.orchestrator import (
+    _build_no_owner_notice_from_history_decision,
     _has_new_strong_evidence,
     _save_history,
     _select_build_level_no_owner_decision,
@@ -12,6 +13,8 @@ from ci_owner_agent.orchestrator import (
 )
 from ci_owner_agent.schemas import BuildInfo, ChangedFile, CiResponsibilityNotice, FailureFact, FailureFactExtractionResult
 from ci_owner_agent.services.git_client import GitClient
+from ci_owner_agent.services.notification_formatter import format_wecom_markdown_notice
+from ci_owner_agent.services.test_maintainer_mapping import TestMaintainerResolver
 from tests.test_history_store import high_confidence_payload, make_store, no_owner_item
 from tests.test_langchain_agent import make_lc_context
 
@@ -101,8 +104,9 @@ class SigSummaryProvider:
 
 
 class MultiSigSummaryProvider:
-    def __init__(self, signatures: list[str]):
+    def __init__(self, signatures: list[str], test_files: list[str] | None = None):
         self.signatures = signatures
+        self.test_files = test_files or [f"modules/automation/tests/{signature}.ts" for signature in signatures]
 
     def find_test_failure_summaries(self, tail_lines=500, max_chunks=5):
         chunks = []
@@ -118,8 +122,8 @@ class MultiSigSummaryProvider:
                         "testName": f"failure {index}",
                         "errorType": "Timeout",
                         "errorMessage": "run awaitfunc timeout",
-                        "testFile": f"modules/automation/tests/{signature_key}.ts",
-                        "topStackFile": f"modules/automation/tests/{signature_key}.ts",
+                        "testFile": self.test_files[index],
+                        "topStackFile": self.test_files[index],
                     },
                     "signatureHash": signature_key,
                 }
@@ -560,8 +564,99 @@ def test_all_chunks_no_owner_decision_short_circuits_agent(monkeypatch, repo_cac
     )
 
     assert notice.owner.type == "no_high_confidence_owner"
+    assert len(notice.responsibilityItems) == 2
+    assert [item.failureSignature for item in notice.responsibilityItems] == ["sig-timeout-a", "sig-timeout-b"]
+    assert all(item.sourceBuildNumber == 5088 for item in notice.responsibilityItems)
+    assert all(item.sourceBuildUrl == "local://job/5088" for item in notice.responsibilityItems)
+    assert all(item.matchType == "signature_exact" for item in notice.responsibilityItems)
+    assert all(item.relationship == "very_likely_same_failure" for item in notice.responsibilityItems)
+    assert all(item.reason for item in notice.responsibilityItems)
     assert "所有当前失败项" in notice.failureReason
     assert "coveredFailureCount=2" in notice.evidence[0].detail
+
+
+def test_multi_failure_no_owner_short_circuit_routes_each_test_maintainer(monkeypatch, repo_cache, sample_repo, logs, tmp_path):
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    settings = replace(context.settings, history_enabled=True, history_inherit_no_owner_enabled=True)
+    store = make_store()
+    signatures = ["sig-view", "sig-quota"]
+    _save_historical_no_owner_chunks(store, context, signature_keys=signatures, build=5088)
+    monkeypatch.setattr(
+        "ci_owner_agent.orchestrator.create_responsibility_agent",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("agent should be skipped")),
+    )
+    provider = MultiSigSummaryProvider(signatures, ["test/view/ViewTest.ts", "test/quota/QuotaTest.ts"])
+    build_info = BuildInfo(job=context.job, buildNumber=5089, result="FAILURE", buildUrl="local://job/5089", branch=context.branch, commit=context.head_commit)
+
+    notice = analyze_failed_build(
+        sample_repo["repo"],
+        build_info,
+        context.base_commit,
+        context.head_commit,
+        provider,
+        GitClient(repo_cache),
+        allow_sync_failure=True,
+        settings=settings,
+        last_successful_build_number=5087,
+        history_store=store,
+    )
+    mapping = tmp_path / "maintainers.yml"
+    mapping.write_text(
+        "version: 1\nrules:\n"
+        "  - paths: [\"test/view/**\"]\n"
+        "    maintainers: [{name: Charlie, wecomUserId: charlie}]\n"
+        "  - paths: [\"test/quota/**\"]\n"
+        "    maintainers: [{name: Mars, wecomUserId: mars}]\n",
+        encoding="utf-8",
+    )
+    markdown = format_wecom_markdown_notice(notice, maintainer_resolver=TestMaintainerResolver.from_yaml(mapping))
+
+    assert len(notice.responsibilityItems) == 2
+    assert [item.testFilePath for item in notice.responsibilityItems] == ["test/view/ViewTest.ts", "test/quota/QuotaTest.ts"]
+    assert "**待确认维护人**：<@charlie>、<@mars>" in markdown
+    assert "📁 测试文件：test/view/ViewTest.ts" in markdown
+    assert "📣 待确认维护人：<@charlie>" in markdown
+    assert "📁 测试文件：test/quota/QuotaTest.ts" in markdown
+    assert "📣 待确认维护人：<@mars>" in markdown
+
+
+def test_ai_no_owner_decisions_build_one_item_per_current_fact():
+    decision = _select_build_level_no_owner_decision(
+        None,
+        {
+            "currentFacts": [
+                {
+                    "signatureKey": "fact-a",
+                    "failureKind": "typescript_compile_error",
+                    "errorCode": "TS2305",
+                    "filePath": "test/a/A.test.ts",
+                    "inheritedOwner": {"found": False},
+                    "noOwnerDecision": {"found": True, "sourceBuildNumber": 7, "sourceBuildUrl": "local://7", "matchType": "ai_fact_semantic", "relationship": "same_root_cause", "reason": "same A"},
+                },
+                {
+                    "signatureKey": "fact-b",
+                    "failureKind": "npm_dependency_resolution_error",
+                    "errorCode": "ETARGET",
+                    "filePath": "test/b/B.test.ts",
+                    "inheritedOwner": {"found": False},
+                    "noOwnerDecision": {"found": True, "sourceBuildNumber": 8, "sourceBuildUrl": "local://8", "matchType": "ai_fact_semantic", "relationship": "same_root_cause", "reason": "same B"},
+                },
+            ]
+        },
+    )
+    build_info = BuildInfo(job="job", buildNumber=9, result="FAILURE", buildUrl="local://9", branch="dev", commit="head")
+    notice = _build_no_owner_notice_from_history_decision(
+        build_info=build_info,
+        base_commit="base",
+        head_commit="head",
+        decision=decision,
+        failure_summaries=None,
+        failure_facts=None,
+    )
+
+    assert [item.failureSignature for item in notice.responsibilityItems] == ["fact-a", "fact-b"]
+    assert [item.sourceBuildNumber for item in notice.responsibilityItems] == [7, 8]
+    assert [item.reason for item in notice.responsibilityItems] == ["same A", "same B"]
 
 
 def test_no_owner_decision_disabled_falls_back_to_agent(monkeypatch, repo_cache, sample_repo, logs):

@@ -53,21 +53,24 @@ def format_wecom_markdown_notice(
         for idx, item in enumerate(notice.responsibilityItems, start=1):
             owner_name = format_item_owner(item.owner, mapper, mention_mode)
             item_type = str(item.responsibilityType or "unknown")
-            lines.extend(
-                [
-                    f"{idx}. {responsibility_type_icon(item_type)} {responsibility_type_label(item_type)} | {public_single_line(item.failureTitle, 120)}",
-                    f"   - 👤 责任人：{owner_name}",
-                    f"   - 🧷 来源：{source_build_label(item, notice)}",
-                    f"   - 🔎 证据：{format_item_evidence(item, evidence_by_id, max_evidence_chars)}",
-                    "",
-                ]
-            )
+            item_lines = [
+                f"{idx}. {responsibility_type_icon(item_type)} {responsibility_type_label(item_type)} | {public_single_line(item.failureTitle, 120)}",
+                f"   - 👤 责任人：{owner_name}",
+                f"   - 🧷 来源：{source_build_label(item, notice)}",
+                f"   - 🔎 证据：{format_item_evidence(item, evidence_by_id, max_evidence_chars)}",
+            ]
             match = maintainer_matches[idx - 1]
             if match is not None:
-                lines.insert(-1, f"   - 📁 测试文件：{match.test_file_path or '未识别'}")
-                lines.insert(-1, f"   - 📣 待确认维护人：{format_test_maintainer_mentions(match.maintainers, mention_mode) or '未配置'}")
+                item_lines.extend(
+                    [
+                        f"   - 📁 测试文件：{match.test_file_path or '未识别'}",
+                        f"   - 📣 待确认维护人：{format_test_maintainer_mentions(match.maintainers, mention_mode) or '未配置'}",
+                    ]
+                )
                 if match.used_fallback:
-                    lines.insert(-1, f"   - ℹ️ 路由说明：{match.reason}")
+                    item_lines.append(f"   - ℹ️ 路由说明：{match.reason}")
+            item_lines.append("")
+            lines.extend(item_lines)
     else:
         lines.extend(["1. 🧩 unknown | 未识别到独立责任项", f"   - 👤 责任人：{NO_OWNER_NAME}", "   - 🧷 来源：-", "   - 🔎 证据：证据不足，详见分析结果 JSON。", ""])
 
@@ -93,7 +96,11 @@ def resolve_test_maintainer_matches(
 ) -> list[TestMaintainerMatch | None]:
     resolver = maintainer_resolver or TestMaintainerResolver()
     matches: list[TestMaintainerMatch | None] = []
-    if not notice.responsibilityItems and notice.owner.type == "no_high_confidence_owner":
+    if (
+        str(notice.result or "").upper() in {"FAILURE", "UNSTABLE", "UNKNOWN"}
+        and not notice.responsibilityItems
+        and notice.owner.type == "no_high_confidence_owner"
+    ):
         return [
             resolver.resolve(
                 repo=repo or notice.repo,

@@ -55,6 +55,42 @@ def test_summary_without_test_file_falls_through_to_failure_fact():
     assert notice.responsibilityItems[0].testFilePath == "packages/x/Foo.test.ts"
 
 
+def test_deterministic_summary_paths_win_over_ai_fact_path():
+    notice = _notice("shared-sig")
+    enrich_responsibility_item_paths(
+        notice,
+        {
+            "chunks": [
+                {
+                    "signature": {
+                        "signatureKey": "shared-sig",
+                        "testFile": "test/summary/SummaryTest.ts",
+                        "topStackFile": "server/summary/root.ts",
+                    }
+                }
+            ]
+        },
+        {"facts": [{"signatureKey": "shared-sig", "filePath": "test/fact/FactTest.ts"}]},
+    )
+
+    assert notice.responsibilityItems[0].testFilePath == "test/summary/SummaryTest.ts"
+    assert notice.responsibilityItems[0].failureFilePath == "server/summary/root.ts"
+
+
+def test_existing_explicit_paths_are_not_overwritten():
+    notice = _notice("shared-sig")
+    notice.responsibilityItems[0].testFilePath = "test/explicit/ExplicitTest.ts"
+    notice.responsibilityItems[0].failureFilePath = "server/explicit/root.ts"
+    enrich_responsibility_item_paths(
+        notice,
+        {"chunks": [{"signature": {"signatureKey": "shared-sig", "testFile": "test/summary/SummaryTest.ts", "topStackFile": "server/summary/root.ts"}}]},
+        {"facts": [{"signatureKey": "shared-sig", "filePath": "test/fact/FactTest.ts"}]},
+    )
+
+    assert notice.responsibilityItems[0].testFilePath == "test/explicit/ExplicitTest.ts"
+    assert notice.responsibilityItems[0].failureFilePath == "server/explicit/root.ts"
+
+
 def test_enriches_conservative_test_path_from_item_and_evidence_text():
     notice = _notice("missing")
     notice.responsibilityItems[0].reason = "失败位于 test/service/quota/QuotaUpdatedEventHandlerTest.ts:12:3"
