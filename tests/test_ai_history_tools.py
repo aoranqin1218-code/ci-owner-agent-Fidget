@@ -202,6 +202,7 @@ def test_buildkit_wrapper_does_not_enter_ai_history(monkeypatch, repo_cache, sam
         historyEligible=True,
         isGenericWrapper=False,
         failureKind="build_failure",
+        errorType="BuildError",
         message='ERROR: process "/bin/sh -c npm run build" did not complete successfully: exit code: 1',
         rootCauseSummary="command failed",
         confidence=0.99,

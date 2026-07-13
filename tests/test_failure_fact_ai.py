@@ -274,6 +274,7 @@ def test_extract_failure_facts_keeps_inner_failure_and_downgrades_buildkit_wrapp
                     "historyEligible": True,
                     "isGenericWrapper": False,
                     "failureKind": "build_failure",
+                    "errorType": "BuildError",
                     "message": 'ERROR: process "/bin/sh -c npm run build" did not complete successfully: exit code: 1',
                     "rootCauseSummary": "command failed",
                     "confidence": 0.99,

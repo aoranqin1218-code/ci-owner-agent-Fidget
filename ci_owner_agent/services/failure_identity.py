@@ -36,6 +36,26 @@ GENERIC_FAILURE_KINDS = UNUSABLE_IDENTITY_VALUES | {
     "process_failure",
     "unknown",
 }
+GENERIC_ERROR_TYPES = {
+    "error",
+    "builderror",
+    "dockerbuilderror",
+    "processerror",
+    "commanderror",
+    "shellerror",
+    "scripterror",
+    "pipelineerror",
+    "genericerror",
+    "unknownerror",
+}
+GENERIC_PACKAGE_NAMES = {"npm", "yarn", "pnpm", "docker", "buildkit", "jenkins", "make", "shell"}
+GENERIC_SYMBOLS = {"build", "run", "test", "process", "command", "shell", "docker", "npm", "unknown", "error"}
+GENERIC_BUILD_FILES = {"dockerfile", "makefile", "jenkinsfile"}
+SOURCE_FILE_EXTENSIONS = {
+    ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".java", ".kt", ".py", ".go", ".rs", ".cc", ".cpp",
+    ".c", ".h", ".hpp", ".cs", ".rb", ".php", ".vue", ".svelte",
+}
+REPOSITORY_ROOT_SEGMENTS = {"app", "lib", "modules", "packages", "server", "src", "test", "tests"}
 GENERIC_WRAPPER_WORDS = {
     "build",
     "buildkit",
@@ -100,9 +120,8 @@ STRONG_INNER_FAILURE_RE = re.compile(
     r"\b(?:ts\d{4}|e11000|etarget|eresolve|enoent|econnrefused|module_not_found|err_[a-z0-9_]+)\b"
     r"|\b(?:assertion|type|reference|syntax|range|timeout)error\b"
     r"|\bmongoservererror\b"
-    r"|(?:^|[\s(:])(?:server|modules|packages|test)/[a-z0-9_@./-]+\.(?:[cm]?[jt]sx?)\b"
-    r"|@[a-z0-9][a-z0-9_-]*/[a-z0-9_.-]+"
-    r"|\bexpected\b.*\bactual\b|\bactual\b.*\bexpected\b"
+    r"|(?:\bat\s+|\berror\s+at\s+)(?:server|modules|packages|test|src|app)/[a-z0-9_@./-]+\.(?:[cm]?[jt]sx?)\b"
+    r"|\b(?:cannot find module|no matching version found|package resolution error|unable to resolve dependency tree)\b"
 )
 WRAPPER_PATTERNS = (
     re.compile(
@@ -115,6 +134,27 @@ WRAPPER_PATTERNS = (
     re.compile(r"(?i)\b(?:process exited with code|command terminated with exit code|command failed with exit code|command returned non-zero status|subprocess exited with status|task failed:\s*exit code|exit status)\s+\d+\b"),
     re.compile(r"(?i)\b(?:npm err!\s+command(?:\s+.*)?|yarn run failed with exit code\s+\d+|pnpm run .+? exited with code\s+\d+)\b"),
     re.compile(r"(?i)\bfailed to solve\b"),
+)
+WRAPPER_COMMAND_PAYLOAD_PATTERNS = (
+    (
+        re.compile(r"(?is)(\bprocess\s+[\"'])[^\"']*([\"']\s+(?:did not complete successfully|exited with code))"),
+        r"\1<wrapper_command>\2",
+    ),
+    (
+        re.compile(r"(?is)(\bexecutor failed running\s+\[)[^\]]*(\]\s*:\s*exit code)"),
+        r"\1<wrapper_command>\2",
+    ),
+    (
+        re.compile(
+            r"(?i)(\bnpm\s+err!\s+command\b).*?"
+            r"(?=\s+(?:assertionerror|typeerror|referenceerror|syntaxerror|rangeerror|timeouterror|mongoservererror|expected|actual|ts\d{4}|e11000|etarget|eresolve|err_[a-z0-9_]+)\b|$)"
+        ),
+        r"\1 <wrapper_command>",
+    ),
+    (
+        re.compile(r"(?im)(\b(?:yarn|pnpm)\s+(?:run|command)\b).*?(?=\s+(?:failed|exited)\b|$)"),
+        r"\1 <wrapper_command>",
+    ),
 )
 
 MONGO_COLLECTION_RE = re.compile(r"(?i)\bcollection\s*:\s*([A-Za-z0-9_.-]+)")
@@ -198,17 +238,28 @@ def has_meaningful_failure_identity(fact: Any) -> bool:
 
     failure_kind = _fact_value(fact, "failureKind")
     text = "\n".join(str(_fact_value(fact, key) or "") for key in ("failureKind", "rootCauseSummary", "message"))
-    if contains_strong_inner_failure_marker(text):
+    inner_text = strip_wrapper_command_payloads(text)
+    if contains_strong_inner_failure_marker(inner_text):
         return True
     if is_generic_wrapper_text(text):
         return False
     if canonicalize_failure_signature(str(failure_kind or "")) in GENERIC_FAILURE_KINDS:
         return False
-    return _has_meaningful_identity_text(text)
+    return _has_meaningful_identity_text(inner_text)
 
 
 def contains_strong_inner_failure_marker(value: str | None) -> bool:
-    return bool(STRONG_INNER_FAILURE_RE.search(str(value or "")))
+    text = strip_wrapper_command_payloads(value)
+    return bool(STRONG_INNER_FAILURE_RE.search(text)) or bool(
+        re.search(r"\bexpected\b", text, re.I) and re.search(r"\bactual\b", text, re.I)
+    )
+
+
+def strip_wrapper_command_payloads(value: str | None) -> str:
+    text = str(value or "")
+    for pattern, replacement in WRAPPER_COMMAND_PAYLOAD_PATTERNS:
+        text = pattern.sub(replacement, text)
+    return text
 
 
 def is_generic_wrapper_text(value: str | None) -> bool:
@@ -334,15 +385,80 @@ def _has_meaningful_identity_text(value: Any) -> bool:
 
 def _has_meaningful_structured_field(key: str, value: Any) -> bool:
     canonical = canonicalize_failure_signature(str(value or ""))
-    if not canonical or canonical in GENERIC_FAILURE_KINDS:
+    if not canonical or canonical in GENERIC_FAILURE_KINDS or _is_dynamic_placeholder_only(canonical):
         return False
-    if key == "filePath" and canonical in {"dockerfile", "makefile"}:
+    if key == "errorCode":
+        return is_meaningful_error_code(canonical)
+    if key == "errorType":
+        return is_meaningful_error_type(canonical)
+    if key == "packageName":
+        return is_meaningful_package_name(canonical)
+    if key == "filePath":
+        return is_meaningful_source_path(str(value or ""))
+    if key == "symbol":
+        return is_meaningful_symbol(canonical)
+    return False
+
+
+def is_meaningful_error_code(value: str | None) -> bool:
+    code = canonicalize_failure_signature(value)
+    if not code or _is_dynamic_placeholder_only(code) or code in {"unknown", "error"} or code.isdigit():
         return False
-    if key == "packageName" and canonical in {"npm", "yarn", "pnpm"}:
+    if re.fullmatch(r"(?:exit_?code|status|code)_?\d+", code):
         return False
-    if key == "errorType" and canonical == "error":
+    return bool(
+        re.fullmatch(
+            r"(?:ts\d{4,5}|e\d{3,6}|etarget|eresolve|enoent|econnrefused|module_not_found|err_[a-z0-9_]+|http_?\d{3}|ora[-_]?\d{3,6})",
+            code,
+        )
+    )
+
+
+def is_meaningful_error_type(value: str | None) -> bool:
+    error_type = canonicalize_failure_signature(value)
+    if not error_type or _is_dynamic_placeholder_only(error_type) or error_type in GENERIC_ERROR_TYPES:
         return False
-    return _has_meaningful_identity_text(canonical) or key in {"errorCode", "errorType", "packageName", "filePath", "symbol"}
+    return bool(re.fullmatch(r"[a-z][a-z0-9_]*(?:error|exception)", error_type))
+
+
+def is_meaningful_package_name(value: str | None) -> bool:
+    package = canonicalize_failure_signature(value)
+    if not package or _is_dynamic_placeholder_only(package) or package in GENERIC_PACKAGE_NAMES or package.isdigit():
+        return False
+    return bool(re.fullmatch(r"(?:@[a-z0-9][a-z0-9_-]*/)?[a-z0-9][a-z0-9._-]*", package))
+
+
+def is_meaningful_source_path(value: str | None) -> bool:
+    from ci_owner_agent.services.responsibility_path_enricher import normalize_repository_path
+
+    raw = str(value or "").strip()
+    if not raw or _is_dynamic_placeholder_only(canonicalize_failure_signature(raw)):
+        return False
+    path = normalize_repository_path(raw)
+    if not path:
+        return False
+    lower_path = path.lower()
+    filename = lower_path.rsplit("/", 1)[-1]
+    if filename in GENERIC_BUILD_FILES or not any(lower_path.endswith(extension) for extension in SOURCE_FILE_EXTENSIONS):
+        return False
+    raw_path = raw.replace("\\", "/").lower()
+    if any(marker in raw_path for marker in ("/tmp/", "/var/tmp/", "/bin/", "/usr/bin/", "/appdata/local/temp/")):
+        return False
+    if re.match(r"^(?:[a-z]:)?/", raw_path) and not any(segment in lower_path.split("/") for segment in REPOSITORY_ROOT_SEGMENTS):
+        return False
+    return True
+
+
+def is_meaningful_symbol(value: str | None) -> bool:
+    symbol = canonicalize_failure_signature(value)
+    if not symbol or _is_dynamic_placeholder_only(symbol) or symbol in GENERIC_SYMBOLS:
+        return False
+    return bool(re.fullmatch(r"[a-z_][a-z0-9_]*(?:\.[a-z_][a-z0-9_]*)*", symbol))
+
+
+def _is_dynamic_placeholder_only(value: str) -> bool:
+    stripped = DYNAMIC_PLACEHOLDER_RE.sub("", value).strip("_| -")
+    return not stripped or not any(character.isalnum() for character in stripped)
 
 
 def _first_match(pattern: re.Pattern[str], value: str) -> str | None:

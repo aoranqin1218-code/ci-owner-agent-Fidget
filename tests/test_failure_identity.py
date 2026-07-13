@@ -328,3 +328,127 @@ def test_wrapper_with_inner_failure_remains_eligible(message, root_cause, expect
     assert fact.signatureKey != "unknown_failure"
     if expected_signature:
         assert fact.signatureKey == expected_signature
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("errorCode", "1"),
+        ("errorCode", "EXIT_CODE_1"),
+        ("errorCode", "<timestamp>"),
+        ("errorType", "Error"),
+        ("errorType", "BuildError"),
+        ("errorType", "ProcessError"),
+        ("errorType", "CommandError"),
+        ("errorType", "ShellError"),
+        ("packageName", "npm"),
+        ("packageName", "docker"),
+        ("packageName", "<object_id>"),
+        ("filePath", "/bin/sh"),
+        ("filePath", "/tmp/build-123"),
+        ("filePath", "Dockerfile"),
+        ("filePath", "Makefile"),
+        ("symbol", "build"),
+        ("symbol", "run"),
+        ("symbol", "<uuid>"),
+    ],
+)
+def test_invalid_structured_field_does_not_bypass_wrapper_gate(field, value):
+    payload = {
+        "signatureKey": "model-wrapper",
+        "historyEligible": True,
+        "isGenericWrapper": False,
+        "failureKind": "build_failure",
+        "message": 'ERROR: process "/bin/sh -c npm run build" did not complete successfully: exit code: 1',
+        "rootCauseSummary": "command failed",
+        "confidence": 0.99,
+    }
+    payload[field] = value
+    fact = FailureFact(**payload)
+
+    assert fact.signatureKey == "unknown_failure"
+    assert fact.historyEligible is False
+    assert fact.isGenericWrapper is True
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("errorCode", "TS2305"),
+        ("errorCode", "ETARGET"),
+        ("errorCode", "E11000"),
+        ("errorType", "TypeError"),
+        ("errorType", "MongoServerError"),
+        ("packageName", "@ai-sdk/provider"),
+        ("packageName", "react"),
+        ("filePath", "server/workflow/service.ts"),
+        ("filePath", "modules/workflow/tests/BackTaskCmdTest.ts"),
+        ("symbol", "classifyErrorMessage"),
+        ("symbol", "MongoQueryRunner.insert"),
+    ],
+)
+def test_valid_structured_field_keeps_wrapper_fact_eligible(field, value):
+    payload = {
+        "signatureKey": "model-inner-failure",
+        "historyEligible": True,
+        "isGenericWrapper": False,
+        "failureKind": "build_failure",
+        "message": 'ERROR: process "/bin/sh -c npm run build" did not complete successfully: exit code: 1',
+        "rootCauseSummary": "command failed",
+        "confidence": 0.99,
+    }
+    payload[field] = value
+    fact = FailureFact(**payload)
+
+    assert fact.historyEligible is True
+    assert fact.isGenericWrapper is False
+    assert fact.signatureKey != "unknown_failure"
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        'ERROR: process "/bin/sh -c npm install @ai-sdk/provider" did not complete successfully: exit code: 1',
+        'ERROR: process "/bin/sh -c npm test -- test/workflow/foo.ts" did not complete successfully: exit code: 1',
+        'ERROR: process "/bin/bash -c node server/index.ts" did not complete successfully: exit code: 1',
+        'ERROR: failed to solve: executor failed running [/bin/sh -c pnpm add @scope/package]: exit code: 1',
+        "npm ERR! command sh -c npm test -- modules/workflow/a.ts",
+    ],
+)
+def test_package_or_path_inside_wrapper_command_is_not_inner_failure(message):
+    fact = FailureFact(
+        signatureKey="model-command-payload",
+        historyEligible=True,
+        isGenericWrapper=False,
+        failureKind="build_failure",
+        message=message,
+        rootCauseSummary="command failed",
+        confidence=0.99,
+    )
+
+    assert fact.signatureKey == "unknown_failure"
+    assert fact.historyEligible is False
+    assert fact.isGenericWrapper is True
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "make: *** [test] Error 2\nExpected:\n1\nActual:\n2",
+        "npm ERR! command sh -c npm test\nAssertionError:\nexpected true\nactual false",
+    ],
+)
+def test_multiline_expected_actual_is_a_strong_inner_failure_marker(message):
+    fact = FailureFact(
+        signatureKey="model-assertion",
+        historyEligible=True,
+        isGenericWrapper=False,
+        failureKind="build_failure",
+        message=message,
+        rootCauseSummary="test assertion failed",
+        confidence=0.99,
+    )
+
+    assert fact.historyEligible is True
+    assert fact.isGenericWrapper is False
+    assert fact.signatureKey != "unknown_failure"
