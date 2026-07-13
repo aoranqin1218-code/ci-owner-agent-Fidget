@@ -687,7 +687,7 @@ def test_ai_no_owner_decisions_build_one_item_per_current_fact():
 def test_ai_etarget_history_no_owner_short_circuits_without_agent(monkeypatch, repo_cache, sample_repo, logs):
     context = make_lc_context(repo_cache, sample_repo, logs)
     settings = replace(context.settings, history_inherit_no_owner_enabled=True)
-    fact = {
+    fact = FailureFact.model_validate({
         "signatureKey": "npm|ETARGET|@scope/pkg",
         "historyEligible": True,
         "isGenericWrapper": False,
@@ -699,7 +699,7 @@ def test_ai_etarget_history_no_owner_short_circuits_without_agent(monkeypatch, r
         "message": "No matching version found",
         "rootCauseSummary": "dependency version does not exist",
         "confidence": 0.95,
-    }
+    }).model_dump(mode="json")
 
     def precomputed(runtime, history_store=None):
         return replace(

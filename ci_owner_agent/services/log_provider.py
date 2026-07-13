@@ -430,6 +430,8 @@ def _trim_failure_block_end(lines: list[str], start: int, end: int) -> int:
 
 
 def _extract_failure_signature(content: str) -> dict:
+    from ci_owner_agent.services.failure_identity import build_responsibility_signature
+
     lines = content.splitlines()
     first = FAILURE_BLOCK_RE.match(lines[0] if lines else "")
     title = first.group(2).strip() if first else ""
@@ -462,15 +464,15 @@ def _extract_failure_signature(content: str) -> dict:
     test_file = next((path for path in files if path.startswith("test/") or "/test/" in path), None)
     top_stack_file = files[0] if files else None
     normalized_error = _stable_error_message(error_message)
-    signature_key = "|".join(
-        [
-            test_name or "",
-            test_case or "",
-            error_type or "",
-            normalized_error,
-            test_file or "",
-            top_stack_file or "",
-        ]
+    signature_key = build_responsibility_signature(
+        failure_title=" ".join(part for part in (test_name, test_case) if part),
+        failure_summary="\n".join((content, normalized_error)),
+        existing_signature="|".join(
+            [test_name or "", test_case or "", error_type or "", normalized_error, test_file or "", top_stack_file or ""]
+        ),
+        error_type=error_type,
+        test_file_path=test_file,
+        failure_file_path=top_stack_file,
     )
     return {
         "testName": test_name,
@@ -485,6 +487,8 @@ def _extract_failure_signature(content: str) -> dict:
 
 
 def _extract_xfail_signature(content: str) -> dict:
+    from ci_owner_agent.services.failure_identity import build_responsibility_signature
+
     lines = content.splitlines()
     first = XFAIL_BLOCK_RE.match(lines[0] if lines else "")
     title = first.group(1).strip() if first else ""
@@ -508,7 +512,15 @@ def _extract_xfail_signature(content: str) -> dict:
     test_file = _pick_test_file(files)
     top_stack_file = files[0] if files else None
     normalized_error = _stable_error_message(error_message)
-    signature_key = "|".join(["xfail", title, error_type, normalized_error, test_file or "", top_stack_file or ""])
+    signature_key = build_responsibility_signature(
+        failure_title=title,
+        failure_summary="\n".join((content, normalized_error)),
+        existing_signature="|".join(["xfail", title, error_type, normalized_error, test_file or "", top_stack_file or ""]),
+        failure_kind="xfail",
+        error_type=error_type,
+        test_file_path=test_file,
+        failure_file_path=top_stack_file,
+    )
     return {
         "testName": title,
         "testCase": title,
@@ -562,13 +574,16 @@ def _clean_stack_path(path: str) -> str:
 
 
 def _stable_error_message(message: str) -> str:
-    from ci_owner_agent.services.failure_similarity import normalize_error_chunk
+    from ci_owner_agent.services.failure_identity import canonicalize_failure_message
 
-    return normalize_error_chunk(message)[:200]
+    return canonicalize_failure_message(message)[:200]
 
 
 def _signature_hash(signature: dict) -> str:
-    return hashlib.sha256(str(signature.get("signatureKey") or "").encode("utf-8")).hexdigest()
+    from ci_owner_agent.services.failure_identity import canonicalize_failure_signature
+
+    canonical = canonicalize_failure_signature(str(signature.get("signatureKey") or ""))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 class LocalFileLogProvider(TextLogProvider):

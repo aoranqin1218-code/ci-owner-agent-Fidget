@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+
 from ci_owner_agent.agents.context import AgentRuntimeContext
 from ci_owner_agent.services.failure_similarity import (
     chunk_similarity,
@@ -7,6 +9,7 @@ from ci_owner_agent.services.failure_similarity import (
     normalize_error_chunk,
     similarity_relationship,
 )
+from ci_owner_agent.services.failure_identity import build_failure_summary_signature
 from ci_owner_agent.services.history_inheritance import (
     build_inherited_owner,
     build_no_owner_decision_payload,
@@ -60,19 +63,23 @@ def history_search_similar_failures(
                 "candidates": [],
                 "warning": "test failure summaries unavailable; history similarity skipped",
             }
-        current_chunks = [
-            {
+        current_chunks = []
+        for idx, chunk in enumerate(current_chunks_raw):
+            content = str(chunk.get("content") or "")
+            if not content.strip():
+                continue
+            signature = dict(chunk.get("signature") or {})
+            signature_key = build_failure_summary_signature(signature)
+            signature["signatureKey"] = signature_key
+            current_chunks.append({
                 "chunkIndex": idx,
-                "text": str(chunk.get("content") or ""),
-                "normalized": normalize_error_chunk(str(chunk.get("content") or "")),
-                "normalizedHash": hash_normalized_chunk(str(chunk.get("content") or "")),
-                "preview": str(chunk.get("content") or "")[:500],
-                "signature": chunk.get("signature") or {},
-                "signatureHash": chunk.get("signatureHash"),
-            }
-            for idx, chunk in enumerate(current_chunks_raw)
-            if str(chunk.get("content") or "").strip()
-        ]
+                "text": content,
+                "normalized": normalize_error_chunk(content),
+                "normalizedHash": hash_normalized_chunk(content),
+                "preview": content[:500],
+                "signature": signature,
+                "signatureHash": hashlib.sha256(signature_key.encode("utf-8")).hexdigest(),
+            })
         historical = history_store.find_historical_failure_chunks(
             job=context.job,
             branch=context.branch,

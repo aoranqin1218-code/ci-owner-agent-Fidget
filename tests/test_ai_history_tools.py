@@ -363,7 +363,7 @@ def test_ai_history_candidate_sort_prefers_signature_and_error_code(monkeypatch,
     _save_fact(store, context, build=7, fact=make_fact(signatureKey="only-kind", errorCode=None, symbol=None))
     _save_fact(store, context, build=8, fact=make_fact(signatureKey="same-signature"))
     history_search_similar_failure_facts(_context(context, facts=[current], build=9), store=store)
-    assert compared[0] == "same-signature"
+    assert compared[0] == current.signatureKey
 
 
 def test_ai_history_compare_exception_does_not_fail(monkeypatch, repo_cache, sample_repo, logs):

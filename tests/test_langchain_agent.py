@@ -288,7 +288,8 @@ def test_missing_failure_signature_gets_manual_fallback_and_stable_id(repo_cache
     ]
     notice = CiResponsibilityNotice.model_validate(payload)
     item = notice.responsibilityItems[0]
-    assert item.failureSignature.startswith("manual:")
+    assert item.failureSignature
+    assert "run_awaitfunc_timeout" in item.failureSignature
     assert re.fullmatch(r"failure-[0-9a-f]{12}", item.failureId)
 
 

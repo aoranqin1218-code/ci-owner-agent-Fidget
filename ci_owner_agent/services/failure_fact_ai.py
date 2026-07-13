@@ -88,6 +88,9 @@ def _build_prompt(
         "你是 CI 日志失败事实提取器。请从日志中提取“内层真实失败事实”，"
         "不要把 Jenkins、Docker、BuildKit、make、shell 的外层 wrapper 当作 failure identity。\n"
         "外层 wrapper 只能作为上下文，不能单独成为可历史继承事实。\n"
+        "signatureKey 不得包含 ObjectId、UUID、时间戳、随机端口或 requestId/traceId/sessionId。"
+        "MongoDB E11000 duplicate key 使用 mongodb_duplicate_key|e11000|collection|index。"
+        "系统仍会在本地重新生成 canonical signatureKey。\n"
         "请只输出严格 JSON object，不要 Markdown，不要解释。格式：\n"
         "{\n"
         '  "ok": true,\n'

@@ -158,7 +158,9 @@ def notification_digest(
         "mentionMode": mention_mode,
         "testMaintainerRoutes": routes,
     }
-    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    from ci_owner_agent.services.failure_identity import canonicalize_failure_message
+
+    raw = canonicalize_failure_message(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 

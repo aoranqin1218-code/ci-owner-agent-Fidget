@@ -10,11 +10,13 @@ from ci_owner_agent.constants import NO_OWNER_NAME
 from ci_owner_agent.config import Settings
 from ci_owner_agent.schemas import BuildInfo, CiResponsibilityNotice, FailureFact
 from ci_owner_agent.services.failure_similarity import hash_normalized_chunk, normalize_error_chunk
+from ci_owner_agent.services.failure_identity import build_failure_summary_signature, canonicalize_failure_message
 from ci_owner_agent.services.history_inheritance import (
     active_feedback_docs as _active_feedback_docs,
     find_feedback_override as _find_feedback_override,
     find_feedback_override_for_failure_signature,
 )
+from ci_owner_agent.services.responsibility_signature_enricher import enrich_responsibility_item_signatures
 
 HISTORY_CHUNK_SCHEMA_VERSION = 3
 ALLOWED_HISTORY_CHUNK_SOURCES = {
@@ -25,6 +27,18 @@ ALLOWED_HISTORY_CHUNK_SOURCES = {
     "notice_failure_summary",
 }
 DEFAULT_EXCLUDED_CHUNK_SOURCES = {"local_console_tail_fallback"}
+
+
+def _canonical_history_chunk(chunk: dict) -> dict:
+    result = dict(chunk)
+    signature = dict(chunk.get("signature") or {})
+    signature_key = build_failure_summary_signature(signature)
+    signature["signatureKey"] = signature_key
+    if signature.get("errorMessage"):
+        signature["errorMessage"] = canonicalize_failure_message(signature["errorMessage"])
+    result["signature"] = signature
+    result["signatureHash"] = hashlib.sha256(signature_key.encode("utf-8")).hexdigest()
+    return result
 
 
 class MongoHistoryStore:
@@ -82,6 +96,8 @@ class MongoHistoryStore:
         error_chunks: list[dict],
     ) -> dict:
         now = dt.datetime.now(dt.timezone.utc)
+        canonical_chunks = [_canonical_history_chunk(chunk) for chunk in error_chunks]
+        enrich_responsibility_item_signatures(notice, {"chunks": canonical_chunks}, None)
         branch = build_info.branch
         key = {"job": build_info.job, "branch": branch, "buildNumber": build_info.buildNumber}
         self.builds.update_one(
@@ -121,9 +137,9 @@ class MongoHistoryStore:
             upsert=True,
         )
         self.failure_chunks.delete_many(key)
-        chunks_to_save = [chunk for chunk in error_chunks if _is_allowed_history_chunk(chunk)]
+        chunks_to_save = [chunk for chunk in canonical_chunks if _is_allowed_history_chunk(chunk)]
         for idx, chunk in enumerate(chunks_to_save):
-            text = str(chunk.get("content") or chunk.get("chunkText") or "")
+            text = canonicalize_failure_message(str(chunk.get("content") or chunk.get("chunkText") or ""))
             normalized = normalize_error_chunk(text)
             self.failure_chunks.update_one(
                 {**key, "chunkIndex": idx},
@@ -159,6 +175,11 @@ class MongoHistoryStore:
         facts: list[FailureFact],
     ) -> dict:
         now = dt.datetime.now(dt.timezone.utc)
+        enrich_responsibility_item_signatures(
+            notice,
+            None,
+            {"ok": True, "facts": [fact.model_dump(mode="json") for fact in facts]},
+        )
         key = {"job": build_info.job, "branch": build_info.branch, "buildNumber": build_info.buildNumber}
         self.failure_facts.delete_many(key)
         notice_doc = notice.model_dump(mode="json")

@@ -4,30 +4,10 @@ import hashlib
 import re
 from difflib import SequenceMatcher
 
-ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
-HEX_RE = re.compile(r"\b[0-9a-f]{7,40}\b", re.I)
-LINE_COL_RE = re.compile(r"(?<=\S):\d+(?::\d+)?\b")
-DURATION_RE = re.compile(r"\b\d+(?:\.\d+)?\s*(?:ms|s)\b", re.I)
-LONG_NUMBER_RE = re.compile(r"\b\d{6,}\b")
-TEMP_PATH_RE = re.compile(r"(?:[a-z]:)?/[^ \n\t]*?(?:tmp|temp|\.cache)[^ \n\t]*", re.I)
-UUID_RE = re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b", re.I)
-OBJECT_ID_RE = re.compile(r"\b[0-9a-f]{24}\b", re.I)
-LONG_RANDOM_RE = re.compile(r"\b(?=[A-Za-z0-9_-]{32,}\b)(?=.*\d)(?=.*[_-])[A-Za-z0-9_-]+\b")
-
-
 def normalize_error_chunk(text: str) -> str:
-    normalized = ANSI_RE.sub("", text)
-    normalized = normalized.replace("\\", "/").lower()
-    normalized = LINE_COL_RE.sub("", normalized)
-    normalized = UUID_RE.sub("<uuid>", normalized)
-    normalized = OBJECT_ID_RE.sub("<object_id>", normalized)
-    normalized = HEX_RE.sub("<hash>", normalized)
-    normalized = DURATION_RE.sub("<duration>", normalized)
-    normalized = TEMP_PATH_RE.sub("<tmp_path>", normalized)
-    normalized = LONG_RANDOM_RE.sub("<random>", normalized)
-    normalized = LONG_NUMBER_RE.sub("<num>", normalized)
-    normalized = re.sub(r"\s+", " ", normalized)
-    return normalized.strip()
+    from ci_owner_agent.services.failure_identity import canonicalize_failure_message
+
+    return canonicalize_failure_message(text)
 
 
 def hash_normalized_chunk(text: str) -> str:

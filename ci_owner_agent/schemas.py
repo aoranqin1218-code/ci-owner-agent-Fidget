@@ -156,12 +156,14 @@ class FailureFact(StrictModel):
 
     @model_validator(mode="after")
     def normalize_fact(self) -> "FailureFact":
+        from ci_owner_agent.services.failure_identity import build_failure_fact_signature, canonicalize_failure_message
+
         self.confidence = max(0, min(float(self.confidence or 0), 1))
-        self.signatureKey = str(self.signatureKey or "").strip()
-        if self.historyEligible and not self.signatureKey:
-            raise ValueError("signatureKey is required when historyEligible=true")
-        if not self.factId:
-            self.factId = stable_failure_fact_id(self)
+        self.signatureKey = build_failure_fact_signature(self)
+        self.factId = stable_failure_fact_id(self)
+        self.message = canonicalize_failure_message(self.message)
+        self.rootCauseSummary = canonicalize_failure_message(self.rootCauseSummary)
+        self.evidenceLines = [canonicalize_failure_message(line) for line in self.evidenceLines]
         return self
 
 
@@ -256,13 +258,17 @@ def _no_owner() -> Owner:
 
 
 def stable_failure_id(item: ResponsibilityItem) -> str:
+    from ci_owner_agent.services.failure_identity import canonicalize_failure_signature
+
     basis = item.failureSignature or f"{item.failureTitle}\n{item.failureSummary or ''}"
-    normalized = _normalize_identifier_basis(basis)
+    normalized = canonicalize_failure_signature(basis)
     return "failure-" + hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:12]
 
 
 def stable_failure_fact_id(fact: FailureFact) -> str:
-    normalized = _normalize_identifier_basis(fact.signatureKey)
+    from ci_owner_agent.services.failure_identity import canonicalize_failure_signature
+
+    normalized = canonicalize_failure_signature(fact.signatureKey)
     return "fact-" + hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:12]
 
 
@@ -276,8 +282,15 @@ def _normalize_identifier_basis(value: str) -> str:
 
 
 def _normalize_responsibility_item(item: ResponsibilityItem, notice: CiResponsibilityNotice) -> None:
-    if not item.failureSignature or not item.failureSignature.strip():
-        item.failureSignature = _fallback_failure_signature(item)
+    from ci_owner_agent.services.failure_identity import build_responsibility_signature
+
+    item.failureSignature = build_responsibility_signature(
+        failure_title=item.failureTitle,
+        failure_summary=item.failureSummary,
+        existing_signature=item.failureSignature,
+        test_file_path=item.testFilePath,
+        failure_file_path=item.failureFilePath,
+    )
     item.failureId = stable_failure_id(item)
     item.confidence = max(0, min(float(item.confidence or 0), 1))
     if item.sourceBuildNumber == 0:

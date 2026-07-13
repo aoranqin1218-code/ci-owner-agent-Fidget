@@ -21,6 +21,7 @@ from ci_owner_agent.services.jenkins_client import JenkinsClient
 from ci_owner_agent.services.log_provider import JenkinsLogProvider, LocalFileLogProvider, LogProvider, detect_checkout_revision_from_console_log
 from ci_owner_agent.services.metrics import current_metrics_recorder
 from ci_owner_agent.services.responsibility_path_enricher import enrich_responsibility_item_paths, normalize_repository_path
+from ci_owner_agent.services.responsibility_signature_enricher import enrich_responsibility_item_signatures
 from ci_owner_agent.services.scorer import no_owner, validate_notice
 from ci_owner_agent.tools.ai_history_tools import history_search_similar_failure_facts
 from ci_owner_agent.tools.history_tools import history_search_similar_failures
@@ -244,6 +245,11 @@ def analyze_failed_build(
             failure_summaries=runtime_context.failure_summaries,
             failure_facts=runtime_context.failure_facts,
         )
+        notice = enrich_responsibility_item_signatures(
+            notice,
+            runtime_context.failure_summaries,
+            runtime_context.failure_facts,
+        )
         notice = enrich_responsibility_item_paths(
             notice,
             runtime_context.failure_summaries,
@@ -275,12 +281,18 @@ def analyze_failed_build(
     if sync_warning is not None:
         notice.evidence.append(sync_warning)
     notice = validate_notice(notice)
+    notice = enrich_responsibility_item_signatures(
+        notice,
+        runtime_context.failure_summaries,
+        runtime_context.failure_facts,
+    )
     notice = enrich_responsibility_item_paths(
         notice,
         runtime_context.failure_summaries,
         runtime_context.failure_facts,
         repo=repo,
     )
+    notice = validate_notice(notice)
     _save_history(
         settings,
         build_info,
@@ -565,6 +577,8 @@ def _validate_trusted_history_no_owner_decisions(
     *,
     current_build_number: int,
 ) -> dict | None:
+    from ci_owner_agent.services.failure_identity import canonicalize_failure_signature
+
     if not isinstance(decision, dict):
         return None
     raw_items = decision.get("decisions") if isinstance(decision.get("decisions"), list) else [decision]
@@ -573,7 +587,7 @@ def _validate_trusted_history_no_owner_decisions(
         if not isinstance(raw, dict):
             return None
         source_build = raw.get("sourceBuildNumber")
-        failure_signature = str(raw.get("failureSignature") or "").strip()
+        failure_signature = canonicalize_failure_signature(raw.get("failureSignature"))
         match_type = str(raw.get("matchType") or "").strip()
         relationship = str(raw.get("relationship") or "").strip()
         reason = str(raw.get("reason") or "").strip()

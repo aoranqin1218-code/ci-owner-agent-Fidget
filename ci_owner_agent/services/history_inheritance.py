@@ -4,6 +4,7 @@ import datetime as dt
 from typing import Any
 
 from ci_owner_agent.constants import NO_OWNER_NAME
+from ci_owner_agent.services.failure_identity import canonicalize_failure_signature
 
 INHERITABLE_OWNER_TYPES = {"high_confidence", "medium_confidence", "inherited_failure_owner"}
 BLOCKING_FEEDBACK_ACTIONS = {"mark_flaky", "mark_no_owner"}
@@ -34,6 +35,7 @@ def find_feedback_override_for_failure_signature(
     failure_signature: str | None,
     notice_doc: dict | None,
 ) -> dict | None:
+    failure_signature = canonicalize_failure_signature(failure_signature)
     if not failure_signature:
         return None
     feedback_docs = active_feedback_docs(store, job, branch)
@@ -58,7 +60,11 @@ def find_feedback_override(
     signature: dict,
     notice_doc: dict,
 ) -> dict | None:
-    possible_signatures = {signature_hash, signature.get("signatureKey"), signature.get("signatureHash")}
+    possible_signatures = {
+        canonical
+        for value in (signature_hash, signature.get("signatureKey"), signature.get("signatureHash"))
+        if (canonical := canonicalize_failure_signature(value))
+    }
     notice = notice_doc.get("notice") if isinstance(notice_doc, dict) else None
     failure_ids: set[str] = set()
     for item in (notice.get("responsibilityItems") if isinstance(notice, dict) else []) or []:

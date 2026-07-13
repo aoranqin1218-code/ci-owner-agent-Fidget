@@ -5,6 +5,7 @@ from dataclasses import replace
 from ci_owner_agent.schemas import BuildInfo, FailureFact
 from ci_owner_agent.services.history_store import MongoHistoryStore, find_feedback_override_for_failure_signature, notice_hash
 from ci_owner_agent.services.history_inheritance import is_no_owner_decision_item
+from ci_owner_agent.services.failure_identity import build_failure_summary_signature
 from ci_owner_agent.tools.history_tools import history_search_similar_failures
 from tests.test_langchain_agent import high_confidence_payload, make_lc_context
 
@@ -103,6 +104,9 @@ def focused_chunk(text: str, source: str = "local_test_failure_summary", signatu
         "signatureKey": "getJsSdkConfig dingtalk ua|dingtalk ua dingtalk corpId|Error|unknown|test/server/services/integrate/integrate.service.test.ts|node_modules/@fx/corp-core/src/errors/Factory.ts",
     }
     import hashlib
+
+    signature = dict(signature)
+    signature["signatureKey"] = build_failure_summary_signature(signature)
 
     return {
         "schemaVersion": 3,
@@ -775,8 +779,9 @@ def test_history_search_candidates_sort_by_similarity_then_recent_build(repo_cac
         build_info = BuildInfo(job=context.job, buildNumber=build, result="FAILURE", buildUrl=context.build_url, branch=context.branch, commit=context.head_commit)
         store.save_analysis(build_info, notice, context.base_commit, context.head_commit, 5103, context.base_commit, [focused_chunk(current_chunk)])
     lower_build = BuildInfo(job=context.job, buildNumber=5110, result="FAILURE", buildUrl=context.build_url, branch=context.branch, commit=context.head_commit)
-    lower_chunk = focused_chunk(current_chunk + "\nextra")
-    lower_chunk["signatureHash"] = "different-hash"
+    lower_signature = dict(focused_chunk(current_chunk)["signature"])
+    lower_signature["signatureKey"] += "|different_root_cause"
+    lower_chunk = focused_chunk(current_chunk + "\nextra", signature=lower_signature)
     store.save_analysis(lower_build, notice, context.base_commit, context.head_commit, 5103, context.base_commit, [lower_chunk])
 
     result = history_search_similar_failures(context, maxCandidates=4, store=store)

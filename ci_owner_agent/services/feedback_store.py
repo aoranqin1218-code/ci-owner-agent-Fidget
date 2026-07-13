@@ -5,6 +5,7 @@ from typing import Any
 
 from ci_owner_agent.schemas import Owner
 from ci_owner_agent.services.history_store import MongoHistoryStore
+from ci_owner_agent.services.failure_identity import build_responsibility_signature
 
 FEEDBACK_ACTIONS = {"confirm_owner", "correct_owner", "mark_flaky", "mark_no_owner"}
 CORRECT_OWNER_TYPES = {"high_confidence", "medium_confidence"}
@@ -42,6 +43,12 @@ class FeedbackStore:
             raise ValueError("owner-name is required for correct_owner")
         if action == "correct_owner" and owner_type not in CORRECT_OWNER_TYPES:
             raise ValueError("owner-type for correct_owner must be high_confidence or medium_confidence")
+
+        failure_signature = build_responsibility_signature(
+            failure_title=None,
+            failure_summary=None,
+            existing_signature=failure_signature,
+        ) if failure_signature else None
 
         notice_doc, item = self._find_notice_item(job, build_number, failure_id, failure_signature)
         if item:
