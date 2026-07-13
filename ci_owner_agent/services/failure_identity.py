@@ -28,6 +28,14 @@ DYNAMIC_PLACEHOLDER_RE = re.compile(
     re.I,
 )
 UNUSABLE_IDENTITY_VALUES = {"unknown_failure", "unusable_failure_identity", "generic_wrapper"}
+GENERIC_FAILURE_KINDS = UNUSABLE_IDENTITY_VALUES | {
+    "build_failure",
+    "docker_build_failure",
+    "command_failure",
+    "shell_failure",
+    "process_failure",
+    "unknown",
+}
 GENERIC_WRAPPER_WORDS = {
     "build",
     "buildkit",
@@ -53,6 +61,61 @@ GENERIC_WRAPPER_WORDS = {
     "successfully",
     "wrapper",
 }
+NON_SEMANTIC_IDENTITY_WORDS = GENERIC_WRAPPER_WORDS | {
+    "bash",
+    "bin",
+    "cmd",
+    "correlationid",
+    "dockerfile",
+    "duration",
+    "executor",
+    "hash",
+    "id",
+    "install",
+    "makefile",
+    "npm",
+    "objectid",
+    "pnpm",
+    "port",
+    "powershell",
+    "requestid",
+    "run",
+    "running",
+    "sessionid",
+    "sh",
+    "solve",
+    "status",
+    "target",
+    "task",
+    "test",
+    "timestamp",
+    "token",
+    "traceid",
+    "uuid",
+    "value",
+    "yarn",
+}
+STRONG_INNER_FAILURE_RE = re.compile(
+    r"(?ix)"
+    r"\b(?:ts\d{4}|e11000|etarget|eresolve|enoent|econnrefused|module_not_found|err_[a-z0-9_]+)\b"
+    r"|\b(?:assertion|type|reference|syntax|range|timeout)error\b"
+    r"|\bmongoservererror\b"
+    r"|(?:^|[\s(:])(?:server|modules|packages|test)/[a-z0-9_@./-]+\.(?:[cm]?[jt]sx?)\b"
+    r"|@[a-z0-9][a-z0-9_-]*/[a-z0-9_.-]+"
+    r"|\bexpected\b.*\bactual\b|\bactual\b.*\bexpected\b"
+)
+WRAPPER_PATTERNS = (
+    re.compile(
+        r"(?is)\b(?:process\s+(?:[\"'][^\"']+[\"']|\[[^\]]+\])\s+did not complete successfully"
+        r"|executor failed running\s+\[[^\]]+\]\s*:\s*exit code\s+\d+)\b"
+    ),
+    re.compile(r"(?im)^\s*dockerfile:\d+\s*(?:error:\s*)?failed to solve\s*$"),
+    re.compile(r"(?im)^\s*(?:g?make(?:\[\d+\])?):\s*\*\*\*\s*\[[^\]]+\]\s*error\s+\d+\s*$"),
+    re.compile(r"(?i)\b(?:hudson\.abortexception:\s*)?(?:jenkins\s+shell\s+)?script returned exit code\s+\d+\b"),
+    re.compile(r"(?i)\b(?:process exited with code|command terminated with exit code|command failed with exit code|command returned non-zero status|subprocess exited with status|task failed:\s*exit code|exit status)\s+\d+\b"),
+    re.compile(r"(?i)\b(?:npm err!\s+command(?:\s+.*)?|yarn run failed with exit code\s+\d+|pnpm run .+? exited with code\s+\d+)\b"),
+    re.compile(r"(?i)\bfailed to solve\b"),
+)
 
 MONGO_COLLECTION_RE = re.compile(r"(?i)\bcollection\s*:\s*([A-Za-z0-9_.-]+)")
 MONGO_INDEX_RE = re.compile(r"(?i)\bindex(?:\s+name)?\s*:\s*([^\s,}]+)")
@@ -129,13 +192,28 @@ def has_meaningful_failure_identity(fact: Any) -> bool:
     if bool(_fact_value(fact, "isGenericWrapper")):
         return False
 
-    for key in ("failureKind", "errorCode", "errorType", "packageName", "filePath", "symbol"):
-        if _has_meaningful_identity_text(_fact_value(fact, key)):
+    for key in ("errorCode", "errorType", "packageName", "filePath", "symbol"):
+        if _has_meaningful_structured_field(key, _fact_value(fact, key)):
             return True
-    return any(
-        _has_meaningful_identity_text(_fact_value(fact, key))
-        for key in ("rootCauseSummary", "message")
-    )
+
+    failure_kind = _fact_value(fact, "failureKind")
+    text = "\n".join(str(_fact_value(fact, key) or "") for key in ("failureKind", "rootCauseSummary", "message"))
+    if contains_strong_inner_failure_marker(text):
+        return True
+    if is_generic_wrapper_text(text):
+        return False
+    if canonicalize_failure_signature(str(failure_kind or "")) in GENERIC_FAILURE_KINDS:
+        return False
+    return _has_meaningful_identity_text(text)
+
+
+def contains_strong_inner_failure_marker(value: str | None) -> bool:
+    return bool(STRONG_INNER_FAILURE_RE.search(str(value or "")))
+
+
+def is_generic_wrapper_text(value: str | None) -> bool:
+    text = str(value or "")
+    return bool(text.strip()) and not contains_strong_inner_failure_marker(text) and any(pattern.search(text) for pattern in WRAPPER_PATTERNS)
 
 
 def build_failure_summary_signature(signature: Mapping[str, Any] | None) -> str:
@@ -246,8 +324,25 @@ def _has_meaningful_identity_text(value: Any) -> bool:
     without_dynamic_values = DYNAMIC_PLACEHOLDER_RE.sub("", canonical).strip("_| -")
     if not without_dynamic_values:
         return False
-    words = set(re.findall(r"[a-z0-9]+", without_dynamic_values))
-    return bool(words) and not words.issubset(GENERIC_WRAPPER_WORDS)
+    words = {
+        word
+        for word in re.findall(r"[a-z0-9]+", without_dynamic_values)
+        if not word.isdigit() and word not in NON_SEMANTIC_IDENTITY_WORDS
+    }
+    return len(words) >= 2
+
+
+def _has_meaningful_structured_field(key: str, value: Any) -> bool:
+    canonical = canonicalize_failure_signature(str(value or ""))
+    if not canonical or canonical in GENERIC_FAILURE_KINDS:
+        return False
+    if key == "filePath" and canonical in {"dockerfile", "makefile"}:
+        return False
+    if key == "packageName" and canonical in {"npm", "yarn", "pnpm"}:
+        return False
+    if key == "errorType" and canonical == "error":
+        return False
+    return _has_meaningful_identity_text(canonical) or key in {"errorCode", "errorType", "packageName", "filePath", "symbol"}
 
 
 def _first_match(pattern: re.Pattern[str], value: str) -> str | None:

@@ -191,6 +191,31 @@ def test_unknown_failure_does_not_enter_ai_history(monkeypatch, repo_cache, samp
     assert result["candidates"] == []
 
 
+def test_buildkit_wrapper_does_not_enter_ai_history(monkeypatch, repo_cache, sample_repo, logs):
+    def unexpected_compare(**kwargs):
+        raise AssertionError("generic BuildKit wrapper must not invoke AI comparison")
+
+    monkeypatch.setattr("ci_owner_agent.tools.ai_history_tools.compare_failure_facts_with_ai", unexpected_compare)
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    wrapper = FailureFact(
+        signatureKey="model-wrapper",
+        historyEligible=True,
+        isGenericWrapper=False,
+        failureKind="build_failure",
+        message='ERROR: process "/bin/sh -c npm run build" did not complete successfully: exit code: 1',
+        rootCauseSummary="command failed",
+        confidence=0.99,
+    )
+
+    result = history_search_similar_failure_facts(_context(context, facts=[wrapper]), store=make_store())
+
+    assert result["currentFacts"][0]["blockedReason"] == "blocked_by_generic_wrapper"
+    assert result["diagnostics"]["eligibleCurrentFactsCount"] == 0
+    assert result["diagnostics"]["rankedPairsCount"] == 0
+    assert result["diagnostics"]["comparedPairsCount"] == 0
+    assert result["candidates"] == []
+
+
 def test_ai_history_ts2305_vs_etarget_not_inherited(monkeypatch, repo_cache, sample_repo, logs):
     monkeypatch.setattr("ci_owner_agent.tools.ai_history_tools.compare_failure_facts_with_ai", lambda **kwargs: _different())
     context = make_lc_context(repo_cache, sample_repo, logs)

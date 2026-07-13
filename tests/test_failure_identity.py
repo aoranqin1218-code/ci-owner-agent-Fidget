@@ -215,3 +215,116 @@ def test_unknown_failure_fact_id_is_stable():
 
     assert first.signatureKey == second.signatureKey == "unknown_failure"
     assert first.factId == second.factId
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        'ERROR: process "/bin/sh -c npm run build" did not complete successfully: exit code: 1',
+        'ERROR: process "/bin/bash -c make test" did not complete successfully: exit code: 2',
+        'ERROR: failed to solve: process "/bin/sh -c npm install" did not complete successfully: exit code: 1',
+        'ERROR: failed to solve: executor failed running [/bin/sh -c npm run build]: exit code: 1',
+        "Dockerfile:27 ERROR: failed to solve",
+        "make: *** [Makefile:10: test] Error 2",
+        "make: *** [docker-test] Error 1",
+        "gmake[2]: *** [target] Error 1",
+        "script returned exit code 1",
+        "Jenkins shell returned exit code 1",
+        "hudson.AbortException: script returned exit code 1",
+        "Process exited with code 1",
+        "command terminated with exit code 1",
+        "exit status 1",
+        "npm ERR! command failed",
+        "npm ERR! command sh -c npm run build",
+        "yarn run failed with exit code 1",
+        "pnpm run build exited with code 1",
+    ],
+)
+def test_real_ci_wrapper_fact_is_downgraded(message):
+    fact = FailureFact(
+        signatureKey="model-wrapper",
+        historyEligible=True,
+        isGenericWrapper=False,
+        failureKind="build_failure",
+        message=message,
+        rootCauseSummary="command failed",
+        confidence=0.99,
+    )
+
+    assert fact.signatureKey == "unknown_failure"
+    assert fact.historyEligible is False
+    assert fact.isGenericWrapper is True
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        f"id=ObjectId('{OBJECT_A}')",
+        "timestamp=<timestamp>",
+        "duration=<duration>",
+        "uuid=<uuid>",
+        "port=<port>",
+        "requestId=<requestid>",
+        "traceId=<traceid>",
+        "sessionId=<sessionid>",
+        "correlationId=<correlationid>",
+    ],
+)
+def test_placeholder_only_fact_is_downgraded(message):
+    fact = FailureFact(
+        signatureKey="model-placeholder",
+        historyEligible=True,
+        failureKind="",
+        message=message,
+        rootCauseSummary="timestamp=<timestamp>",
+        confidence=0.99,
+    )
+
+    assert fact.signatureKey == "unknown_failure"
+    assert fact.historyEligible is False
+    assert fact.isGenericWrapper is True
+
+
+@pytest.mark.parametrize(
+    ("message", "root_cause", "expected_signature"),
+    [
+        (
+            'ERROR: process "/bin/sh -c npm run build" did not complete successfully: exit code: 1\n'
+            "TS2305: Module has no exported member 'Foo'",
+            "Module has no exported member Foo",
+            None,
+        ),
+        (
+            "ERROR: failed to solve\nnpm ERR! code ETARGET\nNo matching version found for @ai-sdk/provider",
+            "No matching version found for @ai-sdk/provider",
+            None,
+        ),
+        (
+            "make: *** [test] Error 2\nMongoServerError: E11000 duplicate key error "
+            "collection: finex.bpm_tasks index: _id_",
+            "Mongo duplicate key",
+            "mongodb_duplicate_key|e11000|finex.bpm_tasks|_id_",
+        ),
+        (
+            "script returned exit code 1\nTypeError: Cannot read properties of undefined\nat server/workflow/service.ts:42",
+            "TypeError in service",
+            None,
+        ),
+    ],
+)
+def test_wrapper_with_inner_failure_remains_eligible(message, root_cause, expected_signature):
+    fact = FailureFact(
+        signatureKey="model-inner-failure",
+        historyEligible=True,
+        isGenericWrapper=False,
+        failureKind="build_failure",
+        message=message,
+        rootCauseSummary=root_cause,
+        confidence=0.99,
+    )
+
+    assert fact.historyEligible is True
+    assert fact.isGenericWrapper is False
+    assert fact.signatureKey != "unknown_failure"
+    if expected_signature:
+        assert fact.signatureKey == expected_signature

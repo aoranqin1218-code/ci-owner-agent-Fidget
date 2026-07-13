@@ -260,3 +260,41 @@ def test_extract_failure_facts_keeps_valid_fact_and_downgrades_invalid_fact(monk
     assert invalid.signatureKey == "unknown_failure"
     assert invalid.historyEligible is False
     assert invalid.isGenericWrapper is True
+
+
+def test_extract_failure_facts_keeps_inner_failure_and_downgrades_buildkit_wrapper(monkeypatch):
+    result = _extract(
+        _settings(),
+        monkeypatch,
+        {
+            "ok": True,
+            "facts": [
+                {
+                    "signatureKey": "model-wrapper",
+                    "historyEligible": True,
+                    "isGenericWrapper": False,
+                    "failureKind": "build_failure",
+                    "message": 'ERROR: process "/bin/sh -c npm run build" did not complete successfully: exit code: 1',
+                    "rootCauseSummary": "command failed",
+                    "confidence": 0.99,
+                },
+                {
+                    "signatureKey": "model-ts2305",
+                    "historyEligible": True,
+                    "isGenericWrapper": False,
+                    "failureKind": "typescript_compile_error",
+                    "errorCode": "TS2305",
+                    "message": "Module has no exported member Foo",
+                    "rootCauseSummary": "missing exported symbol",
+                    "confidence": 0.95,
+                },
+            ],
+        },
+    )
+
+    assert result.ok is True
+    wrapper, inner = result.facts
+    assert wrapper.historyEligible is False
+    assert wrapper.isGenericWrapper is True
+    assert inner.historyEligible is True
+    assert inner.isGenericWrapper is False
