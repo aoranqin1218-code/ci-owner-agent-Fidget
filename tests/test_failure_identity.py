@@ -452,3 +452,102 @@ def test_multiline_expected_actual_is_a_strong_inner_failure_marker(message):
     assert fact.historyEligible is True
     assert fact.isGenericWrapper is False
     assert fact.signatureKey != "unknown_failure"
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "npm ERR! command failed: Cannot find module '@scope/pkg'",
+        "npm ERR! command failed: MODULE_NOT_FOUND",
+        "npm ERR! command failed: ENOENT no such file or directory",
+        "npm ERR! command failed: ECONNREFUSED 127.0.0.1:27017",
+        "npm ERR! command failed: No matching version found for @scope/pkg",
+        "npm ERR! command sh -c npm run build: Cannot find module 'x'",
+    ],
+)
+def test_same_line_npm_command_inner_error_remains_eligible(message):
+    fact = FailureFact(
+        signatureKey="model-value",
+        historyEligible=True,
+        isGenericWrapper=False,
+        failureKind="build_failure",
+        message=message,
+        rootCauseSummary=message,
+        confidence=0.99,
+    )
+
+    assert fact.historyEligible is True
+    assert fact.isGenericWrapper is False
+    assert fact.signatureKey != "unknown_failure"
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "npm ERR! command sh -c npm install @ai-sdk/provider",
+        "npm ERR! command sh -c npm test -- test/workflow/foo.ts",
+        "npm ERR! command sh -c node server/index.ts",
+        "npm ERR! command sh -c echo MODULE_NOT_FOUND",
+        "npm ERR! command sh -c echo ENOENT",
+        'npm ERR! command sh -c node -e "console.log(\'Cannot find module\')"',
+    ],
+)
+def test_inner_marker_inside_npm_command_payload_is_ignored(message):
+    fact = FailureFact(
+        signatureKey="model-value",
+        historyEligible=True,
+        isGenericWrapper=False,
+        failureKind="build_failure",
+        message=message,
+        rootCauseSummary="command failed",
+        confidence=0.99,
+    )
+
+    assert fact.signatureKey == "unknown_failure"
+    assert fact.historyEligible is False
+    assert fact.isGenericWrapper is True
+
+
+def _path_fact(path: str) -> FailureFact:
+    return FailureFact(
+        signatureKey="model-path",
+        historyEligible=True,
+        isGenericWrapper=False,
+        failureKind="typescript_compile_error",
+        errorCode="TS2305",
+        filePath=path,
+        symbol="classifyErrorMessage",
+        message="Module has no exported member classifyErrorMessage",
+        rootCauseSummary="missing exported symbol",
+        confidence=0.95,
+    )
+
+
+def test_cross_platform_absolute_paths_produce_same_identity():
+    facts = [
+        _path_fact(r"C:\agent\_work\fx-code\server\workflow\service.ts"),
+        _path_fact("/home/jenkins/workspace/fx-code/server/workflow/service.ts"),
+        _path_fact("/var/app/server/workflow/service.ts"),
+        _path_fact("./server/workflow/service.ts"),
+    ]
+
+    assert {fact.filePath for fact in facts} == {"server/workflow/service.ts"}
+    assert len({fact.signatureKey for fact in facts}) == 1
+    assert len({fact.factId for fact in facts}) == 1
+
+
+def test_build_failure_fact_signature_normalizes_dict_file_path():
+    first = {
+        "failureKind": "typescript_compile_error",
+        "errorCode": "TS2305",
+        "filePath": r"C:\agent\_work\fx-code\server\workflow\service.ts",
+        "symbol": "classifyErrorMessage",
+        "message": "missing export",
+        "rootCauseSummary": "missing export",
+    }
+    second = {
+        **first,
+        "filePath": "/home/jenkins/workspace/fx-code/server/workflow/service.ts",
+    }
+
+    assert build_failure_fact_signature(first) == build_failure_fact_signature(second)

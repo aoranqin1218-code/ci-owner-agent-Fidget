@@ -4,6 +4,8 @@ import re
 from collections.abc import Mapping
 from typing import Any
 
+from ci_owner_agent.services.repository_path import normalize_repository_path
+
 
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 OBJECT_ID_WRAPPER_RE = re.compile(r"(?:new\s+)?objectid\s*\(\s*(['\"]?)[0-9a-f]{24}\1\s*\)", re.I)
@@ -121,7 +123,7 @@ STRONG_INNER_FAILURE_RE = re.compile(
     r"|\b(?:assertion|type|reference|syntax|range|timeout)error\b"
     r"|\bmongoservererror\b"
     r"|(?:\bat\s+|\berror\s+at\s+)(?:server|modules|packages|test|src|app)/[a-z0-9_@./-]+\.(?:[cm]?[jt]sx?)\b"
-    r"|\b(?:cannot find module|no matching version found|package resolution error|unable to resolve dependency tree)\b"
+    r"|\b(?:cannot\s+find\s+module|no\s+matching\s+version\s+found|package\s+resolution\s+error|unable\s+to\s+resolve\s+dependency\s+tree)\b"
 )
 WRAPPER_PATTERNS = (
     re.compile(
@@ -143,13 +145,6 @@ WRAPPER_COMMAND_PAYLOAD_PATTERNS = (
     (
         re.compile(r"(?is)(\bexecutor failed running\s+\[)[^\]]*(\]\s*:\s*exit code)"),
         r"\1<wrapper_command>\2",
-    ),
-    (
-        re.compile(
-            r"(?i)(\bnpm\s+err!\s+command\b).*?"
-            r"(?=\s+(?:assertionerror|typeerror|referenceerror|syntaxerror|rangeerror|timeouterror|mongoservererror|expected|actual|ts\d{4}|e11000|etarget|eresolve|err_[a-z0-9_]+)\b|$)"
-        ),
-        r"\1 <wrapper_command>",
     ),
     (
         re.compile(r"(?im)(\b(?:yarn|pnpm)\s+(?:run|command)\b).*?(?=\s+(?:failed|exited)\b|$)"),
@@ -209,10 +204,11 @@ def canonicalize_failure_signature(value: str | None) -> str:
 
 def build_failure_fact_signature(fact: Any) -> str:
     values = _fact_values(fact)
+    values["filePath"] = normalize_repository_path(values.get("filePath"))
     mongo = _mongodb_duplicate_key_signature(values)
     if mongo:
         return mongo
-    if not has_meaningful_failure_identity(fact):
+    if not has_meaningful_failure_identity(values):
         return "unknown_failure"
     structured = [
         values.get("failureKind"),
@@ -250,16 +246,45 @@ def has_meaningful_failure_identity(fact: Any) -> bool:
 
 def contains_strong_inner_failure_marker(value: str | None) -> bool:
     text = strip_wrapper_command_payloads(value)
-    return bool(STRONG_INNER_FAILURE_RE.search(text)) or bool(
-        re.search(r"\bexpected\b", text, re.I) and re.search(r"\bactual\b", text, re.I)
-    )
+    return find_strong_inner_failure_start(text) is not None
+
+
+def find_strong_inner_failure_start(value: str | None) -> int | None:
+    text = str(value or "")
+    starts = [match.start() for match in STRONG_INNER_FAILURE_RE.finditer(text)]
+    expected = re.search(r"\bexpected\b", text, re.I)
+    actual = re.search(r"\bactual\b", text, re.I)
+    if expected and actual:
+        starts.append(min(expected.start(), actual.start()))
+    return min(starts) if starts else None
 
 
 def strip_wrapper_command_payloads(value: str | None) -> str:
-    text = str(value or "")
+    text = _strip_npm_command_payloads(str(value or ""))
     for pattern, replacement in WRAPPER_COMMAND_PAYLOAD_PATTERNS:
         text = pattern.sub(replacement, text)
     return text
+
+
+def _strip_npm_command_payloads(text: str) -> str:
+    return "\n".join(_strip_npm_command_payload_line(line) for line in text.splitlines())
+
+
+def _strip_npm_command_payload_line(line: str) -> str:
+    command_match = re.search(r"(?i)\bnpm\s+err!\s+command\b", line)
+    if command_match is None:
+        return line
+    command_start = command_match.start()
+    command_end = command_match.end()
+    payload = line[command_end:]
+    marker_start = find_strong_inner_failure_start(payload)
+    if marker_start is not None:
+        before_marker = payload[:marker_start]
+        delimiter = re.search(r"(?is)(\s*(?::|->|;\s*caused\s+by)\s*)$", before_marker)
+        if delimiter is not None:
+            suffix = payload[marker_start:]
+            return line[:command_start] + "npm ERR! command <wrapper_command>" + delimiter.group(1) + suffix
+    return line[:command_start] + "npm ERR! command <wrapper_command>"
 
 
 def is_generic_wrapper_text(value: str | None) -> bool:
@@ -429,8 +454,6 @@ def is_meaningful_package_name(value: str | None) -> bool:
 
 
 def is_meaningful_source_path(value: str | None) -> bool:
-    from ci_owner_agent.services.responsibility_path_enricher import normalize_repository_path
-
     raw = str(value or "").strip()
     if not raw or _is_dynamic_placeholder_only(canonicalize_failure_signature(raw)):
         return False

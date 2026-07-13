@@ -7,6 +7,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ci_owner_agent.constants import NO_OWNER_NAME
+from ci_owner_agent.services.repository_path import normalize_repository_path
 
 
 class StrictModel(BaseModel):
@@ -163,11 +164,13 @@ class FailureFact(StrictModel):
         )
 
         self.confidence = max(0, min(float(self.confidence or 0), 1))
+        self.filePath = normalize_repository_path(self.filePath)
+        meaningful_identity = has_meaningful_failure_identity(self)
+        self.signatureKey = build_failure_fact_signature(self)
         self.message = canonicalize_failure_message(self.message)
         self.rootCauseSummary = canonicalize_failure_message(self.rootCauseSummary)
         self.evidenceLines = [canonicalize_failure_message(line) for line in self.evidenceLines]
-        self.signatureKey = build_failure_fact_signature(self)
-        if self.signatureKey == "unknown_failure" or not has_meaningful_failure_identity(self):
+        if self.signatureKey == "unknown_failure" or not meaningful_identity:
             self.historyEligible = False
             self.isGenericWrapper = True
         self.factId = stable_failure_fact_id(self)

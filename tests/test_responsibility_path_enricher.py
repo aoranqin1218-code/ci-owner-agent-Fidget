@@ -113,3 +113,15 @@ def test_does_not_invent_path_and_rejects_traversal():
     enrich_responsibility_item_paths(notice, None, None)
     assert notice.responsibilityItems[0].testFilePath is None
     assert normalize_repository_path("../test/FooTest.ts") is None
+
+
+def test_normalizes_cross_platform_repository_paths():
+    paths = [
+        r"C:\agent\_work\fx-code\server\workflow\service.ts",
+        "/home/jenkins/workspace/fx-code/server/workflow/service.ts",
+        "/var/app/server/workflow/service.ts",
+        "./server/workflow/service.ts",
+        "server/workflow/service.ts:42:3",
+    ]
+
+    assert {normalize_repository_path(path) for path in paths} == {"server/workflow/service.ts"}

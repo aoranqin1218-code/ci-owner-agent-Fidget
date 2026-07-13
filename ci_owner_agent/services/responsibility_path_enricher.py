@@ -4,6 +4,7 @@ import re
 from typing import Iterable
 
 from ci_owner_agent.schemas import CiResponsibilityNotice, ResponsibilityItem
+from ci_owner_agent.services.repository_path import normalize_repository_path
 
 
 _PATH_RE = re.compile(
@@ -12,31 +13,6 @@ _PATH_RE = re.compile(
     re.IGNORECASE,
 )
 _TEST_SUFFIX_RE = re.compile(r"(?:\.test|\.spec)\.(?:ts|tsx|js|jsx)$|Test\.(?:ts|tsx|js|jsx)$")
-_ROOT_SEGMENTS = {"test", "tests", "__tests__", "packages", "modules", "server", "src"}
-
-
-def normalize_repository_path(value: str | None) -> str | None:
-    raw = str(value or "").strip().strip("'\"`[]()")
-    if not raw:
-        return None
-    raw = re.sub(r":\d+(?::\d+)?$", "", raw)
-    path = re.sub(r"/+", "/", raw.replace("\\", "/"))
-    path = re.sub(r"^[A-Za-z]:", "", path)
-    path = re.sub(r"^\./+", "", path)
-    if path.startswith("/var/app/"):
-        path = path[len("/var/app/") :]
-    was_absolute = path.startswith("/")
-    path = path.lstrip("/")
-    parts = [part for part in path.split("/") if part not in {"", "."}]
-    if ".." in parts:
-        return None
-    if was_absolute:
-        root_index = next((idx for idx, part in enumerate(parts) if part in _ROOT_SEGMENTS), None)
-        if root_index is not None:
-            parts = parts[root_index:]
-    return "/".join(parts) or None
-
-
 def is_test_file_path(value: str | None) -> bool:
     path = normalize_repository_path(value)
     if not path:

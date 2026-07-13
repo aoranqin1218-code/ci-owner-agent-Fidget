@@ -871,6 +871,33 @@ def test_save_failure_facts_insert_and_delete(repo_cache, sample_repo, logs):
     assert store.failure_facts.docs == []
 
 
+def test_save_failure_facts_stores_canonical_repository_path(repo_cache, sample_repo, logs):
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    from ci_owner_agent.schemas import CiResponsibilityNotice
+
+    store = make_store()
+    notice = CiResponsibilityNotice.model_validate(high_confidence_payload(context))
+    build_info = BuildInfo(job=context.job, buildNumber=5099, result="FAILURE", buildUrl=context.build_url, branch=context.branch, commit=context.head_commit)
+    fact = FailureFact(
+        signatureKey="model-path",
+        historyEligible=True,
+        failureKind="typescript_compile_error",
+        errorCode="TS2305",
+        filePath=r"C:\agent\_work\fx-code\server\workflow\service.ts",
+        symbol="classifyErrorMessage",
+        message="missing export",
+        rootCauseSummary="missing export",
+        confidence=0.9,
+    )
+
+    store.save_failure_facts(build_info=build_info, notice=notice, facts=[fact])
+
+    saved = store.failure_facts.docs[0]
+    assert saved["fact"]["filePath"] == "server/workflow/service.ts"
+    assert "agent/_work" not in str(saved)
+    assert "server/workflow/service.ts" in saved["signatureKey"]
+
+
 def test_save_failure_facts_uses_matching_responsibility_item_owner(repo_cache, sample_repo, logs):
     context = make_lc_context(repo_cache, sample_repo, logs)
     from ci_owner_agent.schemas import CiResponsibilityNotice

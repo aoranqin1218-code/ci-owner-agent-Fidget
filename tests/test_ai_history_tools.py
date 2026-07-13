@@ -217,6 +217,23 @@ def test_buildkit_wrapper_does_not_enter_ai_history(monkeypatch, repo_cache, sam
     assert result["candidates"] == []
 
 
+def test_ai_history_compares_cross_platform_normalized_paths(monkeypatch, repo_cache, sample_repo, logs):
+    monkeypatch.setattr("ci_owner_agent.tools.ai_history_tools.compare_failure_facts_with_ai", lambda **kwargs: _same())
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    store = make_store()
+    historical = make_fact(filePath="/home/jenkins/workspace/fx-code/server/workflow/service.ts")
+    current = make_fact(filePath=r"C:\agent\_work\fx-code\server\workflow\service.ts")
+    _save_fact(store, context, build=7, fact=historical)
+
+    result = history_search_similar_failure_facts(_context(context, facts=[current], build=8), store=store)
+
+    assert current.filePath == historical.filePath == "server/workflow/service.ts"
+    assert current.signatureKey == historical.signatureKey
+    assert current.factId == historical.factId
+    assert result["diagnostics"]["comparedPairsCount"] > 0
+    assert result["candidates"]
+
+
 def test_ai_history_ts2305_vs_etarget_not_inherited(monkeypatch, repo_cache, sample_repo, logs):
     monkeypatch.setattr("ci_owner_agent.tools.ai_history_tools.compare_failure_facts_with_ai", lambda **kwargs: _different())
     context = make_lc_context(repo_cache, sample_repo, logs)
