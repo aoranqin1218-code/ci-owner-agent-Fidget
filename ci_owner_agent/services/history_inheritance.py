@@ -206,7 +206,13 @@ def build_no_owner_decision_payload(
     feedback_action: str | None = None,
     signature: dict | None = None,
     signature_hash: str | None = None,
+    failure_metadata: dict | None = None,
 ) -> dict:
+    structured_signature = dict(signature or {})
+    for key in ("signatureKey", "errorCode", "errorType", "failureKind", "filePath", "packageName", "symbol"):
+        value = (failure_metadata or {}).get(key)
+        if value is not None and key not in structured_signature:
+            structured_signature[key] = value
     return {
         "found": True,
         "sourceBuildNumber": source_build_number,
@@ -215,7 +221,7 @@ def build_no_owner_decision_payload(
         "relationship": relationship,
         "reason": reason,
         "feedbackAction": feedback_action,
-        "signature": signature or {},
+        "signature": structured_signature,
         "signatureHash": signature_hash,
     }
 

@@ -2,11 +2,14 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+import pytest
+
 from ci_owner_agent.orchestrator import (
     _build_no_owner_notice_from_history_decision,
     _has_new_strong_evidence,
     _save_history,
     _select_build_level_no_owner_decision,
+    _validate_trusted_history_no_owner_decisions,
     _with_precomputed_failure_context,
     apply_history_no_owner_sources,
     analyze_failed_build,
@@ -681,6 +684,127 @@ def test_ai_no_owner_decisions_build_one_item_per_current_fact():
     assert "sourceBuildNumber=7" not in notice.evidence[2].detail
 
 
+def test_ai_etarget_history_no_owner_short_circuits_without_agent(monkeypatch, repo_cache, sample_repo, logs):
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    settings = replace(context.settings, history_inherit_no_owner_enabled=True)
+    fact = {
+        "signatureKey": "npm|ETARGET|@scope/pkg",
+        "historyEligible": True,
+        "isGenericWrapper": False,
+        "failureKind": "npm_dependency_resolution_error",
+        "errorCode": "ETARGET",
+        "errorType": "NpmDependencyResolutionError",
+        "packageName": "@scope/pkg",
+        "filePath": "package.json",
+        "message": "No matching version found",
+        "rootCauseSummary": "dependency version does not exist",
+        "confidence": 0.95,
+    }
+
+    def precomputed(runtime, history_store=None):
+        return replace(
+            runtime,
+            failure_summaries={"chunks": []},
+            failure_facts={"ok": True, "facts": [fact]},
+            history_precheck={"currentChunks": []},
+            ai_history_precheck={
+                "currentFacts": [
+                    {
+                        **fact,
+                        "inheritedOwner": {"found": False},
+                        "noOwnerDecision": {
+                            "found": True,
+                            "sourceBuildNumber": 7,
+                            "sourceBuildUrl": "local://job/7",
+                            "matchType": "ai_fact_semantic",
+                            "relationship": "same_root_cause",
+                            "reason": "historical ETARGET was no-owner",
+                            "signature": {
+                                "signatureKey": fact["signatureKey"],
+                                "errorCode": "ETARGET",
+                                "errorType": "NpmDependencyResolutionError",
+                                "failureKind": "npm_dependency_resolution_error",
+                            },
+                        },
+                    }
+                ]
+            },
+        )
+
+    monkeypatch.setattr("ci_owner_agent.orchestrator._with_precomputed_failure_context", precomputed)
+    monkeypatch.setattr(
+        "ci_owner_agent.orchestrator.create_responsibility_agent",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("agent should be skipped")),
+    )
+    notice = analyze_failed_build(
+        sample_repo["repo"],
+        BuildInfo(job=context.job, buildNumber=8, result="FAILURE", buildUrl="local://job/8", branch=context.branch),
+        context.base_commit,
+        context.head_commit,
+        context.log_provider,
+        GitClient(repo_cache),
+        allow_sync_failure=True,
+        settings=settings,
+        last_successful_build_number=6,
+    )
+
+    assert notice.responsibilityItems[0].failureSignature == fact["signatureKey"]
+    assert notice.responsibilityItems[0].sourceBuildNumber == 7
+    assert notice.responsibilityItems[0].matchType == "ai_fact_semantic"
+
+
+def test_invalid_history_decision_falls_back_to_agent_without_history_evidence(monkeypatch, repo_cache, sample_repo, logs):
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    settings = replace(context.settings, history_inherit_no_owner_enabled=True)
+    calls = {"agent": 0}
+
+    def precomputed(runtime, history_store=None):
+        summary = SigSummaryProvider("sig-timeout").find_test_failure_summaries()
+        return replace(
+            runtime,
+            failure_summaries=summary,
+            history_precheck={
+                "currentChunks": [
+                    {
+                        "signature": summary["chunks"][0]["signature"],
+                        "inheritedOwner": {"found": False},
+                        "noOwnerDecision": {
+                            "found": True,
+                            "sourceBuildNumber": runtime.build_number,
+                            "sourceBuildUrl": runtime.build_url,
+                            "matchType": "signature_exact",
+                            "relationship": "very_likely_same_failure",
+                            "reason": "invalid current-build source",
+                            "signature": summary["chunks"][0]["signature"],
+                        },
+                    }
+                ]
+            },
+        )
+
+    class DummyAgent:
+        def analyze(self, agent_context):
+            calls["agent"] += 1
+            return CiResponsibilityNotice.model_validate(high_confidence_payload(context))
+
+    monkeypatch.setattr("ci_owner_agent.orchestrator._with_precomputed_failure_context", precomputed)
+    monkeypatch.setattr("ci_owner_agent.orchestrator.create_responsibility_agent", lambda *args, **kwargs: DummyAgent())
+    notice = analyze_failed_build(
+        sample_repo["repo"],
+        BuildInfo(job=context.job, buildNumber=5089, result="FAILURE", buildUrl="local://job/5089", branch=context.branch),
+        context.base_commit,
+        context.head_commit,
+        context.log_provider,
+        GitClient(repo_cache),
+        allow_sync_failure=True,
+        settings=settings,
+        last_successful_build_number=5087,
+    )
+
+    assert calls["agent"] == 1
+    assert all(item.source != "history_no_owner_decision" for item in notice.evidence)
+
+
 def test_trusted_history_no_owner_rejects_current_or_future_source_and_unknown_match_type():
     build_info = BuildInfo(job="job", buildNumber=9, result="FAILURE", buildUrl="local://9", branch="dev")
     base_decision = {
@@ -716,6 +840,83 @@ def test_trusted_history_no_owner_rejects_current_or_future_source_and_unknown_m
         assert invalid_item.sourceBuildUrl is None
         assert invalid_item.matchType is None
         assert invalid_item.relationship is None
+
+
+def test_trusted_history_no_owner_allows_missing_source_url_without_none_evidence():
+    decision = {
+        "found": True,
+        "failureSignature": "sig-a",
+        "failureTitle": "failure A",
+        "sourceBuildNumber": 7,
+        "sourceBuildUrl": None,
+        "matchType": "signature_exact",
+        "relationship": "very_likely_same_failure",
+        "reason": "same failure",
+    }
+    notice = _build_no_owner_notice_from_history_decision(
+        build_info=BuildInfo(job="job", buildNumber=9, result="FAILURE", buildUrl="local://9", branch="dev"),
+        base_commit="base",
+        head_commit="head",
+        decision=decision,
+        failure_summaries=None,
+        failure_facts=None,
+    )
+
+    item = notice.responsibilityItems[0]
+    assert item.sourceBuildNumber == 7
+    assert item.sourceBuildUrl is None
+    assert "sourceBuildUrl=None" not in notice.evidence[1].detail
+    assert "feedbackAction=None" not in notice.evidence[1].detail
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"sourceBuildNumber": 9},
+        {"sourceBuildNumber": 10},
+        {"matchType": "unknown"},
+        {"relationship": None},
+        {"failureSignature": None},
+    ],
+)
+def test_invalid_history_no_owner_decision_is_rejected_before_notice(overrides):
+    decision = {
+        "found": True,
+        "failureSignature": "sig-a",
+        "failureTitle": "failure A",
+        "sourceBuildNumber": 7,
+        "sourceBuildUrl": None,
+        "matchType": "signature_exact",
+        "relationship": "very_likely_same_failure",
+        "reason": "same failure",
+        **overrides,
+    }
+
+    assert _validate_trusted_history_no_owner_decisions(decision, current_build_number=9) is None
+
+
+def test_multi_failure_with_one_invalid_history_decision_is_fully_rejected():
+    decision = {
+        "allFailuresNoOwnerDecision": True,
+        "decisions": [
+            {
+                "failureSignature": "sig-a",
+                "sourceBuildNumber": 7,
+                "matchType": "signature_exact",
+                "relationship": "very_likely_same_failure",
+                "reason": "same A",
+            },
+            {
+                "failureSignature": "sig-b",
+                "sourceBuildNumber": 8,
+                "matchType": "unknown",
+                "relationship": "very_likely_same_failure",
+                "reason": "same B",
+            },
+        ],
+    }
+
+    assert _validate_trusted_history_no_owner_decisions(decision, current_build_number=9) is None
 
 
 def test_no_owner_decision_disabled_falls_back_to_agent(monkeypatch, repo_cache, sample_repo, logs):
@@ -931,6 +1132,124 @@ def test_no_owner_decision_unaligned_failures_reanalyze_conservatively():
     )
 
 
+@pytest.mark.parametrize(
+    ("error_code", "error_type"),
+    [
+        ("ETARGET", "NpmDependencyResolutionError"),
+        ("ERESOLVE", "NpmDependencyResolutionError"),
+        ("ECONNRESET", "NetworkError"),
+        (None, "TypeError"),
+    ],
+)
+def test_ai_no_owner_same_structured_marker_is_not_new_evidence(error_code, error_type):
+    signature = f"fact-{error_code or error_type}"
+    assert not _has_new_strong_evidence(
+        decision={
+            "failureSignature": signature,
+            "signature": {
+                "signatureKey": signature,
+                "errorCode": error_code,
+                "errorType": error_type,
+                "failureKind": "ai_failure",
+            },
+        },
+        failure_summaries=None,
+        failure_facts={
+            "facts": [
+                {
+                    "signatureKey": signature,
+                    "errorCode": error_code,
+                    "errorType": error_type,
+                    "failureKind": "ai_failure",
+                }
+            ]
+        },
+        changed_files=[],
+    )
+
+
+def test_ai_no_owner_different_structured_marker_is_new_evidence():
+    assert _has_new_strong_evidence(
+        decision={
+            "failureSignature": "fact-dependency",
+            "signature": {
+                "signatureKey": "fact-dependency",
+                "errorCode": "ERESOLVE",
+                "errorType": "SyntaxError",
+                "failureKind": "dependency_error",
+            },
+        },
+        failure_summaries=None,
+        failure_facts={
+            "facts": [
+                {
+                    "signatureKey": "fact-dependency",
+                    "errorCode": "ETARGET",
+                    "errorType": "TypeError",
+                    "failureKind": "dependency_error",
+                }
+            ]
+        },
+        changed_files=[],
+    )
+
+
+@pytest.mark.parametrize(
+    "failure_path",
+    [
+        "/var/app/test/A.test.ts",
+        r"C:\workspace\repo\test\A.test.ts",
+        "./test/A.test.ts:12:3",
+        "/var/app/server/service/a.ts",
+    ],
+)
+def test_no_owner_failure_paths_use_repository_normalization(failure_path):
+    changed_path = "server/service/a.ts" if "server/" in failure_path else "test/A.test.ts"
+    assert _has_new_strong_evidence(
+        decision={
+            "failureSignature": "sig-a",
+            "signature": {"signatureKey": "sig-a", "errorType": "Timeout"},
+        },
+        failure_summaries={
+            "chunks": [
+                {
+                    "signature": {
+                        "signatureKey": "sig-a",
+                        "errorType": "Timeout",
+                        "testFile": failure_path,
+                    },
+                    "signatureHash": "sig-a",
+                }
+            ]
+        },
+        failure_facts=None,
+        changed_files=[ChangedFile(path=changed_path, status="M")],
+    )
+
+
+def test_no_owner_parent_traversal_path_does_not_match_changed_file():
+    assert not _has_new_strong_evidence(
+        decision={
+            "failureSignature": "sig-a",
+            "signature": {"signatureKey": "sig-a", "errorType": "Timeout"},
+        },
+        failure_summaries={
+            "chunks": [
+                {
+                    "signature": {
+                        "signatureKey": "sig-a",
+                        "errorType": "Timeout",
+                        "testFile": "../test/A.test.ts",
+                    },
+                    "signatureHash": "sig-a",
+                }
+            ]
+        },
+        failure_facts=None,
+        changed_files=[ChangedFile(path="test/A.test.ts", status="M")],
+    )
+
+
 def test_all_chunks_no_owner_but_second_path_changed_falls_back_to_agent(monkeypatch, repo_cache, sample_repo, logs):
     context = make_lc_context(repo_cache, sample_repo, logs)
     settings = replace(context.settings, history_enabled=True, history_inherit_no_owner_enabled=True)
@@ -971,7 +1290,13 @@ def test_all_chunks_no_owner_but_second_path_changed_falls_back_to_agent(monkeyp
         build_info,
         context.base_commit,
         context.head_commit,
-        MultiSigSummaryProvider(["sig-timeout-a", "sig-timeout-b"]),
+        MultiSigSummaryProvider(
+            ["sig-timeout-a", "sig-timeout-b"],
+            [
+                "modules/automation/tests/sig-timeout-a.ts",
+                "/var/app/modules/automation/tests/sig-timeout-b.ts",
+            ],
+        ),
         ChangedPathGitClient(),
         allow_sync_failure=True,
         settings=settings,

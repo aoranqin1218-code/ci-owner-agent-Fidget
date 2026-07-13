@@ -461,6 +461,7 @@ def _no_owner_decision_from_historical_doc(
             feedback_action=feedback.get("action"),
             signature={"signatureKey": signature_key} if signature_key else {},
             signature_hash=signature_key,
+            failure_metadata=historical_fact,
         )
     notice = historical_doc.get("notice")
     item = find_no_owner_decision_from_notice(notice, signature_key, allow_legacy_top_owner=_allow_legacy_no_owner_fallback(historical_doc))
@@ -474,6 +475,7 @@ def _no_owner_decision_from_historical_doc(
         reason="historical same failure fact was previously classified as no_high_confidence_owner",
         signature={"signatureKey": signature_key} if signature_key else {},
         signature_hash=signature_key,
+        failure_metadata=historical_fact,
     )
 
 

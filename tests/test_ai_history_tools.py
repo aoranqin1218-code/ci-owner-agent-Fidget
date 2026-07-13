@@ -237,6 +237,11 @@ def test_ai_history_historical_fact_without_owner_not_inherited(monkeypatch, rep
     result = history_search_similar_failure_facts(_context(context, facts=[fact]), store=store)
     assert result["candidates"] == []
     assert result["currentFacts"][0]["inheritedOwner"]["found"] is False
+    signature = result["currentFacts"][0]["noOwnerDecision"]["signature"]
+    assert signature["errorCode"] == fact.errorCode
+    assert signature.get("errorType") == fact.errorType
+    assert signature["failureKind"] == fact.failureKind
+    assert signature["filePath"] == fact.filePath
 
 
 def test_ai_history_feedback_mark_flaky_blocks_inheritance(monkeypatch, repo_cache, sample_repo, logs):
@@ -249,6 +254,9 @@ def test_ai_history_feedback_mark_flaky_blocks_inheritance(monkeypatch, repo_cac
     result = history_search_similar_failure_facts(_context(context, facts=[fact]), store=store)
     assert result["candidates"] == []
     assert "mark_flaky" in result["currentFacts"][0]["blockedReason"]
+    signature = result["currentFacts"][0]["noOwnerDecision"]["signature"]
+    assert signature["errorCode"] == fact.errorCode
+    assert signature["failureKind"] == fact.failureKind
 
 
 def test_ai_history_feedback_mark_no_owner_blocks_inheritance(monkeypatch, repo_cache, sample_repo, logs):

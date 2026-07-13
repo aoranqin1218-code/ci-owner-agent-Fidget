@@ -20,7 +20,7 @@ from ci_owner_agent.services.investigation_scope import InvestigationScope
 from ci_owner_agent.services.jenkins_client import JenkinsClient
 from ci_owner_agent.services.log_provider import JenkinsLogProvider, LocalFileLogProvider, LogProvider, detect_checkout_revision_from_console_log
 from ci_owner_agent.services.metrics import current_metrics_recorder
-from ci_owner_agent.services.responsibility_path_enricher import enrich_responsibility_item_paths
+from ci_owner_agent.services.responsibility_path_enricher import enrich_responsibility_item_paths, normalize_repository_path
 from ci_owner_agent.services.scorer import no_owner, validate_notice
 from ci_owner_agent.tools.ai_history_tools import history_search_similar_failure_facts
 from ci_owner_agent.tools.history_tools import history_search_similar_failures
@@ -216,27 +216,31 @@ def analyze_failed_build(
             runtime_context.history_precheck,
             runtime_context.ai_history_precheck,
         )
+        trusted_no_owner_decision = _validate_trusted_history_no_owner_decisions(
+            no_owner_decision,
+            current_build_number=build_info.buildNumber,
+        )
         should_short_circuit_no_owner = bool(
             settings.history_inherit_no_owner_enabled
-            and no_owner_decision
+            and trusted_no_owner_decision
             and not _has_new_strong_evidence(
-                decision=no_owner_decision,
+                decision=trusted_no_owner_decision,
                 failure_summaries=runtime_context.failure_summaries,
                 failure_facts=runtime_context.failure_facts,
                 changed_files=changed_files,
             )
         )
-    if should_short_circuit_no_owner and no_owner_decision:
+    if should_short_circuit_no_owner and trusted_no_owner_decision:
         recorder = current_metrics_recorder()
         if recorder is not None:
             recorder.warnings.append(
-                f"short-circuited by historical no-owner decision from build #{no_owner_decision.get('sourceBuildNumber')}"
+                f"short-circuited by historical no-owner decision from build #{trusted_no_owner_decision.get('sourceBuildNumber')}"
             )
         notice = _build_no_owner_notice_from_history_decision(
             build_info=build_info,
             base_commit=base_commit,
             head_commit=head_commit,
-            decision=no_owner_decision,
+            decision=trusted_no_owner_decision,
             failure_summaries=runtime_context.failure_summaries,
             failure_facts=runtime_context.failure_facts,
         )
@@ -553,6 +557,57 @@ def _first_nonempty_line(value: object) -> str | None:
     return None
 
 
+HISTORY_NO_OWNER_MATCH_TYPES = {"signature_exact", "signature_structural", "ai_fact_semantic"}
+
+
+def _validate_trusted_history_no_owner_decisions(
+    decision: dict | None,
+    *,
+    current_build_number: int,
+) -> dict | None:
+    if not isinstance(decision, dict):
+        return None
+    raw_items = decision.get("decisions") if isinstance(decision.get("decisions"), list) else [decision]
+    trusted_items: list[dict] = []
+    for raw in raw_items:
+        if not isinstance(raw, dict):
+            return None
+        source_build = raw.get("sourceBuildNumber")
+        failure_signature = str(raw.get("failureSignature") or "").strip()
+        match_type = str(raw.get("matchType") or "").strip()
+        relationship = str(raw.get("relationship") or "").strip()
+        reason = str(raw.get("reason") or "").strip()
+        if not (
+            type(source_build) is int
+            and 0 < source_build < current_build_number
+            and failure_signature
+            and match_type in HISTORY_NO_OWNER_MATCH_TYPES
+            and relationship
+            and reason
+        ):
+            return None
+        trusted_items.append(
+            {
+                **raw,
+                "failureSignature": failure_signature,
+                "sourceBuildNumber": source_build,
+                "sourceBuildUrl": str(raw.get("sourceBuildUrl") or "").strip() or None,
+                "matchType": match_type,
+                "relationship": relationship,
+                "reason": reason,
+            }
+        )
+    if not trusted_items:
+        return None
+    return {
+        **decision,
+        **trusted_items[0],
+        "decisions": trusted_items,
+        "allFailuresNoOwnerDecision": len(trusted_items) > 1 or bool(decision.get("allFailuresNoOwnerDecision")),
+        "coveredFailureCount": len(trusted_items),
+    }
+
+
 def _has_new_strong_evidence(
     *,
     decision: dict,
@@ -566,7 +621,11 @@ def _has_new_strong_evidence(
     if aligned is None:
         return True
 
-    changed_paths = {item.path.replace("\\", "/").lstrip("./") for item in changed_files}
+    changed_paths = {
+        normalized
+        for item in changed_files
+        if (normalized := normalize_repository_path(item.path))
+    }
     for current, historical in aligned:
         if current["paths"] & changed_paths:
             return True
@@ -631,11 +690,20 @@ def _failure_identifiers(value: dict) -> set[str]:
 
 
 def _paths_from_payload(value: dict) -> set[str]:
-    return {
-        str(path).replace("\\", "/").lstrip("./")
-        for path in (value.get("testFile"), value.get("topStackFile"), value.get("filePath"))
-        if path
-    }
+    signature = value.get("signature") if isinstance(value.get("signature"), dict) else {}
+    result: set[str] = set()
+    for raw_path in (
+        value.get("testFile"),
+        value.get("topStackFile"),
+        value.get("filePath"),
+        signature.get("testFile"),
+        signature.get("topStackFile"),
+        signature.get("filePath"),
+    ):
+        normalized = normalize_repository_path(raw_path)
+        if normalized:
+            result.add(normalized)
+    return result
 
 
 def _strong_failure_markers(value: dict, *, historical: bool = False) -> set[str]:
@@ -645,6 +713,8 @@ def _strong_failure_markers(value: dict, *, historical: bool = False) -> set[str
         signature.get("errorType"),
         value.get("errorCode"),
         value.get("errorType"),
+        signature.get("failureKind"),
+        value.get("failureKind"),
     )
     text = " ".join(
         str(part or "")
@@ -677,9 +747,14 @@ def _build_no_owner_notice_from_history_decision(
     failure_summaries: dict | None,
     failure_facts: dict | None,
 ) -> CiResponsibilityNotice:
+    trusted = _validate_trusted_history_no_owner_decisions(
+        decision,
+        current_build_number=build_info.buildNumber,
+    )
+    if trusted is None:
+        raise ValueError("invalid historical no-owner decision")
+    decision = trusted
     source_build = decision.get("sourceBuildNumber")
-    match_type = decision.get("matchType") or "history_same_failure"
-    relationship = decision.get("relationship") or "very_likely_same_failure"
     if decision.get("allFailuresNoOwnerDecision"):
         covered = decision.get("coveredFailureCount") or 1
         reason = (
@@ -729,11 +804,19 @@ def _build_no_owner_notice_from_history_decision(
             id=f"E_HISTORY_NO_OWNER_{index}",
             type="reasoning",
             summary="当前失败与历史无责任人失败一致",
-            detail=(
-                f"failureSignature={item.get('failureSignature')}; "
-                f"sourceBuildNumber={item.get('sourceBuildNumber')}; sourceBuildUrl={item.get('sourceBuildUrl')}; "
-                f"matchType={item.get('matchType')}; relationship={item.get('relationship')}; "
-                f"feedbackAction={item.get('feedbackAction')}; reason={item.get('reason')}; source={item.get('source')}"
+            detail="; ".join(
+                part
+                for part in (
+                    f"failureSignature={item['failureSignature']}",
+                    f"sourceBuildNumber={item['sourceBuildNumber']}",
+                    f"sourceBuildUrl={item['sourceBuildUrl']}" if item.get("sourceBuildUrl") else None,
+                    f"matchType={item['matchType']}",
+                    f"relationship={item['relationship']}",
+                    f"feedbackAction={item['feedbackAction']}" if item.get("feedbackAction") else None,
+                    f"reason={item['reason']}",
+                    f"source={item['source']}" if item.get("source") else None,
+                )
+                if part
             ),
             source="history_no_owner_decision",
         )
@@ -768,9 +851,6 @@ def _build_no_owner_notice_from_history_decision(
     return apply_history_no_owner_sources(notice, item_decisions)
 
 
-HISTORY_NO_OWNER_MATCH_TYPES = {"signature_exact", "signature_structural", "ai_fact_semantic"}
-
-
 def apply_history_no_owner_sources(notice: CiResponsibilityNotice, trusted_decisions: list[dict]) -> CiResponsibilityNotice:
     """Restore history source fields using only orchestrator-validated decisions."""
     decisions_by_signature = {
@@ -787,7 +867,6 @@ def apply_history_no_owner_sources(notice: CiResponsibilityNotice, trusted_decis
         if not (
             isinstance(source_build, int)
             and 0 < source_build < notice.buildNumber
-            and trusted.get("sourceBuildUrl")
             and match_type in HISTORY_NO_OWNER_MATCH_TYPES
             and trusted.get("relationship")
         ):
