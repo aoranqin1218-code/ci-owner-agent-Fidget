@@ -338,6 +338,18 @@ def test_analyze_failed_build_uses_previous_commit_focus_range(monkeypatch, repo
             payload = high_confidence_payload(context)
             payload["baseCommit"] = "last-success"
             payload["headCommit"] = "current"
+            payload["responsibilityItems"] = [
+                {
+                    "failureId": "auto",
+                    "failureTitle": "Webhook触发",
+                    "failureSignature": "sig-timeout",
+                    "owner": payload["owner"],
+                    "responsibilityType": "current_build_owner",
+                    "confidence": 0.88,
+                    "reason": "日志和 diff 直接关联。",
+                    "evidenceIds": ["E1", "E2"],
+                }
+            ]
             return CiResponsibilityNotice.model_validate(payload)
 
     monkeypatch.setattr("ci_owner_agent.orchestrator.create_responsibility_agent", lambda *args, **kwargs: DummyAgent())
@@ -361,6 +373,8 @@ def test_analyze_failed_build_uses_previous_commit_focus_range(monkeypatch, repo
     assert git_client.diff_ranges == [("previous", "current")]
     assert notice.baseCommit == "last-success"
     assert notice.headCommit == "current"
+    assert notice.repo == sample_repo["repo"]
+    assert notice.responsibilityItems[0].testFilePath == "modules/automation/tests/venv.ts"
     assert calls["agent"] == 1
 
 
@@ -485,6 +499,8 @@ def test_no_owner_decision_short_circuits_agent(monkeypatch, repo_cache, sample_
 
     assert notice.owner.type == "no_high_confidence_owner"
     assert notice.responsibilityItems[0].responsibilityType == "no_high_confidence_owner"
+    assert notice.repo == sample_repo["repo"]
+    assert notice.responsibilityItems[0].testFilePath == "modules/automation/tests/venv.ts"
     assert "历史构建 #5088" in notice.failureReason
 
 

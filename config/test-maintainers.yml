@@ -1,0 +1,28 @@
+version: 1
+
+rules:
+  - repo: fx-code
+    job: services/fx-code-unittest
+    paths:
+      - "test/service/view/**"
+      - "test/**/ViewDataQueryServiceTest.ts"
+    maintainers:
+      - name: "Charlie.Guo"
+        wecomUserId: "charlie.guo"
+      - name: "Henry"
+        wecomUserId: "henry"
+
+  - repo: fx-code
+    paths:
+      - "test/service/quota/**"
+      - "test/**/QuotaUpdatedEventHandlerTest.ts"
+    maintainers:
+      - name: "Mars.Du"
+        wecomUserId: "mars.du"
+
+  - repo: fx-code
+    paths:
+      - "test/service/etl/**"
+    maintainers:
+      - name: "Tang.Tangerine"
+        wecomUserId: "tang.tangerine"

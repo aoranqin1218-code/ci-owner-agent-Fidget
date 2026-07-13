@@ -51,6 +51,7 @@ class Settings:
     wecom_notify_on_success: bool
     wecom_notify_on_no_owner: bool
     wecom_user_mapping_file: Path | None
+    test_maintainer_mapping_file: Path | None
     wecom_mention_mode: str
     wecom_fallback_userids: tuple[str, ...]
     feedback_base_url: str | None
@@ -168,6 +169,9 @@ def load_settings(env_file: str | Path | None = None) -> Settings:
         wecom_notify_on_success=_bool_env("CI_AGENT_WECOM_NOTIFY_ON_SUCCESS", False),
         wecom_notify_on_no_owner=_bool_env("CI_AGENT_WECOM_NOTIFY_ON_NO_OWNER", True),
         wecom_user_mapping_file=Path(os.getenv("CI_AGENT_WECOM_USER_MAPPING_FILE")).expanduser() if os.getenv("CI_AGENT_WECOM_USER_MAPPING_FILE") else None,
+        test_maintainer_mapping_file=Path(os.getenv("CI_AGENT_TEST_MAINTAINER_MAPPING_FILE")).expanduser()
+        if os.getenv("CI_AGENT_TEST_MAINTAINER_MAPPING_FILE")
+        else None,
         wecom_mention_mode=os.getenv("CI_AGENT_WECOM_MENTION_MODE", "userid").lower()
         if os.getenv("CI_AGENT_WECOM_MENTION_MODE", "userid").lower() in {"userid", "name"}
         else "userid",
@@ -207,5 +211,6 @@ def public_settings(settings: Settings) -> dict[str, object]:
     data["repo_cache_dir"] = str(settings.repo_cache_dir)
     data["ts_analyzer_dir"] = str(settings.ts_analyzer_dir)
     data["wecom_user_mapping_file"] = str(settings.wecom_user_mapping_file) if settings.wecom_user_mapping_file else None
+    data["test_maintainer_mapping_file"] = str(settings.test_maintainer_mapping_file) if settings.test_maintainer_mapping_file else None
     data["wecom_fallback_userids"] = list(settings.wecom_fallback_userids)
     return data

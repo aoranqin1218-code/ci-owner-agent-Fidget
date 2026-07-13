@@ -343,7 +343,9 @@ CI_AGENT_WECOM_NOTIFY_DRY_RUN=true
 CI_AGENT_WECOM_NOTIFY_ON_SUCCESS=false
 CI_AGENT_WECOM_NOTIFY_ON_NO_OWNER=true
 CI_AGENT_WECOM_USER_MAPPING_FILE=
+CI_AGENT_TEST_MAINTAINER_MAPPING_FILE=./config/test-maintainers.yml
 CI_AGENT_WECOM_MENTION_MODE=userid
+CI_AGENT_WECOM_FALLBACK_USERIDS=
 CI_AGENT_FEEDBACK_BASE_URL=
 CI_AGENT_NOTIFICATION_DEDUP_ENABLED=true
 ```
@@ -356,9 +358,44 @@ CI_AGENT_NOTIFICATION_DEDUP_ENABLED=true
 | `CI_AGENT_WECOM_NOTIFY_ON_SUCCESS` | 是否通知成功构建。默认 false。 |
 | `CI_AGENT_WECOM_NOTIFY_ON_NO_OWNER` | 无高可信责任人时是否仍通知。 |
 | `CI_AGENT_WECOM_USER_MAPPING_FILE` | CSV 用户映射文件，Mongo 映射不可用时可回退。 |
+| `CI_AGENT_TEST_MAINTAINER_MAPPING_FILE` | 测试文件路径到待确认维护人的 YAML 配置。维护人只用于通知路由，不参与定责。 |
 | `CI_AGENT_WECOM_MENTION_MODE` | `userid` 或 `name`。`userid` 会尽量生成 `<@userid>`。 |
+| `CI_AGENT_WECOM_FALLBACK_USERIDS` | 逗号分隔的默认兜底 userid。测试路径无法识别或无规则命中时使用。 |
 | `CI_AGENT_FEEDBACK_BASE_URL` | 反馈页基础 URL，用于通知中生成反馈链接。 |
-| `CI_AGENT_NOTIFICATION_DEDUP_ENABLED` | 是否根据 notice hash 做通知去重。 |
+| `CI_AGENT_NOTIFICATION_DEDUP_ENABLED` | 是否根据 notice 与维护人路由结果的通知 digest 做去重。 |
+
+测试维护人不是本次失败的责任人。`ResponsibilityItem.owner` 和顶层 `owner` 对 no-owner 项仍保持 `no_high_confidence_owner / 无高可信责任人`；维护人仅显示在企业微信的“待确认维护人”区域，用于邀请相关测试维护者确认问题。
+
+配置文件按 `rules` 顺序匹配，第一条同时满足 `repo`、`job` 和任一 `paths` glob 的规则生效。`repo`、`job` 可省略作为通配；`paths` 和 `maintainers` 不可为空，企业微信 `wecomUserId` 必填：
+
+```yaml
+version: 1
+rules:
+  - repo: fx-code
+    job: services/fx-code-unittest
+    paths:
+      - "test/service/view/**"
+      - "test/**/ViewDataQueryServiceTest.ts"
+    maintainers:
+      - name: "Charlie.Guo"
+        wecomUserId: "charlie.guo"
+      - name: "Henry"
+        wecomUserId: "henry"
+```
+
+路径匹配支持 `*`、`**`、`?`，并会把 Windows 路径、`./` 和 `/var/app/` 前缀标准化。配置文件不存在、YAML 格式错误或单条规则非法时只产生 warning；系统会回退到 `CI_AGENT_WECOM_FALLBACK_USERIDS`，不会中断分析或通知。
+
+通知示例：
+
+```text
+👤 责任人：无高可信责任人
+📣 待确认维护人：<@charlie.guo>、<@henry>
+
+1. ❓ 待确认 | ViewDataQueryServiceTest
+   - 👤 责任人：无高可信责任人
+   - 📁 测试文件：test/service/view/ViewDataQueryServiceTest.ts
+   - 📣 待确认维护人：<@charlie.guo>、<@henry>
+```
 
 ---
 

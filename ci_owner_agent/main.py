@@ -12,10 +12,11 @@ from ci_owner_agent.orchestrator import analyze_jenkins, analyze_local, failure_
 from ci_owner_agent.schemas import BuildInfo, CiResponsibilityNotice
 from ci_owner_agent.services.feedback_store import FeedbackStore
 from ci_owner_agent.services.git_client import GitClient
-from ci_owner_agent.services.history_store import get_history_store, notice_hash
+from ci_owner_agent.services.history_store import get_history_store
 from ci_owner_agent.services.jenkins_client import JenkinsClient
 from ci_owner_agent.services.metrics import AnalysisMetricsRecorder, current_metrics_recorder, use_metrics_recorder
-from ci_owner_agent.services.notification_formatter import format_wecom_markdown_notice
+from ci_owner_agent.services.notification_formatter import format_wecom_markdown_notice, notification_digest
+from ci_owner_agent.services.test_maintainer_mapping import TestMaintainerResolver
 from ci_owner_agent.services.wecom_mongo_user_mapping import build_wecom_notice_mapper
 from ci_owner_agent.services.wecom_notifier import send_wecom_markdown
 
@@ -158,6 +159,7 @@ def main(argv: list[str] | None = None) -> int:
                 ),
                 None,
                 "JENKINS_URL 未配置，无法访问 Jenkins 获取构建信息。",
+                repo=args.repo,
             )
             recorder.record_notice(notice)
             _print_json(notice)
@@ -318,6 +320,9 @@ def _notify_notice(notice: CiResponsibilityNotice, settings, *, dry_run: bool, f
     with stage if stage is not None else nullcontext():
         store = get_history_store(settings)
         mapper = build_wecom_notice_mapper(settings, store)
+        maintainer_resolver = TestMaintainerResolver.from_yaml(settings.test_maintainer_mapping_file)
+        for warning in maintainer_resolver.warnings:
+            print(f"WARNING: {warning}", file=sys.stderr)
         markdown = format_wecom_markdown_notice(
             notice,
             feedback_base_url=feedback_base_url,
@@ -325,8 +330,16 @@ def _notify_notice(notice: CiResponsibilityNotice, settings, *, dry_run: bool, f
             user_mapper=mapper,
             mention_mode=settings.wecom_mention_mode,
             fallback_userids=settings.wecom_fallback_userids,
+            maintainer_resolver=maintainer_resolver,
+            repo=notice.repo,
         )
-        digest = notice_hash(notice)
+        digest = notification_digest(
+            notice,
+            maintainer_resolver=maintainer_resolver,
+            repo=notice.repo,
+            fallback_userids=settings.wecom_fallback_userids,
+            mention_mode=settings.wecom_mention_mode,
+        )
         if store and settings.notification_dedup_enabled and not force and store.notification_sent(
             job=notice.job, branch=notice.branch, build_number=notice.buildNumber, notice_hash=digest
         ):

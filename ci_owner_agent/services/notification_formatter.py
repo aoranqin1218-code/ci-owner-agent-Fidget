@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from urllib.parse import urlencode
 
 from ci_owner_agent.constants import NO_OWNER_NAME
 from ci_owner_agent.schemas import CiResponsibilityNotice, EvidenceItem, Owner, ResponsibilityItem
+from ci_owner_agent.services.test_maintainer_mapping import TestMaintainer, TestMaintainerMatch, TestMaintainerResolver
 from ci_owner_agent.services.wecom_user_mapping import WeComUserMapper
 
 
@@ -17,20 +20,35 @@ def format_wecom_markdown_notice(
     user_mapper: WeComUserMapper | None = None,
     mention_mode: str = "userid",
     fallback_userids: tuple[str, ...] = (),
+    maintainer_resolver: TestMaintainerResolver | None = None,
+    repo: str | None = None,
 ) -> str:
     mapper = user_mapper or WeComUserMapper([])
     owners = collect_responsible_owners(notice)
+    maintainer_matches = resolve_test_maintainer_matches(
+        notice,
+        maintainer_resolver=maintainer_resolver,
+        repo=repo,
+        fallback_userids=fallback_userids,
+    )
+    pending_maintainers = _collect_pending_maintainers(maintainer_matches)
     evidence_by_id = {item.id: item for item in notice.evidence}
     lines = [
         f"### {result_icon(notice.result)} CI 单测{result_label(notice.result)} | {notice.job} #{notice.buildNumber}",
         "",
-        f"👤 **责任人**：{format_responsible_mentions(owners, mapper, mention_mode, fallback_userids)}",
-        f"🧭 **原因**：{public_single_line(notice.failureReason, max_reason_chars)}",
-        responsibility_item_stats(notice.responsibilityItems),
-        "",
-        "#### 🧩 责任项",
-        "",
+        f"👤 **责任人**：{format_responsible_mentions(owners, mapper, mention_mode)}",
     ]
+    if any(match is not None for match in maintainer_matches):
+        lines.append(f"📣 **待确认维护人**：{format_test_maintainer_mentions(pending_maintainers, mention_mode) or '未配置'}")
+    lines.extend(
+        [
+            f"🧭 **原因**：{public_single_line(notice.failureReason, max_reason_chars)}",
+            responsibility_item_stats(notice.responsibilityItems),
+            "",
+            "#### 🧩 责任项",
+            "",
+        ]
+    )
     if notice.responsibilityItems:
         for idx, item in enumerate(notice.responsibilityItems, start=1):
             owner_name = format_item_owner(item.owner, mapper, mention_mode)
@@ -44,6 +62,12 @@ def format_wecom_markdown_notice(
                     "",
                 ]
             )
+            match = maintainer_matches[idx - 1]
+            if match is not None:
+                lines.insert(-1, f"   - 📁 测试文件：{match.test_file_path or '未识别'}")
+                lines.insert(-1, f"   - 📣 待确认维护人：{format_test_maintainer_mentions(match.maintainers, mention_mode) or '未配置'}")
+                if match.used_fallback:
+                    lines.insert(-1, f"   - ℹ️ 路由说明：{match.reason}")
     else:
         lines.extend(["1. 🧩 unknown | 未识别到独立责任项", f"   - 👤 责任人：{NO_OWNER_NAME}", "   - 🧷 来源：-", "   - 🔎 证据：证据不足，详见分析结果 JSON。", ""])
 
@@ -58,6 +82,106 @@ def format_wecom_markdown_notice(
     feedback_url = build_feedback_url(feedback_base_url, notice, feedback_token)
     lines.append(f"- 📝 [提交反馈]({feedback_url})" if feedback_url else "- 📝 反馈：未配置")
     return "\n".join(lines)
+
+
+def resolve_test_maintainer_matches(
+    notice: CiResponsibilityNotice,
+    *,
+    maintainer_resolver: TestMaintainerResolver | None,
+    repo: str | None,
+    fallback_userids: tuple[str, ...],
+) -> list[TestMaintainerMatch | None]:
+    resolver = maintainer_resolver or TestMaintainerResolver()
+    matches: list[TestMaintainerMatch | None] = []
+    if not notice.responsibilityItems and notice.owner.type == "no_high_confidence_owner":
+        return [
+            resolver.resolve(
+                repo=repo or notice.repo,
+                job=notice.job,
+                test_file_path=None,
+                fallback_userids=fallback_userids,
+            )
+        ]
+    for item in notice.responsibilityItems:
+        if item.responsibilityType != "no_high_confidence_owner":
+            matches.append(None)
+            continue
+        matches.append(
+            resolver.resolve(
+                repo=repo or notice.repo,
+                job=notice.job,
+                test_file_path=item.testFilePath,
+                fallback_userids=fallback_userids,
+            )
+        )
+    return matches
+
+
+def notification_digest(
+    notice: CiResponsibilityNotice,
+    *,
+    maintainer_resolver: TestMaintainerResolver | None = None,
+    repo: str | None = None,
+    fallback_userids: tuple[str, ...] = (),
+    mention_mode: str = "userid",
+) -> str:
+    matches = resolve_test_maintainer_matches(
+        notice,
+        maintainer_resolver=maintainer_resolver,
+        repo=repo,
+        fallback_userids=fallback_userids,
+    )
+    routes = []
+    for index, match in enumerate(matches):
+        if match is None:
+            continue
+        routes.append(
+            {
+                "itemIndex": index,
+                "testFilePath": match.test_file_path,
+                "matchedPattern": match.matched_pattern,
+                "maintainerUserids": [item.wecom_userid for item in match.maintainers],
+                "maintainerNames": [item.name for item in match.maintainers],
+                "usedFallback": match.used_fallback,
+                "reason": match.reason,
+            }
+        )
+    payload = {
+        "notice": notice.model_dump(mode="json"),
+        "mentionMode": mention_mode,
+        "testMaintainerRoutes": routes,
+    }
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def format_test_maintainer_mentions(maintainers: tuple[TestMaintainer, ...] | list[TestMaintainer], mention_mode: str) -> str:
+    result: list[str] = []
+    seen: set[str] = set()
+    for maintainer in maintainers:
+        userid = str(maintainer.wecom_userid or "").strip()
+        if not userid or userid in seen:
+            continue
+        seen.add(userid)
+        if mention_mode == "name" and maintainer.name:
+            result.append(f"@{maintainer.name}")
+        else:
+            result.append(f"<@{userid}>")
+    return "、".join(result)
+
+
+def _collect_pending_maintainers(matches: list[TestMaintainerMatch | None]) -> tuple[TestMaintainer, ...]:
+    result: list[TestMaintainer] = []
+    seen: set[str] = set()
+    for match in matches:
+        if match is None:
+            continue
+        for maintainer in match.maintainers:
+            if maintainer.wecom_userid in seen:
+                continue
+            seen.add(maintainer.wecom_userid)
+            result.append(maintainer)
+    return tuple(result)
 
 
 def collect_responsible_owners(notice: CiResponsibilityNotice) -> list[Owner]:

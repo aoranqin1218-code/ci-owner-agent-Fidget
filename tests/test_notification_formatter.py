@@ -6,8 +6,13 @@ from dataclasses import replace
 from ci_owner_agent.schemas import CiResponsibilityNotice
 from ci_owner_agent.config import load_settings
 from ci_owner_agent.main import _maybe_notify_notice, _notify_notice, main
-from ci_owner_agent.services.history_store import notice_hash
-from ci_owner_agent.services.notification_formatter import collect_responsible_display_names, format_wecom_markdown_notice, result_icon
+from ci_owner_agent.services.notification_formatter import (
+    collect_responsible_display_names,
+    format_wecom_markdown_notice,
+    notification_digest,
+    result_icon,
+)
+from ci_owner_agent.services.test_maintainer_mapping import TestMaintainerResolver
 from ci_owner_agent.services.wecom_user_mapping import WeComUserMapper
 from tests.test_history_store import make_store
 
@@ -33,12 +38,13 @@ def notice_payload(items):
     }
 
 
-def item(owner_name="Tang.Tangerine-唐嘉伟", owner_type="inherited_failure_owner", responsibility_type="inherited_failure_owner", reason="历史持续失败。", owner_email="x@example.com"):
+def item(owner_name="Tang.Tangerine-唐嘉伟", owner_type="inherited_failure_owner", responsibility_type="inherited_failure_owner", reason="历史持续失败。", owner_email="x@example.com", test_file_path=None):
     return {
         "failureId": "failure-secret",
         "failureTitle": "EtlUtils - getInputEntryInfo",
         "failureSignature": "sig-secret",
         "failureSummary": "summary",
+        "testFilePath": test_file_path,
         "owner": {"type": owner_type, "name": owner_name, "email": owner_email, "commit": "secretcommit", "confidence": 0.9},
         "responsibilityType": responsibility_type,
         "sourceBuildNumber": 5094 if responsibility_type == "inherited_failure_owner" else 5099,
@@ -439,7 +445,7 @@ def test_env_enabled_notify_skips_success_by_default(monkeypatch):
 def test_notify_dedup_does_not_overwrite_sent(monkeypatch):
     store = make_store()
     notice = CiResponsibilityNotice.model_validate(notice_payload([item()]))
-    digest = notice_hash(notice)
+    digest = notification_digest(notice, fallback_userids=load_settings().wecom_fallback_userids)
     store.save_notification(notice=notice, notice_hash=digest, channel="wecom", status="sent", message="old")
     settings = replace(load_settings(), notification_dedup_enabled=True)
     monkeypatch.setattr("ci_owner_agent.main.get_history_store", lambda settings: store)
@@ -454,7 +460,7 @@ def test_notify_dedup_does_not_overwrite_sent(monkeypatch):
 def test_notify_force_bypasses_dedup(monkeypatch):
     store = make_store()
     notice = CiResponsibilityNotice.model_validate(notice_payload([item()]))
-    digest = notice_hash(notice)
+    digest = notification_digest(notice, fallback_userids=load_settings().wecom_fallback_userids)
     store.save_notification(notice=notice, notice_hash=digest, channel="wecom", status="sent", message="old")
     settings = replace(load_settings(), notification_dedup_enabled=True, wecom_webhook_url="https://secret-webhook")
     monkeypatch.setattr("ci_owner_agent.main.get_history_store", lambda settings: store)
@@ -508,8 +514,8 @@ def test_fallback_userids_appended_when_no_owner():
     no_owner = item("无高可信责任人", "no_high_confidence_owner", "no_high_confidence_owner", "证据不足。")
     notice = CiResponsibilityNotice.model_validate(notice_payload([no_owner]))
     markdown = format_wecom_markdown_notice(notice, fallback_userids=("ci.owner", "team.leader"))
-    # Top line with bold markers
-    assert "**责任人**：无高可信责任人，兜底通知 <@ci.owner>、<@team.leader>" in markdown
+    assert "**责任人**：无高可信责任人" in markdown
+    assert "**待确认维护人**：<@ci.owner>、<@team.leader>" in markdown
     # Item detail line still shows no-owner without fallback
     item_lines = [l for l in markdown.split("\n") if l.strip().startswith("- 👤 责任人")]
     assert len(item_lines) >= 1
@@ -529,21 +535,21 @@ def test_fallback_not_appended_when_has_real_owner():
     assert "<@ci.owner>" not in markdown
 
 
-def test_fallback_not_appended_when_mixed_owners():
+def test_mixed_real_and_no_owner_keeps_real_owner_and_routes_no_owner():
     real = item("Tang", "inherited_failure_owner", "inherited_failure_owner", "历史持续失败。")
     no_owner = item("无高可信责任人", "no_high_confidence_owner", "no_high_confidence_owner", "证据不足。")
     notice = CiResponsibilityNotice.model_validate(notice_payload([real, no_owner]))
     markdown = format_wecom_markdown_notice(notice, fallback_userids=("user001",))
-    assert "兜底通知" not in markdown
-    assert "Tang" in markdown
+    assert "**责任人**：@Tang" in markdown
+    assert "**待确认维护人**：<@user001>" in markdown
+    assert "   - 👤 责任人：无高可信责任人" in markdown
 
 
 def test_item_owner_still_shows_no_owner_with_fallback():
     no_owner = item("无高可信责任人", "no_high_confidence_owner", "no_high_confidence_owner", "证据不足。")
     notice = CiResponsibilityNotice.model_validate(notice_payload([no_owner]))
     markdown = format_wecom_markdown_notice(notice, fallback_userids=("user001",))
-    # Top shows fallback
-    assert "兜底通知 <@user001>" in markdown
+    assert "**待确认维护人**：<@user001>" in markdown
     # Item owner line still shows no high confidence owner (not fallback userid)
     # Item lines have "   - 👤 责任人：" prefix
     item_owner_lines = [line for line in markdown.split("\n") if line.strip().startswith("- 👤 责任人")]
@@ -561,11 +567,18 @@ def test_no_fallback_when_not_configured():
     assert "<@" not in markdown
 
 
+def test_legacy_notice_without_items_still_routes_fallback():
+    notice = CiResponsibilityNotice.model_validate(notice_payload([]))
+    markdown = format_wecom_markdown_notice(notice, fallback_userids=("legacy.fallback",))
+    assert "**责任人**：无高可信责任人" in markdown
+    assert "**待确认维护人**：<@legacy.fallback>" in markdown
+
+
 def test_single_fallback_userid():
     no_owner = item("无高可信责任人", "no_high_confidence_owner", "no_high_confidence_owner", "证据不足。")
     notice = CiResponsibilityNotice.model_validate(notice_payload([no_owner]))
     markdown = format_wecom_markdown_notice(notice, fallback_userids=("onlyone",))
-    assert "兜底通知 <@onlyone>" in markdown
+    assert "**待确认维护人**：<@onlyone>" in markdown
 
 
 def test_notify_notice_passes_fallback_from_settings(monkeypatch):
@@ -585,7 +598,7 @@ def test_notify_notice_passes_fallback_from_settings(monkeypatch):
     _notify_notice(notice, settings, dry_run=False, force=False, feedback_base_url=None)
 
     assert len(markdowns) == 1
-    assert "兜底通知 <@fb1>、<@fb2>" in markdowns[0]
+    assert "**待确认维护人**：<@fb1>、<@fb2>" in markdowns[0]
 
 
 def test_notify_notice_dry_run_with_fallback(monkeypatch):
@@ -608,16 +621,19 @@ def test_notify_notice_dry_run_with_fallback(monkeypatch):
     result = _notify_notice(notice, settings, dry_run=True, force=False, feedback_base_url=None)
 
     assert result["status"] == "dry_run"
-    assert "无高可信责任人，兜底通知 <@ci.owner>" in result["markdown"]
+    assert "**责任人**：无高可信责任人" in result["markdown"]
+    assert "**待确认维护人**：<@ci.owner>" in result["markdown"]
 
-def test_no_owner_notice_mentions_fallback_userids_only_at_top():
+def test_no_owner_notice_mentions_fallback_userids_at_top_and_item_route():
     no_owner = item("无高可信责任人", "no_high_confidence_owner", "no_high_confidence_owner", "证据不足。")
     notice = CiResponsibilityNotice.model_validate(notice_payload([no_owner]))
 
     markdown = format_wecom_markdown_notice(notice, fallback_userids=("ci.owner", "team.leader"))
 
-    assert " **责任人**：无高可信责任人，兜底通知 <@ci.owner>、<@team.leader>" in markdown
+    assert " **责任人**：无高可信责任人" in markdown
+    assert " **待确认维护人**：<@ci.owner>、<@team.leader>" in markdown
     assert "   - 👤 责任人：无高可信责任人" in markdown
+    assert "   - 📣 待确认维护人：<@ci.owner>、<@team.leader>" in markdown
 
 
 def test_fallback_userids_are_not_used_when_real_owner_exists():
@@ -635,7 +651,8 @@ def test_fallback_userids_are_cleaned_by_formatter():
 
     markdown = format_wecom_markdown_notice(notice, fallback_userids=(" ci.owner ", "", "ci.owner", "team.leader"))
 
-    assert " **责任人**：无高可信责任人，兜底通知 <@ci.owner>、<@team.leader>" in markdown
+    assert " **责任人**：无高可信责任人" in markdown
+    assert " **待确认维护人**：<@ci.owner>、<@team.leader>" in markdown
     assert "<@>" not in markdown
 
 
@@ -657,5 +674,211 @@ def test_notify_notice_passes_fallback_userids_from_settings(monkeypatch):
 
     result = _notify_notice(notice, settings, dry_run=True, force=False, feedback_base_url=None)
 
-    assert "无高可信责任人，兜底通知 <@ci.owner>" in result["markdown"]
+    assert "**责任人**：无高可信责任人" in result["markdown"]
+    assert "**待确认维护人**：<@ci.owner>" in result["markdown"]
     assert "   - 👤 责任人：无高可信责任人" in result["markdown"]
+
+
+def _maintainer_resolver(tmp_path, maintainers=None, pattern="test/service/view/**"):
+    maintainers = maintainers or [("Charlie", "charlie.guo")]
+    rows = "\n".join(
+        f"      - name: \"{name}\"\n        wecomUserId: \"{userid}\"" for name, userid in maintainers
+    )
+    path = tmp_path / "maintainers.yml"
+    path.write_text(
+        "version: 1\nrules:\n"
+        "  - repo: fx-code\n"
+        "    job: services/fx-code-unittest\n"
+        f"    paths: [\"{pattern}\"]\n"
+        "    maintainers:\n"
+        f"{rows}\n",
+        encoding="utf-8",
+    )
+    return TestMaintainerResolver.from_yaml(path)
+
+
+def test_no_owner_path_routes_single_maintainer_without_changing_owner(tmp_path):
+    no_owner = item(
+        "无高可信责任人",
+        "no_high_confidence_owner",
+        "no_high_confidence_owner",
+        "证据不足。",
+        test_file_path="test/service/view/ViewDataQueryServiceTest.ts",
+    )
+    notice = CiResponsibilityNotice.model_validate(notice_payload([no_owner]))
+    markdown = format_wecom_markdown_notice(
+        notice,
+        maintainer_resolver=_maintainer_resolver(tmp_path),
+        repo="fx-code",
+    )
+
+    assert "**责任人**：无高可信责任人" in markdown
+    assert "**待确认维护人**：<@charlie.guo>" in markdown
+    assert "📁 测试文件：test/service/view/ViewDataQueryServiceTest.ts" in markdown
+    assert notice.owner.type == "no_high_confidence_owner"
+    assert notice.responsibilityItems[0].owner.name == "无高可信责任人"
+
+
+def test_no_owner_path_routes_multiple_maintainers_in_order(tmp_path):
+    no_owner = item(
+        "无高可信责任人",
+        "no_high_confidence_owner",
+        "no_high_confidence_owner",
+        "证据不足。",
+        test_file_path="test/service/view/ViewDataQueryServiceTest.ts",
+    )
+    notice = CiResponsibilityNotice.model_validate(notice_payload([no_owner]))
+    resolver = _maintainer_resolver(tmp_path, [("Charlie", "charlie.guo"), ("Henry", "henry")])
+    markdown = format_wecom_markdown_notice(notice, maintainer_resolver=resolver, repo="fx-code")
+
+    assert "**待确认维护人**：<@charlie.guo>、<@henry>" in markdown
+    assert "   - 📣 待确认维护人：<@charlie.guo>、<@henry>" in markdown
+
+
+def test_unmatched_and_missing_test_path_route_fallback(tmp_path):
+    unmatched = item(
+        "无高可信责任人",
+        "no_high_confidence_owner",
+        "no_high_confidence_owner",
+        "证据不足。",
+        test_file_path="test/service/unknown/UnknownTest.ts",
+    )
+    missing = item("无高可信责任人", "no_high_confidence_owner", "no_high_confidence_owner", "证据不足。")
+    resolver = _maintainer_resolver(tmp_path)
+
+    unmatched_markdown = format_wecom_markdown_notice(
+        CiResponsibilityNotice.model_validate(notice_payload([unmatched])),
+        maintainer_resolver=resolver,
+        repo="fx-code",
+        fallback_userids=("default.userid",),
+    )
+    missing_markdown = format_wecom_markdown_notice(
+        CiResponsibilityNotice.model_validate(notice_payload([missing])),
+        maintainer_resolver=resolver,
+        repo="fx-code",
+        fallback_userids=("default.userid",),
+    )
+
+    assert "📁 测试文件：test/service/unknown/UnknownTest.ts" in unmatched_markdown
+    assert "未匹配测试文件维护规则" in unmatched_markdown
+    assert "📁 测试文件：未识别" in missing_markdown
+    assert "未识别失败测试文件" in missing_markdown
+    assert "<@default.userid>" in unmatched_markdown
+    assert "<@default.userid>" in missing_markdown
+
+
+def test_multiple_no_owner_routes_are_deduplicated_and_mixed_owner_is_preserved(tmp_path):
+    real = item("Tang", "high_confidence", "current_build_owner", "当前引入。", "tang@example.com")
+    first = item("无高可信责任人", "no_high_confidence_owner", "no_high_confidence_owner", "待确认。", test_file_path="test/service/view/A.test.ts")
+    second = item("无高可信责任人", "no_high_confidence_owner", "no_high_confidence_owner", "待确认。", test_file_path="test/service/view/B.test.ts")
+    notice = CiResponsibilityNotice.model_validate(notice_payload([real, first, second]))
+    resolver = _maintainer_resolver(tmp_path, [("Charlie", "charlie.guo"), ("Henry", "henry")])
+
+    markdown = format_wecom_markdown_notice(notice, maintainer_resolver=resolver, repo="fx-code")
+
+    assert "**责任人**：@Tang" in markdown
+    assert markdown.count("**待确认维护人**：<@charlie.guo>、<@henry>") == 1
+    assert notice.responsibilityItems[1].owner.type == "no_high_confidence_owner"
+
+
+def test_multiple_no_owner_items_route_to_different_maintainers(tmp_path):
+    path = tmp_path / "maintainers.yml"
+    path.write_text(
+        "version: 1\nrules:\n"
+        "  - paths: [\"test/view/**\"]\n"
+        "    maintainers: [{name: Charlie, wecomUserId: charlie}]\n"
+        "  - paths: [\"test/quota/**\"]\n"
+        "    maintainers: [{name: Mars, wecomUserId: mars}]\n",
+        encoding="utf-8",
+    )
+    view = item("无高可信责任人", "no_high_confidence_owner", "no_high_confidence_owner", "待确认。", test_file_path="test/view/ViewTest.ts")
+    quota = item("无高可信责任人", "no_high_confidence_owner", "no_high_confidence_owner", "待确认。", test_file_path="test/quota/QuotaTest.ts")
+    notice = CiResponsibilityNotice.model_validate(notice_payload([view, quota]))
+
+    markdown = format_wecom_markdown_notice(
+        notice,
+        maintainer_resolver=TestMaintainerResolver.from_yaml(path),
+    )
+
+    assert "**待确认维护人**：<@charlie>、<@mars>" in markdown
+    assert "   - 📣 待确认维护人：<@charlie>" in markdown
+    assert "   - 📣 待确认维护人：<@mars>" in markdown
+
+
+def test_maintainer_name_mode_and_no_no_owner_item(tmp_path):
+    no_owner = item("无高可信责任人", "no_high_confidence_owner", "no_high_confidence_owner", "待确认。", test_file_path="test/service/view/A.test.ts")
+    resolver = _maintainer_resolver(tmp_path, [("Charlie", "charlie.guo")])
+    name_markdown = format_wecom_markdown_notice(
+        CiResponsibilityNotice.model_validate(notice_payload([no_owner])),
+        maintainer_resolver=resolver,
+        repo="fx-code",
+        mention_mode="name",
+    )
+    real_markdown = format_wecom_markdown_notice(
+        CiResponsibilityNotice.model_validate(notice_payload([item("Tang")])),
+        maintainer_resolver=resolver,
+        repo="fx-code",
+    )
+
+    assert "**待确认维护人**：@Charlie" in name_markdown
+    assert "待确认维护人" not in real_markdown
+
+
+def test_notification_digest_changes_when_maintainer_route_changes(tmp_path):
+    no_owner = item("无高可信责任人", "no_high_confidence_owner", "no_high_confidence_owner", "待确认。", test_file_path="test/service/view/A.test.ts")
+    notice = CiResponsibilityNotice.model_validate(notice_payload([no_owner]))
+    first = _maintainer_resolver(tmp_path, [("Charlie", "charlie.guo")])
+    first_digest = notification_digest(notice, maintainer_resolver=first, repo="fx-code")
+    second = _maintainer_resolver(tmp_path, [("Henry", "henry")])
+    second_digest = notification_digest(notice, maintainer_resolver=second, repo="fx-code")
+
+    assert first_digest != second_digest
+    assert first_digest == notification_digest(notice, maintainer_resolver=first, repo="fx-code")
+
+
+def test_notify_notice_loads_maintainer_mapping_from_settings(tmp_path, monkeypatch):
+    resolver = _maintainer_resolver(tmp_path, [("Charlie", "charlie.guo")])
+    mapping_file = tmp_path / "maintainers.yml"
+    no_owner = item(
+        "无高可信责任人",
+        "no_high_confidence_owner",
+        "no_high_confidence_owner",
+        "待确认。",
+        test_file_path="test/service/view/A.test.ts",
+    )
+    payload = notice_payload([no_owner])
+    payload["repo"] = "fx-code"
+    notice = CiResponsibilityNotice.model_validate(payload)
+    settings = replace(
+        load_settings(),
+        notification_dedup_enabled=False,
+        test_maintainer_mapping_file=mapping_file,
+        wecom_fallback_userids=("fallback",),
+    )
+    monkeypatch.setattr("ci_owner_agent.main.get_history_store", lambda settings: None)
+
+    result = _notify_notice(notice, settings, dry_run=True, force=False, feedback_base_url=None)
+
+    assert resolver.warnings == ()
+    assert "**待确认维护人**：<@charlie.guo>" in result["markdown"]
+    assert "<@fallback>" not in result["markdown"]
+
+
+def test_notify_notice_invalid_mapping_warns_and_uses_fallback(tmp_path, monkeypatch, capsys):
+    mapping_file = tmp_path / "invalid.yml"
+    mapping_file.write_text("rules: [", encoding="utf-8")
+    no_owner = item("无高可信责任人", "no_high_confidence_owner", "no_high_confidence_owner", "待确认。")
+    notice = CiResponsibilityNotice.model_validate(notice_payload([no_owner]))
+    settings = replace(
+        load_settings(),
+        notification_dedup_enabled=False,
+        test_maintainer_mapping_file=mapping_file,
+        wecom_fallback_userids=("fallback",),
+    )
+    monkeypatch.setattr("ci_owner_agent.main.get_history_store", lambda settings: None)
+
+    result = _notify_notice(notice, settings, dry_run=True, force=False, feedback_base_url=None)
+    captured = capsys.readouterr()
+
+    assert "invalid test maintainer mapping yaml" in captured.err
+    assert "**待确认维护人**：<@fallback>" in result["markdown"]

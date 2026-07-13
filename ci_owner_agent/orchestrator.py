@@ -20,6 +20,7 @@ from ci_owner_agent.services.investigation_scope import InvestigationScope
 from ci_owner_agent.services.jenkins_client import JenkinsClient
 from ci_owner_agent.services.log_provider import JenkinsLogProvider, LocalFileLogProvider, LogProvider, detect_checkout_revision_from_console_log
 from ci_owner_agent.services.metrics import current_metrics_recorder
+from ci_owner_agent.services.responsibility_path_enricher import enrich_responsibility_item_paths
 from ci_owner_agent.services.scorer import no_owner, validate_notice
 from ci_owner_agent.tools.ai_history_tools import history_search_similar_failure_facts
 from ci_owner_agent.tools.history_tools import history_search_similar_failures
@@ -31,8 +32,9 @@ def _metrics_stage(name: str) -> ContextManager[None]:
     return recorder.stage(name) if recorder is not None else nullcontext()
 
 
-def success_notice(build_info: BuildInfo, base_commit: str | None = None) -> CiResponsibilityNotice:
+def success_notice(build_info: BuildInfo, base_commit: str | None = None, repo: str | None = None) -> CiResponsibilityNotice:
     return CiResponsibilityNotice(
+        repo=repo,
         job=build_info.job,
         buildNumber=build_info.buildNumber,
         buildUrl=build_info.buildUrl,
@@ -56,8 +58,9 @@ def success_notice(build_info: BuildInfo, base_commit: str | None = None) -> CiR
     )
 
 
-def aborted_notice(build_info: BuildInfo, base_commit: str | None = None) -> CiResponsibilityNotice:
+def aborted_notice(build_info: BuildInfo, base_commit: str | None = None, repo: str | None = None) -> CiResponsibilityNotice:
     return CiResponsibilityNotice(
+        repo=repo,
         job=build_info.job,
         buildNumber=build_info.buildNumber,
         buildUrl=build_info.buildUrl,
@@ -90,8 +93,10 @@ def failure_without_context(
     base_commit: str | None,
     reason: str,
     evidence: list[EvidenceItem] | None = None,
+    repo: str | None = None,
 ) -> CiResponsibilityNotice:
     return CiResponsibilityNotice(
+        repo=repo,
         job=build_info.job,
         buildNumber=build_info.buildNumber,
         buildUrl=build_info.buildUrl,
@@ -133,7 +138,7 @@ def analyze_failed_build(
     if not sync_result.get("ok"):
         message = f"repo_sync 失败：{sync_result.get('error') or sync_result.get('command', {}).get('error') or 'unknown error'}"
         if not allow_sync_failure:
-            return failure_without_context(build_info, base_commit, f"{message}；正式模式中仓库同步失败会阻止高可信定责。")
+            return failure_without_context(build_info, base_commit, f"{message}；正式模式中仓库同步失败会阻止高可信定责。", repo=repo)
         build_info.warnings.append(message)
         sync_warning = EvidenceItem(
             id="E_SYNC",
@@ -173,9 +178,9 @@ def analyze_failed_build(
             stage_name="gitDiffFull",
         )
     if not commits_result.get("ok"):
-        return failure_without_context(build_info, base_commit, f"Git commit 区间读取失败：{commits_result.get('error')}")
+        return failure_without_context(build_info, base_commit, f"Git commit 区间读取失败：{commits_result.get('error')}", repo=repo)
     if not diff_result.get("ok"):
-        return failure_without_context(build_info, base_commit, f"Git diff 文件列表读取失败：{diff_result.get('error')}")
+        return failure_without_context(build_info, base_commit, f"Git diff 文件列表读取失败：{diff_result.get('error')}", repo=repo)
     commits = [CommitInfo.model_validate(item) for item in commits_result.get("commits", [])]
     changed_files = [ChangedFile.model_validate(item) for item in diff_result.get("files", [])]
     context = AgentContext(
@@ -236,6 +241,12 @@ def analyze_failed_build(
             failure_facts=runtime_context.failure_facts,
         )
         notice = validate_notice(notice)
+        notice = enrich_responsibility_item_paths(
+            notice,
+            runtime_context.failure_summaries,
+            runtime_context.failure_facts,
+            repo=repo,
+        )
         _save_history(
             settings,
             build_info,
@@ -257,10 +268,16 @@ def analyze_failed_build(
             else:
                 notice = agent.analyze(context)
     except AgentConfigurationError as exc:
-        return failure_without_context(build_info, base_commit, f"LLM 配置错误：{exc}")
+        return failure_without_context(build_info, base_commit, f"LLM 配置错误：{exc}", repo=repo)
     if sync_warning is not None:
         notice.evidence.append(sync_warning)
     notice = validate_notice(notice)
+    notice = enrich_responsibility_item_paths(
+        notice,
+        runtime_context.failure_summaries,
+        runtime_context.failure_facts,
+        repo=repo,
+    )
     _save_history(
         settings,
         build_info,
@@ -749,11 +766,11 @@ def analyze_local(
         warnings=[] if result else [f"result detected from log: {detected}"],
     )
     if final_result == "SUCCESS":
-        notice = success_notice(build_info, base_commit=None)
+        notice = success_notice(build_info, base_commit=None, repo=repo)
         _save_history(settings, build_info, notice, log_provider, None, head_commit, last_successful_build_number)
         return notice
     if final_result == "ABORTED":
-        notice = aborted_notice(build_info, base_commit=None)
+        notice = aborted_notice(build_info, base_commit=None, repo=repo)
         _save_history(settings, build_info, notice, log_provider, None, head_commit, last_successful_build_number)
         return notice
     return analyze_failed_build(
@@ -794,22 +811,22 @@ def analyze_jenkins(
             logTail=None,
             warnings=[str(build_result.get("error"))],
         )
-        return failure_without_context(build_info, None, f"Jenkins 构建信息获取失败：{build_result.get('error')}")
+        return failure_without_context(build_info, None, f"Jenkins 构建信息获取失败：{build_result.get('error')}", repo=repo)
 
     build_info = BuildInfo.model_validate(build_result["buildInfo"])
     if build_info.result == "SUCCESS":
-        notice = success_notice(build_info, base_commit=None)
+        notice = success_notice(build_info, base_commit=None, repo=repo)
         log_provider = JenkinsLogProvider(jenkins_client, job, build_info.buildNumber)
         _save_history(settings, build_info, notice, log_provider, None, build_info.commit, None)
         return notice
     if build_info.result == "ABORTED":
-        notice = aborted_notice(build_info, base_commit=None)
+        notice = aborted_notice(build_info, base_commit=None, repo=repo)
         log_provider = JenkinsLogProvider(jenkins_client, job, build_info.buildNumber)
         _save_history(settings, build_info, notice, log_provider, None, build_info.commit, None)
         return notice
 
     if build_info.result not in {"FAILURE", "UNSTABLE", "UNKNOWN"}:
-        return failure_without_context(build_info, None, f"不支持的 Jenkins 构建结果：{build_info.result}")
+        return failure_without_context(build_info, None, f"不支持的 Jenkins 构建结果：{build_info.result}", repo=repo)
 
     with _metrics_stage("jenkinsFetch"):
         last_success_result = jenkins_get_last_successful_build_info(
@@ -832,6 +849,7 @@ def analyze_jenkins(
                     source="jenkins",
                 )
             ],
+            repo=repo,
         )
 
     successful = last_success_result["successfulBuildInfo"]
@@ -872,6 +890,7 @@ def analyze_jenkins(
             base_commit,
             "缺少 headCommit 或 baseCommit，无法执行 Git diff，因此不能输出高可信责任人。",
             evidence=evidence,
+            repo=repo,
         )
 
     log_provider = JenkinsLogProvider(jenkins_client, job, build_info.buildNumber)

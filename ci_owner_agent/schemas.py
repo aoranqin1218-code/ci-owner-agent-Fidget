@@ -119,6 +119,8 @@ class ResponsibilityItem(StrictModel):
     failureTitle: str
     failureSignature: str | None = None
     failureSummary: str | None = None
+    testFilePath: str | None = None
+    failureFilePath: str | None = None
     owner: Owner
     responsibilityType: ResponsibilityType
     sourceBuildNumber: int | None = None
@@ -192,6 +194,7 @@ class FailureFactComparison(StrictModel):
 
 
 class CiResponsibilityNotice(StrictModel):
+    repo: str | None = None
     job: str
     buildNumber: int
     buildUrl: str
