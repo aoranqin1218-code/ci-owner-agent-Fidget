@@ -272,7 +272,7 @@ def _strip_npm_command_payloads(text: str) -> str:
 
 def _strip_npm_command_payload_line(line: str) -> str:
     command_match = re.search(r"(?i)\bnpm\s+err!\s+command\b", line)
-    if command_match is None:
+    if command_match is None or "<wrapper_command>" in line[command_match.end() :]:
         return line
     command_start = command_match.start()
     command_end = command_match.end()
@@ -284,6 +284,12 @@ def _strip_npm_command_payload_line(line: str) -> str:
         if delimiter is not None:
             suffix = payload[marker_start:]
             return line[:command_start] + "npm ERR! command <wrapper_command>" + delimiter.group(1) + suffix
+        if (
+            re.match(r"(?i)(?:\s*(?:sh|bash|cmd)\s+-?[a-z]?\s+|\s*powershell\s+).*", before_marker)
+            and not re.search(r"(?i)\b(?:echo|node\s+-e)\b", before_marker)
+        ):
+            suffix = payload[marker_start:]
+            return line[:command_start] + "npm ERR! command <wrapper_command> " + suffix
     return line[:command_start] + "npm ERR! command <wrapper_command>"
 
 

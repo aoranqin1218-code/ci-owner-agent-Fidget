@@ -551,3 +551,68 @@ def test_build_failure_fact_signature_normalizes_dict_file_path():
     }
 
     assert build_failure_fact_signature(first) == build_failure_fact_signature(second)
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/tmp/build-123/server/workflow/service.ts",
+        "/var/tmp/task/modules/workflow/a.ts",
+        "/bin/server/workflow/service.ts",
+        "/usr/bin/packages/core/index.ts",
+        r"C:\Users\me\AppData\Local\Temp\packages\core\index.ts",
+    ],
+)
+def test_unsafe_path_does_not_make_wrapper_fact_eligible(path):
+    fact = FailureFact(
+        signatureKey="model-wrapper",
+        historyEligible=True,
+        isGenericWrapper=False,
+        failureKind="build_failure",
+        filePath=path,
+        message='ERROR: process "/bin/sh -c npm run build" did not complete successfully: exit code: 1',
+        rootCauseSummary="command failed",
+        confidence=0.99,
+    )
+
+    assert fact.filePath is None
+    assert fact.signatureKey == "unknown_failure"
+    assert fact.historyEligible is False
+    assert fact.isGenericWrapper is True
+
+
+def test_root_level_source_file_is_cross_platform_canonical():
+    facts = [
+        _path_fact(r"C:\agent\_work\fx-code\index.ts"),
+        _path_fact(r"C:\actions-runner\_work\fx-code\fx-code\index.ts"),
+        _path_fact("/home/jenkins/workspace/fx-code/index.ts"),
+        _path_fact("/workspace/fx-code/index.ts"),
+        _path_fact("/var/app/index.ts"),
+        _path_fact("./index.ts"),
+        _path_fact("index.ts"),
+    ]
+
+    assert {fact.filePath for fact in facts} == {"index.ts"}
+    assert len({fact.signatureKey for fact in facts}) == 1
+    assert len({fact.factId for fact in facts}) == 1
+
+
+def test_dict_builder_rejects_unsafe_path_and_normalizes_root_workspace_file():
+    unsafe = {
+        "failureKind": "build_failure",
+        "filePath": "/tmp/build-123/server/a.ts",
+        "message": 'ERROR: process "/bin/sh -c npm run build" did not complete successfully: exit code: 1',
+        "rootCauseSummary": "command failed",
+    }
+    first = {
+        "failureKind": "typescript_compile_error",
+        "errorCode": "TS2305",
+        "filePath": r"C:\agent\_work\fx-code\index.ts",
+        "symbol": "classifyErrorMessage",
+        "message": "missing export",
+        "rootCauseSummary": "missing export",
+    }
+    second = {**first, "filePath": "/home/jenkins/workspace/fx-code/index.ts"}
+
+    assert build_failure_fact_signature(unsafe) == "unknown_failure"
+    assert build_failure_fact_signature(first) == build_failure_fact_signature(second)

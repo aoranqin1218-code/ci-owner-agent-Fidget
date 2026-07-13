@@ -898,6 +898,43 @@ def test_save_failure_facts_stores_canonical_repository_path(repo_cache, sample_
     assert "server/workflow/service.ts" in saved["signatureKey"]
 
 
+def test_save_failure_facts_stores_root_file_and_drops_unsafe_path(repo_cache, sample_repo, logs):
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    from ci_owner_agent.schemas import CiResponsibilityNotice
+
+    store = make_store()
+    notice = CiResponsibilityNotice.model_validate(high_confidence_payload(context))
+    build_info = BuildInfo(job=context.job, buildNumber=5099, result="FAILURE", buildUrl=context.build_url, branch=context.branch, commit=context.head_commit)
+    root_fact = FailureFact(
+        signatureKey="model-path",
+        historyEligible=True,
+        failureKind="typescript_compile_error",
+        errorCode="TS2305",
+        filePath=r"C:\actions-runner\_work\fx-code\fx-code\index.ts",
+        symbol="classifyErrorMessage",
+        message="missing export",
+        rootCauseSummary="missing export",
+        confidence=0.9,
+    )
+    unsafe_fact = FailureFact(
+        signatureKey="model-wrapper",
+        historyEligible=True,
+        failureKind="build_failure",
+        filePath="/tmp/build-123/server/a.ts",
+        message='ERROR: process "/bin/sh -c npm run build" did not complete successfully: exit code: 1',
+        rootCauseSummary="command failed",
+        confidence=0.9,
+    )
+
+    store.save_failure_facts(build_info=build_info, notice=notice, facts=[root_fact, unsafe_fact])
+
+    saved_root, saved_unsafe = store.failure_facts.docs
+    assert saved_root["fact"]["filePath"] == "index.ts"
+    assert "actions-runner" not in str(saved_root)
+    assert saved_unsafe["fact"]["filePath"] is None
+    assert saved_unsafe["historyEligible"] is False
+
+
 def test_save_failure_facts_uses_matching_responsibility_item_owner(repo_cache, sample_repo, logs):
     context = make_lc_context(repo_cache, sample_repo, logs)
     from ci_owner_agent.schemas import CiResponsibilityNotice
