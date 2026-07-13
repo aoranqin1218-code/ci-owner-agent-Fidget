@@ -109,6 +109,7 @@ sourceBuildNumber 无 source build 时必须输出 null，不要输出 0。
 current_build_owner 可以省略 sourceBuildNumber 或输出当前 buildNumber，代码会归一化。
 inherited_failure_owner 必须输出 inheritedOwner.sourceBuildNumber。
 no_high_confidence_owner / unknown 必须输出 null。
+历史 no-owner 的来源字段只由 orchestrator 在本地确定性补充；模型不得为 no_high_confidence_owner 声明 sourceBuildNumber、sourceBuildUrl、matchType 或 relationship。
 """
 
 

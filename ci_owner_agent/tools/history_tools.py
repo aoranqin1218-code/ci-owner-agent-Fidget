@@ -271,7 +271,7 @@ def _find_no_owner_decision_for_chunk(candidates: list[dict], current_build_numb
                     "treating current same failure as no_high_confidence_owner"
                 ),
                 feedback_action=feedback.get("action"),
-                signature=candidate.get("signature") or {},
+                signature=candidate.get("historicalSignature") or {},
                 signature_hash=candidate.get("historicalSignatureHash"),
             )
         notice_doc = candidate.get("_noticeDoc") or {}
@@ -296,7 +296,7 @@ def _find_no_owner_decision_for_chunk(candidates: list[dict], current_build_numb
             match_type=candidate.get("matchType"),
             relationship=candidate.get("relationship"),
             reason="historical same failure was previously classified as no_high_confidence_owner",
-            signature=candidate.get("signature") or {},
+            signature=candidate.get("historicalSignature") or {},
             signature_hash=candidate.get("historicalSignatureHash"),
         )
     return {"found": False}

@@ -13,6 +13,7 @@ from ci_owner_agent.services.notification_formatter import (
     format_wecom_markdown_notice,
     notification_digest,
     result_icon,
+    source_build_label,
 )
 from ci_owner_agent.services.test_maintainer_mapping import TestMaintainerResolver
 from ci_owner_agent.services.wecom_user_mapping import WeComUserMapper
@@ -69,6 +70,33 @@ def test_inherited_item_owner_is_mentioned_without_top_level_conclusion():
     assert "#### 🧩 责任项" in markdown
     assert "顶层结论" not in markdown
     assert "顶层结论：无高可信责任人" not in markdown
+
+
+def test_source_build_label_does_not_show_untrusted_no_owner_history():
+    payload = notice_payload(
+        [item("无高可信责任人", "no_high_confidence_owner", "no_high_confidence_owner", "证据不足。")]
+    )
+    payload["responsibilityItems"][0].update(
+        {
+            "sourceBuildNumber": 123,
+            "sourceBuildUrl": "fake",
+            "matchType": "signature_exact",
+            "relationship": "very_likely_same_failure",
+        }
+    )
+    notice = CiResponsibilityNotice.model_validate(payload)
+
+    assert source_build_label(notice.responsibilityItems[0], notice) == "-"
+
+
+def test_source_build_label_for_current_and_inherited_owner():
+    current_notice = CiResponsibilityNotice.model_validate(
+        notice_payload([item("Li", "high_confidence", "current_build_owner", "current", "li@example.com")])
+    )
+    inherited_notice = CiResponsibilityNotice.model_validate(notice_payload([item()]))
+
+    assert source_build_label(current_notice.responsibilityItems[0], current_notice) == "#5099"
+    assert source_build_label(inherited_notice.responsibilityItems[0], inherited_notice) == "#5094"
 
 
 def test_multiple_responsible_names_are_deduplicated_in_order():

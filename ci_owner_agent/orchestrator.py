@@ -240,7 +240,6 @@ def analyze_failed_build(
             failure_summaries=runtime_context.failure_summaries,
             failure_facts=runtime_context.failure_facts,
         )
-        notice = validate_notice(notice)
         notice = enrich_responsibility_item_paths(
             notice,
             runtime_context.failure_summaries,
@@ -561,50 +560,112 @@ def _has_new_strong_evidence(
     failure_facts: dict | None,
     changed_files: list[ChangedFile],
 ) -> bool:
-    current_signature = _current_failure_signature(failure_summaries, failure_facts)
-    source_signature = _decision_signature(decision)
-    if (
-        not decision.get("allFailuresNoOwnerDecision")
-        and current_signature
-        and source_signature
-        and current_signature != source_signature
-    ):
+    current_items = _current_failure_evidence_items(failure_summaries, failure_facts)
+    item_decisions = decision.get("decisions") if isinstance(decision.get("decisions"), list) else [decision]
+    aligned = _align_current_failures_to_decisions(current_items, item_decisions)
+    if aligned is None:
         return True
+
+    changed_paths = {item.path.replace("\\", "/").lstrip("./") for item in changed_files}
+    for current, historical in aligned:
+        if current["paths"] & changed_paths:
+            return True
+        current_markers = _strong_failure_markers(current["payload"])
+        historical_markers = _strong_failure_markers(historical, historical=True)
+        if not current_markers.issubset(historical_markers):
+            return True
+    return False
+
+
+def _current_failure_evidence_items(failure_summaries: dict | None, failure_facts: dict | None) -> list[dict]:
     summaries = _failure_summary_signatures(failure_summaries)
-    facts = (failure_facts or {}).get("facts") if isinstance(failure_facts, dict) else []
-    changed_paths = {item.path for item in changed_files}
     if summaries:
-        for summary in summaries:
-            for path in _failure_paths(summary, facts):
-                if path in changed_paths:
-                    return True
-    else:
-        for path in _failure_paths(None, facts):
-            if path in changed_paths:
-                return True
-    summary_text = " ".join(
-        " ".join(
-            [
-                str(summary.get("errorType") or ""),
-                str(summary.get("errorMessage") or ""),
-            ]
-        )
-        for summary in summaries
-    )
-    fact_text = " ".join(
-        str((fact or {}).get("errorCode") or "") + " " + str((fact or {}).get("errorType") or "")
+        return [
+            {
+                "identifiers": _failure_identifiers(summary),
+                "payload": summary,
+                "paths": _paths_from_payload(summary),
+            }
+            for summary in summaries
+        ]
+    facts = (failure_facts or {}).get("facts") if isinstance(failure_facts, dict) else []
+    return [
+        {
+            "identifiers": _failure_identifiers(fact),
+            "payload": fact,
+            "paths": _paths_from_payload(fact),
+        }
         for fact in facts or []
         if isinstance(fact, dict)
+    ]
+
+
+def _align_current_failures_to_decisions(current_items: list[dict], decisions: list[dict]) -> list[tuple[dict, dict]] | None:
+    if not current_items or len(current_items) != len(decisions):
+        return None
+    remaining = list(decisions)
+    aligned: list[tuple[dict, dict]] = []
+    for current in current_items:
+        identifiers = current.get("identifiers") or set()
+        matches = [item for item in remaining if identifiers & _failure_identifiers(item)]
+        if len(matches) != 1:
+            return None
+        matched = matches[0]
+        remaining.remove(matched)
+        aligned.append((current, matched))
+    return aligned if not remaining else None
+
+
+def _failure_identifiers(value: dict) -> set[str]:
+    signature = value.get("signature") if isinstance(value.get("signature"), dict) else {}
+    candidates = (
+        value.get("failureSignature"),
+        value.get("signatureKey"),
+        signature.get("signatureKey"),
+        signature.get("signatureHash"),
+        value.get("signatureHash"),
+        value.get("normalizedHash"),
+        value.get("factId"),
+    )
+    return {str(item).strip() for item in candidates if str(item or "").strip()}
+
+
+def _paths_from_payload(value: dict) -> set[str]:
+    return {
+        str(path).replace("\\", "/").lstrip("./")
+        for path in (value.get("testFile"), value.get("topStackFile"), value.get("filePath"))
+        if path
+    }
+
+
+def _strong_failure_markers(value: dict, *, historical: bool = False) -> set[str]:
+    signature = value.get("signature") if isinstance(value.get("signature"), dict) else {}
+    explicit_values = (
+        signature.get("errorCode"),
+        signature.get("errorType"),
+        value.get("errorCode"),
+        value.get("errorType"),
     )
     text = " ".join(
-        [
-            summary_text,
-            fact_text,
-        ]
+        str(part or "")
+        for part in (
+            None if historical else value.get("signatureKey"),
+            None if historical else value.get("signatureHash"),
+            None if historical else value.get("errorMessage"),
+            signature.get("signatureKey"),
+            signature.get("signatureHash"),
+            signature.get("errorMessage"),
+        )
     )
-    source_text = json.dumps(decision.get("signature") or {}, ensure_ascii=False)
-    strong_codes = re.findall(r"\b(?:TS\d{4}|AssertionError|ReferenceError|MODULE_NOT_FOUND|ERR_[A-Z0-9_]+)\b", text)
-    return any(code not in source_text for code in strong_codes)
+    markers = re.findall(
+        r"\b(?:TS\d{4}|AssertionError|ReferenceError|TypeScriptCompileError|Timeout|MODULE_NOT_FOUND|ERR_[A-Z0-9_]+)\b",
+        text,
+        flags=re.IGNORECASE,
+    )
+    return {
+        *(marker.lower() for marker in markers),
+        *(str(marker).strip().lower() for marker in explicit_values if str(marker or "").strip()),
+    }
 
 
 def _build_no_owner_notice_from_history_decision(
@@ -630,38 +691,65 @@ def _build_no_owner_notice_from_history_decision(
             f"该失败与历史构建 #{source_build} 已分析为无高可信责任人的失败一致，"
             "当前构建没有新的强证据改变结论，因此直接继承历史 no-owner 判定。"
         )
-    evidence = EvidenceItem(
-        id="E_HISTORY_NO_OWNER",
-        type="reasoning",
-        summary="历史同类失败已判定为无高可信责任人",
-        detail=(
-            f"sourceBuildNumber={source_build}; sourceBuildUrl={decision.get('sourceBuildUrl')}; "
-            f"matchType={match_type}; relationship={relationship}; "
-            f"coveredFailureCount={decision.get('coveredFailureCount')}; reason={decision.get('reason')}"
-        ),
-        source="history_no_owner_decision",
-    )
     item_decisions = decision.get("decisions") if isinstance(decision.get("decisions"), list) else []
     if not item_decisions:
         item_decisions = [
             {
                 **decision,
-                "failureTitle": _failure_title(failure_summaries, failure_facts),
-                "failureSignature": _current_failure_signature(failure_summaries, failure_facts),
-                "failureSummary": _failure_title(failure_summaries, failure_facts),
+                "failureTitle": decision.get("failureTitle") or _failure_title(failure_summaries, failure_facts),
+                "failureSignature": (
+                    _current_failure_signature(failure_summaries, failure_facts)
+                    or decision.get("failureSignature")
+                    or _decision_signature(decision)
+                ),
+                "failureSummary": decision.get("failureSummary") or _failure_title(failure_summaries, failure_facts),
             }
         ]
+    summary_evidence = EvidenceItem(
+        id="E_HISTORY_NO_OWNER_SUMMARY",
+        type="reasoning",
+        summary=f"当前共 {len(item_decisions)} 个失败均命中历史 no-owner",
+        detail=(
+            "failures="
+            + json.dumps(
+                [
+                    {
+                        "failureSignature": item.get("failureSignature"),
+                        "sourceBuildNumber": item.get("sourceBuildNumber"),
+                    }
+                    for item in item_decisions
+                ],
+                ensure_ascii=False,
+            )
+        ),
+        source="history_no_owner_decision",
+    )
+    item_evidence = [
+        EvidenceItem(
+            id=f"E_HISTORY_NO_OWNER_{index}",
+            type="reasoning",
+            summary="当前失败与历史无责任人失败一致",
+            detail=(
+                f"failureSignature={item.get('failureSignature')}; "
+                f"sourceBuildNumber={item.get('sourceBuildNumber')}; sourceBuildUrl={item.get('sourceBuildUrl')}; "
+                f"matchType={item.get('matchType')}; relationship={item.get('relationship')}; "
+                f"feedbackAction={item.get('feedbackAction')}; reason={item.get('reason')}; source={item.get('source')}"
+            ),
+            source="history_no_owner_decision",
+        )
+        for index, item in enumerate(item_decisions, start=1)
+    ]
     items = [
         build_no_owner_item_from_decision(
             item_decision,
             failure_title=str(item_decision.get("failureTitle") or "historical same failure"),
             failure_signature=item_decision.get("failureSignature"),
             failure_summary=item_decision.get("failureSummary"),
-            evidence_id=evidence.id,
+            evidence_id=item_evidence[index].id,
         )
-        for item_decision in item_decisions
+        for index, item_decision in enumerate(item_decisions)
     ]
-    return CiResponsibilityNotice(
+    notice = CiResponsibilityNotice(
         job=build_info.job,
         buildNumber=build_info.buildNumber,
         buildUrl=build_info.buildUrl,
@@ -671,11 +759,45 @@ def _build_no_owner_notice_from_history_decision(
         baseCommit=base_commit,
         owner=no_owner(),
         failureReason=reason,
-        evidence=[evidence],
+        evidence=[summary_evidence, *item_evidence],
         suggestions=["如需强制重新分析，可设置 CI_AGENT_HISTORY_INHERIT_NO_OWNER_ENABLED=false。"],
         responsibilityItems=items,
         hasHighConfidenceOwner=False,
     )
+    notice = validate_notice(notice)
+    return apply_history_no_owner_sources(notice, item_decisions)
+
+
+HISTORY_NO_OWNER_MATCH_TYPES = {"signature_exact", "signature_structural", "ai_fact_semantic"}
+
+
+def apply_history_no_owner_sources(notice: CiResponsibilityNotice, trusted_decisions: list[dict]) -> CiResponsibilityNotice:
+    """Restore history source fields using only orchestrator-validated decisions."""
+    decisions_by_signature = {
+        str(item.get("failureSignature")): item
+        for item in trusted_decisions
+        if item.get("failureSignature")
+    }
+    for item in notice.responsibilityItems:
+        trusted = decisions_by_signature.get(str(item.failureSignature))
+        if not trusted:
+            continue
+        source_build = trusted.get("sourceBuildNumber")
+        match_type = trusted.get("matchType")
+        if not (
+            isinstance(source_build, int)
+            and 0 < source_build < notice.buildNumber
+            and trusted.get("sourceBuildUrl")
+            and match_type in HISTORY_NO_OWNER_MATCH_TYPES
+            and trusted.get("relationship")
+        ):
+            continue
+        item.sourceBuildNumber = source_build
+        item.sourceBuildUrl = trusted.get("sourceBuildUrl")
+        item.matchType = match_type
+        item.relationship = trusted.get("relationship")
+        item.reason = trusted.get("reason") or item.reason
+    return notice
 
 
 def _current_failure_signature(failure_summaries: dict | None, failure_facts: dict | None) -> str | None:

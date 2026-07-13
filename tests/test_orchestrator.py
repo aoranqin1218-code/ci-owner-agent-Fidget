@@ -8,6 +8,7 @@ from ci_owner_agent.orchestrator import (
     _save_history,
     _select_build_level_no_owner_decision,
     _with_precomputed_failure_context,
+    apply_history_no_owner_sources,
     analyze_failed_build,
     analyze_local,
 )
@@ -572,7 +573,20 @@ def test_all_chunks_no_owner_decision_short_circuits_agent(monkeypatch, repo_cac
     assert all(item.relationship == "very_likely_same_failure" for item in notice.responsibilityItems)
     assert all(item.reason for item in notice.responsibilityItems)
     assert "所有当前失败项" in notice.failureReason
-    assert "coveredFailureCount=2" in notice.evidence[0].detail
+    assert len(notice.evidence) == 3
+    assert [item.evidenceIds for item in notice.responsibilityItems] == [
+        ["E_HISTORY_NO_OWNER_1"],
+        ["E_HISTORY_NO_OWNER_2"],
+    ]
+    assert "sig-timeout-a" in notice.evidence[1].detail
+    assert "sig-timeout-b" not in notice.evidence[1].detail
+    assert "sig-timeout-b" in notice.evidence[2].detail
+    assert "sig-timeout-a" not in notice.evidence[2].detail
+    restored = CiResponsibilityNotice.model_validate_json(notice.model_dump_json())
+    assert [item.evidenceIds for item in restored.responsibilityItems] == [
+        ["E_HISTORY_NO_OWNER_1"],
+        ["E_HISTORY_NO_OWNER_2"],
+    ]
 
 
 def test_multi_failure_no_owner_short_circuit_routes_each_test_maintainer(monkeypatch, repo_cache, sample_repo, logs, tmp_path):
@@ -657,6 +671,51 @@ def test_ai_no_owner_decisions_build_one_item_per_current_fact():
     assert [item.failureSignature for item in notice.responsibilityItems] == ["fact-a", "fact-b"]
     assert [item.sourceBuildNumber for item in notice.responsibilityItems] == [7, 8]
     assert [item.reason for item in notice.responsibilityItems] == ["same A", "same B"]
+    assert [item.evidenceIds for item in notice.responsibilityItems] == [
+        ["E_HISTORY_NO_OWNER_1"],
+        ["E_HISTORY_NO_OWNER_2"],
+    ]
+    assert "sourceBuildNumber=7" in notice.evidence[1].detail
+    assert "sourceBuildNumber=8" not in notice.evidence[1].detail
+    assert "sourceBuildNumber=8" in notice.evidence[2].detail
+    assert "sourceBuildNumber=7" not in notice.evidence[2].detail
+
+
+def test_trusted_history_no_owner_rejects_current_or_future_source_and_unknown_match_type():
+    build_info = BuildInfo(job="job", buildNumber=9, result="FAILURE", buildUrl="local://9", branch="dev")
+    base_decision = {
+        "found": True,
+        "failureSignature": "sig-a",
+        "failureTitle": "failure A",
+        "sourceBuildNumber": 7,
+        "sourceBuildUrl": "local://7",
+        "matchType": "signature_exact",
+        "relationship": "very_likely_same_failure",
+        "reason": "same failure",
+    }
+    notice = _build_no_owner_notice_from_history_decision(
+        build_info=build_info,
+        base_commit="base",
+        head_commit="head",
+        decision=base_decision,
+        failure_summaries=None,
+        failure_facts=None,
+    )
+    item = notice.responsibilityItems[0]
+    assert item.sourceBuildNumber == 7
+
+    for invalid in (
+        {**base_decision, "sourceBuildNumber": 9},
+        {**base_decision, "sourceBuildNumber": 10},
+        {**base_decision, "matchType": "unknown_match"},
+    ):
+        clean = CiResponsibilityNotice.model_validate(notice.model_dump())
+        apply_history_no_owner_sources(clean, [invalid])
+        invalid_item = clean.responsibilityItems[0]
+        assert invalid_item.sourceBuildNumber is None
+        assert invalid_item.sourceBuildUrl is None
+        assert invalid_item.matchType is None
+        assert invalid_item.relationship is None
 
 
 def test_no_owner_decision_disabled_falls_back_to_agent(monkeypatch, repo_cache, sample_repo, logs):
@@ -775,6 +834,10 @@ def test_no_owner_decision_no_new_strong_evidence_checks_all_summaries():
             "allFailuresNoOwnerDecision": True,
             "coveredSignatures": ["sig-a", "sig-b"],
             "signature": {"signatureKey": "sig-a"},
+            "decisions": [
+                {"failureSignature": "sig-a", "signature": {"signatureKey": "sig-a", "errorType": "Timeout"}},
+                {"failureSignature": "sig-b", "signature": {"signatureKey": "sig-b", "errorType": "Timeout"}},
+            ],
         },
         failure_summaries={
             "chunks": [
@@ -802,6 +865,69 @@ def test_no_owner_decision_no_new_strong_evidence_checks_all_summaries():
         },
         failure_facts=None,
         changed_files=[ChangedFile(path="packages/fxp-ai/src/index.ts", status="M")],
+    )
+
+
+def test_no_owner_decision_aligns_heterogeneous_failures_without_false_positive():
+    decision = {
+        "allFailuresNoOwnerDecision": True,
+        "decisions": [
+            {"failureSignature": "sig-timeout", "signature": {"signatureKey": "sig-timeout", "errorType": "Timeout"}},
+            {"failureSignature": "sig-ts2305", "signature": {"signatureKey": "sig-ts2305", "errorCode": "TS2305"}},
+        ],
+    }
+    summaries = {
+        "chunks": [
+            {"signature": {"signatureKey": "sig-timeout", "errorType": "Timeout", "testFile": "test/a.test.ts"}, "signatureHash": "sig-timeout"},
+            {"signature": {"signatureKey": "sig-ts2305", "errorCode": "TS2305", "testFile": "test/b.test.ts"}, "signatureHash": "sig-ts2305"},
+        ]
+    }
+
+    assert not _has_new_strong_evidence(
+        decision=decision,
+        failure_summaries=summaries,
+        failure_facts=None,
+        changed_files=[ChangedFile(path="src/unrelated.ts", status="M")],
+    )
+
+
+def test_no_owner_decision_detects_changed_error_code_in_aligned_second_failure():
+    decision = {
+        "allFailuresNoOwnerDecision": True,
+        "decisions": [
+            {"failureSignature": "sig-timeout", "signature": {"signatureKey": "sig-timeout", "errorType": "Timeout"}},
+            {"failureSignature": "sig-ts", "signature": {"signatureKey": "sig-ts", "errorCode": "TS2305"}},
+        ],
+    }
+    summaries = {
+        "chunks": [
+            {"signature": {"signatureKey": "sig-timeout", "errorType": "Timeout"}, "signatureHash": "sig-timeout"},
+            {"signature": {"signatureKey": "sig-ts", "errorCode": "TS2307"}, "signatureHash": "sig-ts"},
+        ]
+    }
+
+    assert _has_new_strong_evidence(
+        decision=decision, failure_summaries=summaries, failure_facts=None, changed_files=[]
+    )
+
+
+def test_no_owner_decision_unaligned_failures_reanalyze_conservatively():
+    assert _has_new_strong_evidence(
+        decision={
+            "allFailuresNoOwnerDecision": True,
+            "decisions": [
+                {"failureSignature": "sig-a", "signature": {"signatureKey": "sig-a", "errorType": "Timeout"}},
+                {"failureSignature": "sig-other", "signature": {"signatureKey": "sig-other", "errorType": "Timeout"}},
+            ],
+        },
+        failure_summaries={
+            "chunks": [
+                {"signature": {"signatureKey": "sig-a", "errorType": "Timeout"}, "signatureHash": "sig-a"},
+                {"signature": {"signatureKey": "sig-b", "errorType": "Timeout"}, "signatureHash": "sig-b"},
+            ]
+        },
+        failure_facts=None,
+        changed_files=[],
     )
 
 

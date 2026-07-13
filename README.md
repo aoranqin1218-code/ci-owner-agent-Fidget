@@ -320,6 +320,8 @@ CI_AGENT_FAILURE_CHUNK_TAIL_LINES=500
 
 历史不仅可以继承责任人，也可以继承 no-owner 判定。这个短路主要用于 Timeout / AwaitFunc / 环境抖动 / 异步等待类失败；只有当前 build 的所有失败项都被历史 no-owner 覆盖、没有可继承责任人、且没有新的错误码/失败路径等强证据时才会触发。多失败 build 中如果还有未覆盖的新失败项，会继续进入 Agent 分析；如果需要强制重新分析，可设置 `CI_AGENT_HISTORY_INHERIT_NO_OWNER_ENABLED=false`。
 
+历史 no-owner 的来源构建、匹配类型和关系只由 orchestrator 根据已验证的 history precheck 在本地确定性补充。模型输出的普通 no-owner 项不能自行声明历史来源，相关字段会在校验时清空。测试维护人仍然只参与企业微信通知路由，不会写入任何 owner 字段。
+
 历史持续失败会优先继承 owner 或 no-owner，不重复分析大 diff。首次出现失败则优先分析 previous build 到 current build 的 focusRange；证据不足时才扩大到 last successful build 到 current build 的 fullRange。
 
 ### 4.7 metrics 配置
