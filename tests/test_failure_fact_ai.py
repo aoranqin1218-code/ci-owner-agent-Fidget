@@ -220,3 +220,43 @@ def test_extract_failure_facts_filters_low_confidence(monkeypatch):
     )
     assert result.ok is True
     assert result.facts == []
+
+
+def test_extract_failure_facts_keeps_valid_fact_and_downgrades_invalid_fact(monkeypatch):
+    result = _extract(
+        _settings(),
+        monkeypatch,
+        {
+            "ok": True,
+            "facts": [
+                {
+                    "signatureKey": "model-ts2305",
+                    "historyEligible": True,
+                    "isGenericWrapper": False,
+                    "failureKind": "typescript_compile_error",
+                    "errorCode": "TS2305",
+                    "message": "Module has no exported member classifyErrorMessage",
+                    "rootCauseSummary": "missing exported symbol",
+                    "confidence": 0.95,
+                },
+                {
+                    "signatureKey": "model-only-shell",
+                    "historyEligible": True,
+                    "isGenericWrapper": False,
+                    "failureKind": "",
+                    "message": "",
+                    "rootCauseSummary": "",
+                    "confidence": 0.99,
+                },
+            ],
+        },
+    )
+
+    assert result.ok is True
+    assert len(result.facts) == 2
+    valid, invalid = result.facts
+    assert valid.historyEligible is True
+    assert valid.isGenericWrapper is False
+    assert invalid.signatureKey == "unknown_failure"
+    assert invalid.historyEligible is False
+    assert invalid.isGenericWrapper is True

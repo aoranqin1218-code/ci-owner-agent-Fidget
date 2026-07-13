@@ -10,6 +10,7 @@ from ci_owner_agent.services.failure_identity import (
     build_responsibility_signature,
     canonicalize_failure_message,
     canonicalize_failure_signature,
+    has_meaningful_failure_identity,
 )
 
 
@@ -79,6 +80,38 @@ def test_dynamic_values_are_canonicalized(value, placeholder):
     assert placeholder in canonicalize_failure_message(value)
 
 
+@pytest.mark.parametrize(
+    ("value", "terms"),
+    [
+        ("typescript_compile_error_ts2305_classifyErrorMessage", ("ts2305", "classifyerrormessage")),
+        ("workflow_back_task_timeout_123456789012", ("workflow", "back_task", "timeout")),
+        ("payment_order_retry_stage_20260713", ("payment", "retry")),
+        ("module_resolution_error_ts2305_export_symbol", ("module", "ts2305", "symbol")),
+        ("BackTaskCmdTest_retry_123456789012", ("backtaskcmdtest", "retry")),
+        ("server_workflow_MongoQueryRunner_insert_20260713", ("workflow", "mongoqueryrunner", "insert")),
+    ],
+)
+def test_long_semantic_identifiers_are_preserved(value, terms):
+    canonical = canonicalize_failure_signature(value)
+    assert canonical != "<random>"
+    assert "<random>" not in canonical
+    assert all(term in canonical for term in terms)
+
+
+@pytest.mark.parametrize(
+    ("value", "placeholder"),
+    [
+        ("requestId=abcdef1234567890abcdef1234567890", "<requestid>"),
+        ("traceId:abcdef1234567890abcdef1234567890", "<traceid>"),
+        ("sessionId=abcdef1234567890abcdef1234567890", "<sessionid>"),
+        ("correlationId=abcdef1234567890abcdef1234567890", "<correlationid>"),
+        ("1234567890abcdef1234567890abcdef12345678", "<hash>"),
+    ],
+)
+def test_explicit_long_dynamic_values_are_still_canonicalized(value, placeholder):
+    assert placeholder in canonicalize_failure_message(value)
+
+
 def test_line_numbers_are_removed_but_path_is_preserved():
     assert canonicalize_failure_message("test/a.ts:12:3 server/a.ts:80") == "test/a.ts server/a.ts"
 
@@ -133,4 +166,52 @@ def test_ineligible_failure_fact_still_has_stable_identity():
     second = first.model_copy(update={"signatureKey": f"generic-{OBJECT_B}", "message": f"wrapper id={OBJECT_B}", "factId": None})
     second = FailureFact.model_validate(second.model_dump())
     assert build_failure_fact_signature(first) == build_failure_fact_signature(second)
+    assert first.factId == second.factId
+
+
+@pytest.mark.parametrize(
+    ("message", "root_cause"),
+    [
+        ("", ""),
+        (f"ObjectId('{OBJECT_A}')", "<timestamp>"),
+        ("ERROR: process did not complete successfully", "generic wrapper"),
+    ],
+)
+def test_unusable_failure_fact_is_downgraded(message, root_cause):
+    fact = FailureFact(
+        signatureKey="model_claimed_identity",
+        historyEligible=True,
+        isGenericWrapper=False,
+        failureKind="",
+        message=message,
+        rootCauseSummary=root_cause,
+        confidence=0.99,
+    )
+
+    assert fact.signatureKey == "unknown_failure"
+    assert fact.historyEligible is False
+    assert fact.isGenericWrapper is True
+    assert re.fullmatch(r"fact-[0-9a-f]{12}", fact.factId or "")
+    assert has_meaningful_failure_identity(fact) is False
+
+
+def test_unknown_failure_fact_id_is_stable():
+    first = FailureFact(
+        signatureKey="first-model-shell",
+        historyEligible=True,
+        failureKind="",
+        message="",
+        rootCauseSummary="",
+        confidence=0.99,
+    )
+    second = FailureFact(
+        signatureKey="second-model-shell",
+        historyEligible=True,
+        failureKind="",
+        message=f"ObjectId('{OBJECT_B}')",
+        rootCauseSummary="<uuid>",
+        confidence=0.99,
+    )
+
+    assert first.signatureKey == second.signatureKey == "unknown_failure"
     assert first.factId == second.factId

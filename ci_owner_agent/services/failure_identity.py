@@ -21,7 +21,38 @@ TEMP_PATH_RE = re.compile(
     r"(?i)(?:[A-Za-z]:)?(?:[/\\](?:users[/\\][^/\\\s]+[/\\]appdata[/\\]local[/\\]temp|tmp|var[/\\]tmp))[/\\][^\s'\"]+"
 )
 HASH_RE = re.compile(r"(?<![A-Za-z0-9])[0-9a-f]{7,64}(?![A-Za-z0-9])", re.I)
-LONG_RANDOM_RE = re.compile(r"(?<![A-Za-z0-9])(?=[A-Za-z0-9_-]{32,}(?![A-Za-z0-9]))(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]+")
+
+DYNAMIC_PLACEHOLDER_RE = re.compile(
+    r"(?:(?:request|trace|session|correlation)id[=:_-]*)?"
+    r"<(?:object_id|uuid|timestamp|duration|tmp_path|port|requestid|traceid|sessionid|correlationid|hash|random)>",
+    re.I,
+)
+UNUSABLE_IDENTITY_VALUES = {"unknown_failure", "unusable_failure_identity", "generic_wrapper"}
+GENERIC_WRAPPER_WORDS = {
+    "build",
+    "buildkit",
+    "code",
+    "command",
+    "complete",
+    "did",
+    "docker",
+    "error",
+    "exit",
+    "failed",
+    "failure",
+    "generic",
+    "jenkins",
+    "make",
+    "not",
+    "only",
+    "outer",
+    "process",
+    "returned",
+    "script",
+    "shell",
+    "successfully",
+    "wrapper",
+}
 
 MONGO_COLLECTION_RE = re.compile(r"(?i)\bcollection\s*:\s*([A-Za-z0-9_.-]+)")
 MONGO_INDEX_RE = re.compile(r"(?i)\bindex(?:\s+name)?\s*:\s*([^\s,}]+)")
@@ -55,7 +86,6 @@ def _normalize_failure_message(value: str | None, *, lowercase: bool) -> str:
     text = TEMP_PATH_RE.sub("<tmp_path>", text)
     text = LINE_COL_RE.sub("", text)
     text = HASH_RE.sub("<hash>", text)
-    text = LONG_RANDOM_RE.sub("<random>", text)
     text = text.replace("\\", "/")
     if lowercase:
         text = text.lower()
@@ -79,6 +109,8 @@ def build_failure_fact_signature(fact: Any) -> str:
     mongo = _mongodb_duplicate_key_signature(values)
     if mongo:
         return mongo
+    if not has_meaningful_failure_identity(fact):
+        return "unknown_failure"
     structured = [
         values.get("failureKind"),
         values.get("errorCode"),
@@ -90,9 +122,20 @@ def build_failure_fact_signature(fact: Any) -> str:
         values.get("message"),
     ]
     parts = [canonicalize_failure_signature(str(value)) for value in structured if str(value or "").strip()]
-    if not parts:
-        parts = [canonicalize_failure_signature(values.get("signatureKey"))]
     return "|".join(part for part in parts if part) or "unknown_failure"
+
+
+def has_meaningful_failure_identity(fact: Any) -> bool:
+    if bool(_fact_value(fact, "isGenericWrapper")):
+        return False
+
+    for key in ("failureKind", "errorCode", "errorType", "packageName", "filePath", "symbol"):
+        if _has_meaningful_identity_text(_fact_value(fact, key)):
+            return True
+    return any(
+        _has_meaningful_identity_text(_fact_value(fact, key))
+        for key in ("rootCauseSummary", "message")
+    )
 
 
 def build_failure_summary_signature(signature: Mapping[str, Any] | None) -> str:
@@ -190,6 +233,21 @@ def _fact_values(fact: Any) -> dict[str, Any]:
     if isinstance(fact, Mapping):
         return {key: fact.get(key) for key in keys}
     return {key: getattr(fact, key, None) for key in keys}
+
+
+def _fact_value(fact: Any, key: str) -> Any:
+    return fact.get(key) if isinstance(fact, Mapping) else getattr(fact, key, None)
+
+
+def _has_meaningful_identity_text(value: Any) -> bool:
+    canonical = canonicalize_failure_signature(str(value or ""))
+    if not canonical or canonical in UNUSABLE_IDENTITY_VALUES:
+        return False
+    without_dynamic_values = DYNAMIC_PLACEHOLDER_RE.sub("", canonical).strip("_| -")
+    if not without_dynamic_values:
+        return False
+    words = set(re.findall(r"[a-z0-9]+", without_dynamic_values))
+    return bool(words) and not words.issubset(GENERIC_WRAPPER_WORDS)
 
 
 def _first_match(pattern: re.Pattern[str], value: str) -> str | None:

@@ -7,6 +7,7 @@ from ci_owner_agent.services.feedback_store import FeedbackStore
 from ci_owner_agent.services.notification_formatter import notification_digest
 from ci_owner_agent.services.responsibility_signature_enricher import enrich_responsibility_item_signatures
 from tests.test_history_store import make_store
+from tests.test_notification_formatter import item, notice_payload
 
 
 OBJECT_A = "6a546a6c5740ffb771af5462"
@@ -136,3 +137,61 @@ def test_same_canonical_fact_is_recalled_and_feedback_uses_canonical_signature()
         action="mark_flaky",
     )["feedback"]
     assert OBJECT_B not in (feedback["failureSignature"] or "")
+
+
+def test_distinct_long_semantic_identities_do_not_collide_or_reuse_feedback():
+    first_signature = "typescript_compile_error_ts2305_classifyErrorMessage"
+    second_signature = "workflow_back_task_timeout_123456789012"
+
+    def make_notice(signature: str) -> CiResponsibilityNotice:
+        responsibility = item()
+        responsibility["failureTitle"] = signature
+        responsibility["failureSignature"] = signature
+        responsibility["failureSummary"] = "semantic failure"
+        return CiResponsibilityNotice.model_validate(notice_payload([responsibility]))
+
+    first_notice = make_notice(first_signature)
+    second_notice = make_notice(second_signature)
+    first_fact = FailureFact(
+        signatureKey="ignored-model-value",
+        historyEligible=True,
+        failureKind=first_signature,
+        message="semantic failure",
+        rootCauseSummary="semantic failure",
+        confidence=0.95,
+    )
+    second_fact = FailureFact(
+        signatureKey="ignored-model-value",
+        historyEligible=True,
+        failureKind=second_signature,
+        message="semantic failure",
+        rootCauseSummary="semantic failure",
+        confidence=0.95,
+    )
+
+    first_item = first_notice.responsibilityItems[0]
+    second_item = second_notice.responsibilityItems[0]
+    assert first_item.failureSignature != second_item.failureSignature
+    assert first_item.failureId != second_item.failureId
+    assert first_fact.factId != second_fact.factId
+    assert notification_digest(first_notice) != notification_digest(second_notice)
+
+    store = make_store()
+    build = BuildInfo(
+        job=first_notice.job,
+        buildNumber=first_notice.buildNumber,
+        result=first_notice.result,
+        buildUrl=first_notice.buildUrl,
+        branch=first_notice.branch,
+        commit=first_notice.headCommit,
+    )
+    store.save_analysis(build, first_notice, first_notice.baseCommit, first_notice.headCommit, None, None, [])
+    feedback = FeedbackStore(store).apply_feedback(
+        job=first_notice.job,
+        build_number=first_notice.buildNumber,
+        failure_id=None,
+        failure_signature=second_signature,
+        action="mark_flaky",
+    )["feedback"]
+    assert feedback["failureId"] is None
+    assert feedback["failureSignature"] == second_item.failureSignature

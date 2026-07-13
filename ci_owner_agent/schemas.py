@@ -156,14 +156,21 @@ class FailureFact(StrictModel):
 
     @model_validator(mode="after")
     def normalize_fact(self) -> "FailureFact":
-        from ci_owner_agent.services.failure_identity import build_failure_fact_signature, canonicalize_failure_message
+        from ci_owner_agent.services.failure_identity import (
+            build_failure_fact_signature,
+            canonicalize_failure_message,
+            has_meaningful_failure_identity,
+        )
 
         self.confidence = max(0, min(float(self.confidence or 0), 1))
-        self.signatureKey = build_failure_fact_signature(self)
-        self.factId = stable_failure_fact_id(self)
         self.message = canonicalize_failure_message(self.message)
         self.rootCauseSummary = canonicalize_failure_message(self.rootCauseSummary)
         self.evidenceLines = [canonicalize_failure_message(line) for line in self.evidenceLines]
+        self.signatureKey = build_failure_fact_signature(self)
+        if self.signatureKey == "unknown_failure" or not has_meaningful_failure_identity(self):
+            self.historyEligible = False
+            self.isGenericWrapper = True
+        self.factId = stable_failure_fact_id(self)
         return self
 
 

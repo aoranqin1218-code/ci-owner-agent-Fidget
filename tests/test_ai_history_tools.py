@@ -160,6 +160,37 @@ def test_ai_history_filters_current_generic_fact(monkeypatch, repo_cache, sample
     assert result["candidates"] == []
 
 
+def test_unknown_failure_does_not_enter_ai_history(monkeypatch, repo_cache, sample_repo, logs):
+    def unexpected_compare(**kwargs):
+        raise AssertionError("unknown_failure must not invoke AI comparison")
+
+    monkeypatch.setattr("ci_owner_agent.tools.ai_history_tools.compare_failure_facts_with_ai", unexpected_compare)
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    store = make_store()
+    _save_fact(store, context, build=7, fact=make_fact())
+    unknown = FailureFact(
+        signatureKey="model-only-shell",
+        historyEligible=True,
+        isGenericWrapper=False,
+        failureKind="",
+        message="",
+        rootCauseSummary="",
+        confidence=0.99,
+    )
+
+    result = history_search_similar_failure_facts(_context(context, facts=[unknown]), store=store)
+
+    current = result["currentFacts"][0]
+    diagnostics = result["diagnostics"]
+    assert current["blockedReason"] == "blocked_by_generic_wrapper"
+    assert current["inheritedOwner"]["found"] is False
+    assert current["noOwnerDecision"]["found"] is False
+    assert diagnostics["eligibleCurrentFactsCount"] == 0
+    assert diagnostics["rankedPairsCount"] == 0
+    assert diagnostics["comparedPairsCount"] == 0
+    assert result["candidates"] == []
+
+
 def test_ai_history_ts2305_vs_etarget_not_inherited(monkeypatch, repo_cache, sample_repo, logs):
     monkeypatch.setattr("ci_owner_agent.tools.ai_history_tools.compare_failure_facts_with_ai", lambda **kwargs: _different())
     context = make_lc_context(repo_cache, sample_repo, logs)
