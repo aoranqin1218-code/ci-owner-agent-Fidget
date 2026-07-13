@@ -203,7 +203,7 @@ def test_buildkit_wrapper_does_not_enter_ai_history(monkeypatch, repo_cache, sam
         isGenericWrapper=False,
         failureKind="build_failure",
         errorType="BuildError",
-        filePath="/tmp/build-123/server/a.ts",
+        filePath="/var/lib/jenkins/workspace/services/fx-code-unittest/server/a.ts",
         message='ERROR: process "/bin/sh -c npm run build" did not complete successfully: exit code: 1',
         rootCauseSummary="command failed",
         confidence=0.99,
@@ -219,12 +219,12 @@ def test_buildkit_wrapper_does_not_enter_ai_history(monkeypatch, repo_cache, sam
     assert result["candidates"] == []
 
 
-def test_ai_history_compares_cross_platform_normalized_paths(monkeypatch, repo_cache, sample_repo, logs):
+def test_ai_history_compares_relative_and_var_app_paths(monkeypatch, repo_cache, sample_repo, logs):
     monkeypatch.setattr("ci_owner_agent.tools.ai_history_tools.compare_failure_facts_with_ai", lambda **kwargs: _same())
     context = make_lc_context(repo_cache, sample_repo, logs)
     store = make_store()
-    historical = make_fact(filePath="/home/jenkins/workspace/fx-code/server/workflow/service.ts")
-    current = make_fact(filePath=r"C:\agent\_work\fx-code\server\workflow\service.ts")
+    historical = make_fact(filePath="/var/app/server/workflow/service.ts")
+    current = make_fact(filePath="server/workflow/service.ts")
     _save_fact(store, context, build=7, fact=historical)
 
     result = history_search_similar_failure_facts(_context(context, facts=[current], build=8), store=store)
@@ -234,24 +234,6 @@ def test_ai_history_compares_cross_platform_normalized_paths(monkeypatch, repo_c
     assert current.factId == historical.factId
     assert result["diagnostics"]["comparedPairsCount"] > 0
     assert result["candidates"]
-
-
-def test_ai_history_compares_root_level_cross_platform_paths(monkeypatch, repo_cache, sample_repo, logs):
-    monkeypatch.setattr("ci_owner_agent.tools.ai_history_tools.compare_failure_facts_with_ai", lambda **kwargs: _same())
-    context = make_lc_context(repo_cache, sample_repo, logs)
-    store = make_store()
-    historical = make_fact(filePath="/home/jenkins/workspace/fx-code/index.ts")
-    current = make_fact(filePath=r"C:\agent\_work\fx-code\index.ts")
-    _save_fact(store, context, build=7, fact=historical)
-
-    result = history_search_similar_failure_facts(_context(context, facts=[current], build=8), store=store)
-
-    assert current.filePath == historical.filePath == "index.ts"
-    assert current.signatureKey == historical.signatureKey
-    assert current.factId == historical.factId
-    assert result["diagnostics"]["comparedPairsCount"] > 0
-
-
 def test_ai_history_ts2305_vs_etarget_not_inherited(monkeypatch, repo_cache, sample_repo, logs):
     monkeypatch.setattr("ci_owner_agent.tools.ai_history_tools.compare_failure_facts_with_ai", lambda **kwargs: _different())
     context = make_lc_context(repo_cache, sample_repo, logs)

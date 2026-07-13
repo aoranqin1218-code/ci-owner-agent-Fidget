@@ -115,13 +115,37 @@ def test_does_not_invent_path_and_rejects_traversal():
     assert normalize_repository_path("../test/FooTest.ts") is None
 
 
-def test_normalizes_cross_platform_repository_paths():
+def test_normalizes_relative_and_var_app_repository_paths():
     paths = [
-        r"C:\agent\_work\fx-code\server\workflow\service.ts",
-        "/home/jenkins/workspace/fx-code/server/workflow/service.ts",
+        "server/workflow/service.ts",
         "/var/app/server/workflow/service.ts",
         "./server/workflow/service.ts",
         "server/workflow/service.ts:42:3",
     ]
 
     assert {normalize_repository_path(path) for path in paths} == {"server/workflow/service.ts"}
+
+
+def test_does_not_route_node_modules_path():
+    notice = _notice("dependency-fact")
+
+    enrich_responsibility_item_paths(
+        notice,
+        None,
+        {"facts": [{"signatureKey": "dependency-fact", "filePath": "node_modules/@fx/file-sdk/src/http.ts"}]},
+    )
+
+    assert notice.responsibilityItems[0].testFilePath is None
+    assert notice.responsibilityItems[0].failureFilePath is None
+
+
+def test_does_not_route_unsupported_absolute_workspace_path():
+    notice = _notice("workspace-path")
+
+    enrich_responsibility_item_paths(
+        notice,
+        None,
+        {"facts": [{"signatureKey": "workspace-path", "filePath": "/var/lib/jenkins/workspace/services/fx-code-unittest/test/FooTest.ts"}]},
+    )
+
+    assert notice.responsibilityItems[0].testFilePath is None

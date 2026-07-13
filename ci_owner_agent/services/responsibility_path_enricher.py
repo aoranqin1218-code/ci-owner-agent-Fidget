@@ -13,9 +13,21 @@ _PATH_RE = re.compile(
     re.IGNORECASE,
 )
 _TEST_SUFFIX_RE = re.compile(r"(?:\.test|\.spec)\.(?:ts|tsx|js|jsx)$|Test\.(?:ts|tsx|js|jsx)$")
-def is_test_file_path(value: str | None) -> bool:
+
+
+def is_routable_repository_path(value: str | None) -> bool:
     path = normalize_repository_path(value)
-    if not path:
+    return bool(path and not path.startswith("node_modules/"))
+
+
+def _routable_repository_path(value: str | None) -> str | None:
+    path = normalize_repository_path(value)
+    return path if path and is_routable_repository_path(path) else None
+
+
+def is_test_file_path(value: str | None) -> bool:
+    path = _routable_repository_path(value)
+    if path is None:
         return False
     lower = path.lower()
     if any(segment in {"test", "tests", "__tests__"} for segment in lower.split("/")):
@@ -35,13 +47,13 @@ def enrich_responsibility_item_paths(
     evidence_by_id = {item.id: item for item in notice.evidence}
 
     for item in notice.responsibilityItems:
-        item.testFilePath = normalize_repository_path(item.testFilePath)
-        item.failureFilePath = normalize_repository_path(item.failureFilePath)
+        item.testFilePath = _routable_repository_path(item.testFilePath)
+        item.failureFilePath = _routable_repository_path(item.failureFilePath)
         signature = str(item.failureSignature or "")
         summary = summary_by_signature.get(signature)
         if summary:
-            summary_test_path = normalize_repository_path(summary.get("testFile"))
-            summary_failure_path = normalize_repository_path(summary.get("topStackFile"))
+            summary_test_path = _routable_repository_path(summary.get("testFile"))
+            summary_failure_path = _routable_repository_path(summary.get("topStackFile"))
             if summary_test_path and not item.testFilePath:
                 item.testFilePath = summary_test_path
             if summary_failure_path and not item.failureFilePath:
@@ -49,7 +61,7 @@ def enrich_responsibility_item_paths(
 
         fact = fact_by_signature.get(signature)
         if fact:
-            fact_path = normalize_repository_path(fact.get("filePath"))
+            fact_path = _routable_repository_path(fact.get("filePath"))
             if is_test_file_path(fact_path):
                 if fact_path and not item.testFilePath:
                     item.testFilePath = fact_path
@@ -91,7 +103,7 @@ def _failure_facts(failure_facts: dict | None) -> dict[str, dict]:
 def _first_test_path(texts: Iterable[str | None]) -> str | None:
     for text in texts:
         for match in _PATH_RE.finditer(str(text or "")):
-            path = normalize_repository_path(match.group("path"))
+            path = _routable_repository_path(match.group("path"))
             if is_test_file_path(path):
                 return path
     return None

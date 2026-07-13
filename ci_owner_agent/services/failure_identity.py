@@ -468,14 +468,9 @@ def is_meaningful_source_path(value: str | None) -> bool:
         return False
     lower_path = path.lower()
     filename = lower_path.rsplit("/", 1)[-1]
-    if filename in GENERIC_BUILD_FILES or not any(lower_path.endswith(extension) for extension in SOURCE_FILE_EXTENSIONS):
+    if filename in GENERIC_BUILD_FILES:
         return False
-    raw_path = raw.replace("\\", "/").lower()
-    if any(marker in raw_path for marker in ("/tmp/", "/var/tmp/", "/bin/", "/usr/bin/", "/appdata/local/temp/")):
-        return False
-    if re.match(r"^(?:[a-z]:)?/", raw_path) and not any(segment in lower_path.split("/") for segment in REPOSITORY_ROOT_SEGMENTS):
-        return False
-    return True
+    return any(lower_path.endswith(extension) for extension in SOURCE_FILE_EXTENSIONS)
 
 
 def is_meaningful_symbol(value: str | None) -> bool:
