@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import uuid
 from typing import Any
 
 from ci_owner_agent.schemas import Owner
@@ -41,6 +42,7 @@ class FeedbackStore:
         reviewer_wecom_userid: str | None = None,
         note: str | None = None,
         source: str = "cli",
+        operation_id: str | None = None,
     ) -> dict[str, Any]:
         repo = str(repo or "").strip()
         branch = str(branch or "").strip()
@@ -63,8 +65,12 @@ class FeedbackStore:
         if item is None:
             raise ValueError("failure item no longer exists in the current notice")
         failure_id = item.get("failureId")
-        failure_signature = item.get("failureSignature") or _canonical_signature(item.get("failureSignature"))
+        failure_signature = canonical_item_signature(item)
         feedback_item_key = build_feedback_item_key(item)
+        operation_id = operation_id or uuid.uuid4().hex
+        existing_operation = self.collection.find_one({"operationId": operation_id})
+        if existing_operation:
+            return {"ok": True, "feedback": existing_operation}
         build_url = (notice_doc.get("notice") or {}).get("buildUrl")
         original_owner = (item.get("owner") if item else None) or ((notice_doc.get("notice") or {}).get("owner"))
         corrected_owner = None
@@ -87,6 +93,7 @@ class FeedbackStore:
             "failureId": failure_id,
             "failureSignature": failure_signature,
             "feedbackItemKey": feedback_item_key,
+            "operationId": operation_id,
             "action": action,
             "originalOwner": original_owner,
             "correctedOwner": corrected_owner,
@@ -127,18 +134,25 @@ class FeedbackStore:
         requested_signature = _canonical_signature(failure_signature)
         if failure_id and requested_signature:
             for item in notice.get("responsibilityItems") or []:
-                if item.get("failureId") == failure_id and _canonical_signature(item.get("failureSignature")) == requested_signature:
+                if item.get("failureId") == failure_id and canonical_item_signature(item) == requested_signature:
                     return notice_doc, item
             raise ValueError("failure id and signature do not identify the same current notice item")
         for item in notice.get("responsibilityItems") or []:
             if failure_id and item.get("failureId") == failure_id:
                 return notice_doc, item
-            if requested_signature and _canonical_signature(item.get("failureSignature")) == requested_signature:
+            if failure_signature and item.get("failureSignature") == failure_signature:
+                return notice_doc, item
+            if requested_signature and canonical_item_signature(item) == requested_signature:
                 return notice_doc, item
         return notice_doc, None
 
     def _deactivate_active(self, scope, key, failure_id, failure_signature, now):
-        query = {**scope, "isActive": True, "$or": [{"feedbackItemKey": key}, {"failureId": failure_id}, {"failureSignature": failure_signature}]}
+        clauses = [{"feedbackItemKey": key}]
+        if failure_id:
+            clauses.append({"failureId": failure_id})
+        if failure_signature:
+            clauses.append({"failureSignature": failure_signature})
+        query = {**scope, "isActive": True, "$or": clauses}
         self.collection.update_many(query, {"$set": {"isActive": False, "updatedAt": now}})
 
 
@@ -151,10 +165,20 @@ def build_feedback_item_key(item: dict[str, Any]) -> str:
     failure_id = str(item.get("failureId") or "").strip()
     if failure_id:
         return f"id:{failure_id}"
-    signature = _canonical_signature(item.get("failureSignature"))
+    signature = canonical_item_signature(item)
     if signature:
         return f"sig:{signature}"
     raise ValueError("failure item has no stable identity")
+
+
+def canonical_item_signature(item: dict[str, Any]) -> str | None:
+    signature = build_responsibility_signature(
+        failure_title=item.get("failureTitle"), failure_summary=item.get("failureSummary"),
+        existing_signature=item.get("failureSignature"), error_code=item.get("errorCode"),
+        error_type=item.get("errorType"), failure_kind=item.get("failureKind"),
+        test_file_path=item.get("testFilePath"), failure_file_path=item.get("failureFilePath"),
+    )
+    return None if signature == "unknown_failure" else signature
 
 
 def _responsibility_type_for_action(action: str) -> str | None:

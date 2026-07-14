@@ -180,6 +180,20 @@ def test_id_and_signature_must_identify_same_notice_item():
     assert (result["failureId"], result["failureSignature"], result["feedbackItemKey"]) == ("current", "current-sig", "id:current")
 
 
+def test_feedback_for_two_items_without_signatures_remains_independent():
+    store = make_store()
+    key = {"repo": "repo", "job": "job", "branch": "dev", "buildNumber": 1}
+    items = [{"failureId": "A", "failureSignature": None}, {"failureId": "B", "failureSignature": None}]
+    store.notices.update_one(key, {"$set": {**key, "notice": {"responsibilityItems": items}}}, upsert=True)
+    feedback = FeedbackStore(store)
+    feedback.apply_feedback(repo="repo", job="job", branch="dev", build_number=1, failure_id="A", failure_signature=None, action="mark_flaky")
+    feedback.apply_feedback(repo="repo", job="job", branch="dev", build_number=1, failure_id="B", failure_signature=None, action="mark_no_owner")
+    feedback.apply_feedback(repo="repo", job="job", branch="dev", build_number=1, failure_id="A", failure_signature=None, action="confirm_owner")
+    active = {doc["failureId"]: doc for doc in store.feedback.docs if doc["isActive"]}
+    assert set(active) == {"A", "B"}
+    assert active["A"]["action"] == "confirm_owner"
+
+
 def test_concurrent_feedback_keeps_one_active_audit_history():
     store = make_store()
     key = {"repo": "repo", "job": "job", "branch": "dev", "buildNumber": 1}

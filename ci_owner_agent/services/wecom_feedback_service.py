@@ -108,6 +108,7 @@ class WeComFeedbackService:
                 reviewer_wecom_userid=pending.get("senderUserId"),
                 note=intent.note,
                 source="wecom_bot",
+                operation_id=pending.get("operationId"),
             )
         except StaleFeedbackError:
             self.pending.mark_stale(pending, "责任项在确认前已更新")
