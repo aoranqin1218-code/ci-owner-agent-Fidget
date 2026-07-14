@@ -99,6 +99,7 @@ def build_parser() -> argparse.ArgumentParser:
     feedback = subparsers.add_parser("feedback", help="Manage manual feedback")
     feedback_sub = feedback.add_subparsers(dest="feedback_command", required=True)
     apply = feedback_sub.add_parser("apply")
+    apply.add_argument("--repo", required=True)
     apply.add_argument("--job", required=True)
     apply.add_argument("--build", type=int, required=True)
     apply.add_argument("--failure-id", default=None)
@@ -112,6 +113,7 @@ def build_parser() -> argparse.ArgumentParser:
     apply.add_argument("--reviewer", default=None)
     apply.add_argument("--note", default=None)
     list_cmd = feedback_sub.add_parser("list")
+    list_cmd.add_argument("--repo", required=True)
     list_cmd.add_argument("--job", required=True)
     list_cmd.add_argument("--build", type=int, required=True)
     return parser
@@ -291,6 +293,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.feedback_command == "apply":
             try:
                 result = feedback_store.apply_feedback(
+                    repo=args.repo,
                     job=args.job,
                     build_number=args.build,
                     failure_id=args.failure_id,
@@ -310,7 +313,7 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
             return 0
         if args.feedback_command == "list":
-            print(json.dumps(feedback_store.list_feedback(job=args.job, build_number=args.build), ensure_ascii=False, indent=2, default=str))
+            print(json.dumps(feedback_store.list_feedback(repo=args.repo, job=args.job, build_number=args.build), ensure_ascii=False, indent=2, default=str))
             return 0
     if args.command == "serve-feedback":
         try:

@@ -25,22 +25,23 @@ def create_app(settings: Settings | None = None, history_store: MongoHistoryStor
         return {"ok": True}
 
     @app.get("/feedback", response_class=HTMLResponse)
-    def feedback_page(job: str = Query(...), build: int = Query(...), token: str | None = Query(default=None)) -> HTMLResponse:
+    def feedback_page(repo: str = Query(...), job: str = Query(...), build: int = Query(...), token: str | None = Query(default=None)) -> HTMLResponse:
         forbidden = _forbidden_response(app_settings, token)
         if forbidden is not None:
             return forbidden
         store = _store_for_request(app)
         if store is None:
             return _html_error("history store unavailable", 500)
-        notice_doc = store.notices.find_one({"job": job, "buildNumber": build})
+        notice_doc = store.notices.find_one({"repo": repo, "job": job, "buildNumber": build})
         if not notice_doc:
             return _html_error("notice not found", 404)
-        feedback_docs = list(store.feedback.find({"job": job, "buildNumber": build, "isActive": True}))
+        feedback_docs = list(store.feedback.find({"repo": repo, "job": job, "buildNumber": build, "isActive": True}))
         return HTMLResponse(_render_feedback_page(notice_doc, feedback_docs, token))
 
     @app.post("/feedback", response_class=HTMLResponse)
     async def submit_feedback(request: Request):
         form = _parse_form(await request.body())
+        repo = form.get("repo") or ""
         job = form.get("job") or ""
         token = form.get("token")
         forbidden = _forbidden_response(app_settings, token)
@@ -53,10 +54,13 @@ def create_app(settings: Settings | None = None, history_store: MongoHistoryStor
         store = _store_for_request(app)
         if store is None:
             return _html_error("history store unavailable", 500)
-        if not store.notices.find_one({"job": job, "buildNumber": build}):
+        if not repo:
+            return _html_error("repo is required", 400)
+        if not store.notices.find_one({"repo": repo, "job": job, "buildNumber": build}):
             return _html_error("notice not found", 404)
         try:
             FeedbackStore(store).apply_feedback(
+                repo=repo,
                 job=job,
                 build_number=build,
                 failure_id=form.get("failureId") or None,
@@ -71,7 +75,7 @@ def create_app(settings: Settings | None = None, history_store: MongoHistoryStor
             )
         except ValueError as exc:
             return _html_error(str(exc), 400)
-        query = {"job": job, "build": build}
+        query = {"repo": repo, "job": job, "build": build}
         if token:
             query["token"] = token
         return RedirectResponse(f"/feedback?{urlencode(query)}", status_code=303)
@@ -111,6 +115,7 @@ def _parse_form(body: bytes) -> dict[str, str]:
 def _render_feedback_page(notice_doc: dict, feedback_docs: list[dict], token: str | None) -> str:
     notice = notice_doc.get("notice") or {}
     job = str(notice_doc.get("job") or notice.get("job") or "")
+    repo = str(notice_doc.get("repo") or notice.get("repo") or "")
     build = int(notice_doc.get("buildNumber") or notice.get("buildNumber") or 0)
     items = notice.get("responsibilityItems") or []
     feedback_by_failure = _feedback_by_failure(feedback_docs)
@@ -120,7 +125,7 @@ def _render_feedback_page(notice_doc: dict, feedback_docs: list[dict], token: st
             continue
         failure_id = str(item.get("failureId") or "")
         active_feedback = feedback_by_failure.get(failure_id) or feedback_by_failure.get(str(item.get("failureSignature") or ""))
-        item_blocks.append(_render_item(idx, job, build, item, active_feedback, token))
+        item_blocks.append(_render_item(idx, repo, job, build, item, active_feedback, token))
     if not item_blocks:
         item_blocks.append("<p class=\"muted\">未识别到独立责任项。</p>")
     build_url = str(notice.get("buildUrl") or "")
@@ -160,7 +165,7 @@ def _render_feedback_page(notice_doc: dict, feedback_docs: list[dict], token: st
 </html>"""
 
 
-def _render_item(idx: int, job: str, build: int, item: dict, feedback: dict | None, token: str | None) -> str:
+def _render_item(idx: int, repo: str, job: str, build: int, item: dict, feedback: dict | None, token: str | None) -> str:
     owner = item.get("owner") if isinstance(item.get("owner"), dict) else {}
     feedback_html = _render_feedback_status(feedback)
     hidden_token = f'<input type="hidden" name="token" value="{_e(token)}">' if token else ""
@@ -176,6 +181,7 @@ def _render_item(idx: int, job: str, build: int, item: dict, feedback: dict | No
   </dl>
   {feedback_html}
   <form method="post" action="/feedback">
+    <input type="hidden" name="repo" value="{_e(repo)}">
     <input type="hidden" name="job" value="{_e(job)}">
     <input type="hidden" name="build" value="{build}">
     <input type="hidden" name="failureId" value="{_e(item.get("failureId"))}">

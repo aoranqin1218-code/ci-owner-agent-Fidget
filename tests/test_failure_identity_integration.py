@@ -132,6 +132,7 @@ def test_same_canonical_fact_is_recalled_and_feedback_uses_canonical_signature()
     assert historical[0]["signatureKey"] == second.signatureKey
 
     feedback = FeedbackStore(store).apply_feedback(
+        repo="repo",
         job="job",
         build_number=7,
         failure_id=None,
@@ -189,6 +190,7 @@ def test_distinct_long_semantic_identities_do_not_collide_or_reuse_feedback():
     )
     store.save_analysis(build, first_notice, first_notice.baseCommit, first_notice.headCommit, None, None, [])
     feedback = FeedbackStore(store).apply_feedback(
+        repo=first_notice.repo,
         job=first_notice.job,
         build_number=first_notice.buildNumber,
         failure_id=None,

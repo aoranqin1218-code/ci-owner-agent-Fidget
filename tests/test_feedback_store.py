@@ -44,8 +44,8 @@ def test_correct_owner_writes_feedback_and_deactivates_old(repo_cache, sample_re
     notice = notice_with_item(context)
     save_history_build(store, context, 5099, notice, chunk)
     feedback = FeedbackStore(store)
-    first = feedback.apply_feedback(job=context.job, build_number=5099, failure_id=notice.responsibilityItems[0].failureId, failure_signature=None, action="correct_owner", owner_name="Li Si")
-    second = feedback.apply_feedback(job=context.job, build_number=5099, failure_id=notice.responsibilityItems[0].failureId, failure_signature=None, action="correct_owner", owner_name="Wang Wu")
+    first = feedback.apply_feedback(repo=context.repo, job=context.job, build_number=5099, failure_id=notice.responsibilityItems[0].failureId, failure_signature=None, action="correct_owner", owner_name="Li Si")
+    second = feedback.apply_feedback(repo=context.repo, job=context.job, build_number=5099, failure_id=notice.responsibilityItems[0].failureId, failure_signature=None, action="correct_owner", owner_name="Wang Wu")
     assert first["ok"] is True
     assert second["ok"] is True
     active = [doc for doc in store.feedback.docs if doc.get("isActive")]
@@ -58,13 +58,14 @@ def test_correct_owner_writes_feedback_and_deactivates_old(repo_cache, sample_re
 def test_correct_owner_requires_owner_name(repo_cache, sample_repo, logs):
     feedback = FeedbackStore(make_store())
     with pytest.raises(ValueError):
-        feedback.apply_feedback(job="job", build_number=1, failure_id="failure-x", failure_signature=None, action="correct_owner")
+        feedback.apply_feedback(repo="repo", job="job", build_number=1, failure_id="failure-x", failure_signature=None, action="correct_owner")
 
 
 def test_correct_owner_rejects_invalid_owner_type(repo_cache, sample_repo, logs):
     feedback = FeedbackStore(make_store())
     with pytest.raises(ValueError, match="owner-type for correct_owner"):
         feedback.apply_feedback(
+            repo="repo",
             job="job",
             build_number=1,
             failure_id="failure-x",
@@ -75,10 +76,24 @@ def test_correct_owner_rejects_invalid_owner_type(repo_cache, sample_repo, logs)
         )
 
 
-def test_mark_flaky_does_not_require_owner_name(repo_cache, sample_repo, logs):
-    result = FeedbackStore(make_store()).apply_feedback(job="job", build_number=1, failure_id="failure-x", failure_signature=None, action="mark_flaky")
-    assert result["ok"] is True
-    assert result["feedback"]["action"] == "mark_flaky"
+def test_feedback_requires_existing_notice(repo_cache, sample_repo, logs):
+    with pytest.raises(ValueError, match="notice not found for repo=repo, job=job, build=1"):
+        FeedbackStore(make_store()).apply_feedback(repo="repo", job="job", build_number=1, failure_id="failure-x", failure_signature=None, action="mark_flaky")
+
+
+def test_feedback_isolated_by_repo_and_requires_repo():
+    store = make_store()
+    store.notices.update_one(
+        {"repo": "repo-a", "job": "job", "buildNumber": 1},
+        {"$set": {"repo": "repo-a", "job": "job", "branch": "dev", "buildNumber": 1, "notice": {"responsibilityItems": []}}},
+        upsert=True,
+    )
+    feedback = FeedbackStore(store)
+    with pytest.raises(ValueError, match="repo is required"):
+        feedback.list_feedback(repo="", job="job", build_number=1)
+    feedback.apply_feedback(repo="repo-a", job="job", build_number=1, failure_id="failure-x", failure_signature=None, action="mark_flaky")
+    assert len(feedback.list_feedback(repo="repo-a", job="job", build_number=1)) == 1
+    assert feedback.list_feedback(repo="repo-b", job="job", build_number=1) == []
 
 
 def test_feedback_fills_original_owner_and_signature_from_notice(repo_cache, sample_repo, logs):
@@ -88,6 +103,7 @@ def test_feedback_fills_original_owner_and_signature_from_notice(repo_cache, sam
     notice = notice_with_item(context)
     save_history_build(store, context, 5099, notice, chunk)
     result = FeedbackStore(store).apply_feedback(
+        repo=context.repo,
         job=context.job,
         build_number=5099,
         failure_id=notice.responsibilityItems[0].failureId,
@@ -106,6 +122,7 @@ def test_history_overlay_correct_owner_changes_inherited_owner(repo_cache, sampl
     notice = notice_with_item(context, owner_name="Zhang San", failure_signature=chunk["signature"]["signatureKey"])
     save_history_build(store, context, 5099, notice, chunk)
     FeedbackStore(store).apply_feedback(
+        repo=context.repo,
         job=context.job,
         build_number=5099,
         failure_id=notice.responsibilityItems[0].failureId,
@@ -126,6 +143,7 @@ def test_history_overlay_mark_flaky_suppresses_inherited_owner(repo_cache, sampl
     notice = notice_with_item(context, owner_name="Zhang San", failure_signature=chunk["signature"]["signatureKey"])
     save_history_build(store, context, 5099, notice, chunk)
     FeedbackStore(store).apply_feedback(
+        repo=context.repo,
         job=context.job,
         build_number=5099,
         failure_id=notice.responsibilityItems[0].failureId,
@@ -144,6 +162,7 @@ def test_history_overlay_confirm_owner_marks_inherited_owner_verified(repo_cache
     notice = notice_with_item(context, owner_name="Zhang San", failure_signature=chunk["signature"]["signatureKey"])
     save_history_build(store, context, 5099, notice, chunk)
     FeedbackStore(store).apply_feedback(
+        repo=context.repo,
         job=context.job,
         build_number=5099,
         failure_id=notice.responsibilityItems[0].failureId,
@@ -158,7 +177,7 @@ def test_history_overlay_confirm_owner_marks_inherited_owner_verified(repo_cache
     assert inherited_owner["feedbackVerified"] is True
 
 
-def test_feedback_apply_cli_writes_store(monkeypatch, capsys):
+def test_feedback_apply_cli_requires_existing_notice(monkeypatch, capsys):
     store = make_store()
     monkeypatch.setenv("CI_AGENT_MODEL_PROVIDER", "fake")
     monkeypatch.setenv("CI_AGENT_HISTORY_ENABLED", "true")
@@ -167,6 +186,8 @@ def test_feedback_apply_cli_writes_store(monkeypatch, capsys):
         [
             "feedback",
             "apply",
+            "--repo",
+            "sample-ts-repo",
             "--job",
             "services/fx-code-unittest",
             "--build",
@@ -180,9 +201,8 @@ def test_feedback_apply_cli_writes_store(monkeypatch, capsys):
         ]
     )
     out = capsys.readouterr().out
-    assert rc == 0
-    assert "Henry.Zeng-曾纪龙" in out
-    assert store.feedback.docs[0]["correctedOwner"]["name"] == "Henry.Zeng-曾纪龙"
+    assert rc == 2
+    assert store.feedback.docs == []
 
 
 def test_feedback_apply_cli_rejects_bad_owner_type(monkeypatch, capsys):

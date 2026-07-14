@@ -20,6 +20,7 @@ class FeedbackStore:
     def apply_feedback(
         self,
         *,
+        repo: str,
         job: str,
         build_number: int,
         failure_id: str | None,
@@ -35,6 +36,8 @@ class FeedbackStore:
         note: str | None = None,
         source: str = "cli",
     ) -> dict[str, Any]:
+        if not repo or not repo.strip():
+            raise ValueError("repo is required")
         if action not in FEEDBACK_ACTIONS:
             raise ValueError(f"unsupported feedback action: {action}")
         if not failure_id and not failure_signature:
@@ -50,14 +53,16 @@ class FeedbackStore:
             existing_signature=failure_signature,
         ) if failure_signature else None
 
-        notice_doc, item = self._find_notice_item(job, build_number, failure_id, failure_signature)
+        repo = repo.strip()
+        notice_doc, item = self._find_notice_item(repo, job, build_number, failure_id, failure_signature)
+        if not notice_doc:
+            raise ValueError(f"notice not found for repo={repo}, job={job}, build={build_number}")
         if item:
             failure_id = failure_id or item.get("failureId")
             failure_signature = failure_signature or item.get("failureSignature")
-        branch = notice_doc.get("branch") if notice_doc else None
-        repo = notice_doc.get("repo") if notice_doc else None
-        build_url = (notice_doc.get("notice") or {}).get("buildUrl") if notice_doc else None
-        original_owner = (item.get("owner") if item else None) or ((notice_doc.get("notice") or {}).get("owner") if notice_doc else None)
+        branch = notice_doc.get("branch")
+        build_url = (notice_doc.get("notice") or {}).get("buildUrl")
+        original_owner = (item.get("owner") if item else None) or ((notice_doc.get("notice") or {}).get("owner"))
         corrected_owner = None
         if action == "correct_owner":
             corrected_owner = Owner(
@@ -105,11 +110,13 @@ class FeedbackStore:
         )
         return {"ok": True, "feedback": doc}
 
-    def list_feedback(self, *, job: str, build_number: int) -> list[dict[str, Any]]:
-        return list(self.collection.find({"job": job, "buildNumber": build_number, "isActive": True}))
+    def list_feedback(self, *, repo: str, job: str, build_number: int) -> list[dict[str, Any]]:
+        if not repo or not repo.strip():
+            raise ValueError("repo is required")
+        return list(self.collection.find({"repo": repo.strip(), "job": job, "buildNumber": build_number, "isActive": True}))
 
-    def _find_notice_item(self, job: str, build_number: int, failure_id: str | None, failure_signature: str | None) -> tuple[dict | None, dict | None]:
-        notice_doc = self.notices.find_one({"job": job, "buildNumber": build_number})
+    def _find_notice_item(self, repo: str, job: str, build_number: int, failure_id: str | None, failure_signature: str | None) -> tuple[dict | None, dict | None]:
+        notice_doc = self.notices.find_one({"repo": repo, "job": job, "buildNumber": build_number})
         if not notice_doc:
             return None, None
         notice = notice_doc.get("notice") or {}

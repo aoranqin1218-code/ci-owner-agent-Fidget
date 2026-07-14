@@ -23,6 +23,7 @@ class WeeklyTestReportService:
 
     def generate(self, *, repo: str, jobs: list[str] | None, branches: list[str] | None,
                  period_start: dt.datetime, period_end: dt.datetime, top_n: int | None = None) -> dict:
+        jobs, branches = normalize_scope_values(jobs), normalize_scope_values(branches)
         stats = TestFailureStatsService(self.store, self.config).aggregate(repo, jobs, branches, period_start, period_end)
         groups = classify_weekly_report_stats(stats, self.config)
         routes = {}
@@ -37,6 +38,10 @@ class WeeklyTestReportService:
         missing = sum(1 for doc in scoped_events if doc.get("buildTimestamp") is None)
         failed_builds = len({(d.get("repo"), d.get("job"), d.get("branch"), d.get("buildNumber"))
                              for d in scoped_events if _in_period(d.get("buildTimestamp"), period_start, period_end)})
+        completed_builds = sum(
+            1 for doc in self.store.builds.find(query)
+            if doc.get("result") in VALID_COMPLETED_RESULTS and _in_period(doc.get("buildTimestamp"), period_start, period_end)
+        )
         unidentified = 0
         for doc in self.store.notices.find(query):
             if not _in_period(doc.get("buildTimestamp"), period_start, period_end):
@@ -47,7 +52,8 @@ class WeeklyTestReportService:
         markdown = format_weekly_test_report(
             stats, period_start=period_start, period_end=period_end, config=self.config, maintainers=routes,
             repo=repo, jobs=jobs, branches=branches, missing_timestamp_count=missing,
-            unidentified_item_count=unidentified, failed_build_count=failed_builds, top_n=top_n,
+            unidentified_item_count=unidentified, completed_build_count=completed_builds,
+            failed_build_count=failed_builds, top_n=top_n,
             mention_mode=self.mention_mode,
         )
         important_count = len(groups.important)
@@ -58,10 +64,12 @@ class WeeklyTestReportService:
                                            "config": self.config.model_dump(mode="json")}, ensure_ascii=False,
                                            sort_keys=True).encode("utf-8")).hexdigest()
         return {"stats": stats, "markdown": markdown, "digest": digest,
+                "completedBuildCount": completed_builds, "failedBuildCount": failed_builds,
                 "importantItemCount": important_count, "normalItemCount": normal_count, "ignoredItemCount": ignored_count}
 
     def notify(self, report: dict, *, repo: str, jobs: list[str] | None, branches: list[str] | None,
                period_start: dt.datetime, period_end: dt.datetime, dry_run: bool = False, force: bool = False) -> dict:
+        jobs, branches = normalize_scope_values(jobs), normalize_scope_values(branches)
         if report["importantItemCount"] == 0 and not self.config.notification.sendWhenNoImportantItems:
             return {"ok": True, "sent": False, "reason": "no_important_test_failures",
                     "importantItemCount": 0, "normalItemCount": report["normalItemCount"],
@@ -97,6 +105,16 @@ def _scope_query(repo: str, jobs: list[str] | None, branches: list[str] | None) 
     if branches:
         query["branch"] = {"$in": branches}
     return query
+
+
+VALID_COMPLETED_RESULTS = {"SUCCESS", "FAILURE", "UNSTABLE"}
+
+
+def normalize_scope_values(values: list[str] | None) -> list[str] | None:
+    if not values:
+        return None
+    normalized = sorted({str(value).strip() for value in values if str(value).strip()})
+    return normalized or None
 
 
 def _in_period(value, start: dt.datetime, end: dt.datetime) -> bool:
