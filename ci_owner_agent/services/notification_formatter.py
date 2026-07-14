@@ -22,6 +22,7 @@ def format_wecom_markdown_notice(
     fallback_userids: tuple[str, ...] = (),
     maintainer_resolver: TestMaintainerResolver | None = None,
     repo: str | None = None,
+    feedback_code: str | None = None,
 ) -> str:
     mapper = user_mapper or WeComUserMapper([])
     owners = collect_responsible_owners(notice)
@@ -84,6 +85,18 @@ def format_wecom_markdown_notice(
     lines.append(f"- 🏗️ [查看 Jenkins 构建]({notice.buildUrl})" if notice.buildUrl else "- 🏗️ Jenkins 构建：无")
     feedback_url = build_feedback_url(feedback_base_url, notice, feedback_token)
     lines.append(f"- 📝 [提交反馈]({feedback_url})" if feedback_url else "- 📝 反馈：未配置")
+    if feedback_code:
+        lines.extend(
+            [
+                "",
+                f"**反馈码：{feedback_code}**",
+                "",
+                "群内反馈：",
+                f"@CI机器人 {feedback_code} 1 判断正确",
+                f"@CI机器人 {feedback_code} 1 责任人改为 @某人",
+                f"@CI机器人 {feedback_code} 1 标记偶发",
+            ]
+        )
     return "\n".join(lines)
 
 

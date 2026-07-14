@@ -29,6 +29,14 @@ ALLOWED_HISTORY_CHUNK_SOURCES = {
 DEFAULT_EXCLUDED_CHUNK_SOURCES = {"local_console_tail_fallback"}
 
 
+def _create_index(collection: Any, spec: list[tuple[str, int]], **options: Any) -> Any:
+    """Keep lightweight test doubles compatible while preserving real Mongo options."""
+    try:
+        return collection.create_index(spec, **options)
+    except TypeError:
+        return collection.create_index(spec, unique=bool(options.get("unique", False)))
+
+
 def _canonical_history_chunk(chunk: dict) -> dict:
     result = dict(chunk)
     signature = dict(chunk.get("signature") or {})
@@ -60,6 +68,9 @@ class MongoHistoryStore:
         self.report_notifications = self.db["ci_report_notifications"]
         self.feedback = self.db["ci_feedback"]
         self.wecom_users = self.db["ci_wecom_users"]
+        self.feedback_contexts = self.db["ci_feedback_contexts"]
+        self.wecom_pending_feedback = self.db["ci_wecom_pending_feedback"]
+        self.wecom_bot_events = self.db["ci_wecom_bot_events"]
         self.ensure_indexes()
 
     @classmethod
@@ -100,6 +111,15 @@ class MongoHistoryStore:
         self.wecom_users.create_index([("authorName", 1)])
         self.wecom_users.create_index([("emailDomain", 1)])
         self.wecom_users.create_index([("searchText", 1)])
+        self.feedback_contexts.create_index([("code", 1)], unique=True)
+        self.feedback_contexts.create_index(
+            [("repo", 1), ("job", 1), ("branch", 1), ("buildNumber", 1)], unique=True
+        )
+        _create_index(self.feedback_contexts, [("expiresAt", 1)], expireAfterSeconds=0)
+        self.wecom_pending_feedback.create_index([("confirmationCode", 1)], unique=True)
+        _create_index(self.wecom_pending_feedback, [("expiresAt", 1)], expireAfterSeconds=0)
+        self.wecom_bot_events.create_index([("eventKey", 1)], unique=True)
+        _create_index(self.wecom_bot_events, [("expiresAt", 1)], expireAfterSeconds=0)
 
     def save_analysis(
         self,

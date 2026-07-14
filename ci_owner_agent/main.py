@@ -13,6 +13,7 @@ from ci_owner_agent.config import load_settings
 from ci_owner_agent.orchestrator import analyze_jenkins, analyze_local, failure_without_context
 from ci_owner_agent.schemas import BuildInfo, CiResponsibilityNotice, TestFileFailureStat
 from ci_owner_agent.services.feedback_store import FeedbackStore
+from ci_owner_agent.services.feedback_context_store import FeedbackContextStore
 from ci_owner_agent.services.git_client import GitClient
 from ci_owner_agent.services.history_store import get_history_store
 from ci_owner_agent.services.jenkins_client import JenkinsClient
@@ -95,6 +96,10 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--host", default=None)
     serve.add_argument("--port", type=int, default=None)
     serve.add_argument("--reload", action="store_true")
+
+    wecom_bot = subparsers.add_parser("serve-wecom-bot", help="Start the WeCom AI bot long-running worker")
+    wecom_bot.add_argument("--bot-id", default=None)
+    wecom_bot.add_argument("--secret", default=None)
 
     feedback = subparsers.add_parser("feedback", help="Manage manual feedback")
     feedback_sub = feedback.add_subparsers(dest="feedback_command", required=True)
@@ -341,6 +346,46 @@ def main(argv: list[str] | None = None) -> int:
             reload=args.reload,
         )
         return 0
+    if args.command == "serve-wecom-bot":
+        bot_id = str(args.bot_id or settings.wecom_bot_id or "").strip()
+        secret = str(args.secret or settings.wecom_bot_secret or "").strip()
+        if not settings.history_enabled:
+            print("ERROR: MongoDB history storage must be enabled for serve-wecom-bot", file=sys.stderr)
+            return 2
+        if not bot_id:
+            print("ERROR: Bot ID is required (--bot-id or CI_AGENT_WECOM_BOT_ID)", file=sys.stderr)
+            return 2
+        if not secret:
+            print("ERROR: Secret is required (--secret or CI_AGENT_WECOM_BOT_SECRET)", file=sys.stderr)
+            return 2
+        store = get_history_store(settings)
+        if store is None:
+            print("ERROR: MongoDB history storage is unavailable", file=sys.stderr)
+            return 2
+        try:
+            admin = getattr(store.client, "admin", None)
+            if admin is not None:
+                admin.command("ping")
+        except Exception as exc:
+            print(f"ERROR: MongoDB history storage is unavailable: {exc}", file=sys.stderr)
+            return 2
+        try:
+            from ci_owner_agent.services.wecom_bot_adapter import WeComSdkAdapter
+            from ci_owner_agent.services.wecom_bot_worker import WeComBotWorker
+
+            adapter = WeComSdkAdapter(bot_id, secret)
+        except RuntimeError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            return 2
+        worker = WeComBotWorker(
+            adapter,
+            store,
+            confirm_ttl_seconds=settings.wecom_bot_confirm_ttl_seconds,
+            feedback_code_ttl_days=settings.wecom_feedback_code_ttl_days,
+            event_ttl_days=settings.wecom_bot_event_ttl_days,
+        )
+        worker.run()
+        return 0
     parser.print_help()
     return 2
 
@@ -399,6 +444,13 @@ def _notify_notice(notice: CiResponsibilityNotice, settings, *, dry_run: bool, f
         maintainer_resolver = TestMaintainerResolver.from_yaml(settings.test_maintainer_mapping_file)
         for warning in maintainer_resolver.warnings:
             print(f"WARNING: {warning}", file=sys.stderr)
+        feedback_code = None
+        if store:
+            try:
+                context = FeedbackContextStore(store, settings.wecom_feedback_code_ttl_days).get_or_create_for_notice(notice)
+                feedback_code = context.get("code") if context else None
+            except Exception as exc:
+                print(f"WARNING: feedback code unavailable: {exc}", file=sys.stderr)
         markdown = format_wecom_markdown_notice(
             notice,
             feedback_base_url=feedback_base_url,
@@ -408,6 +460,7 @@ def _notify_notice(notice: CiResponsibilityNotice, settings, *, dry_run: bool, f
             fallback_userids=settings.wecom_fallback_userids,
             maintainer_resolver=maintainer_resolver,
             repo=notice.repo,
+            feedback_code=feedback_code,
         )
         digest = notification_digest(
             notice,

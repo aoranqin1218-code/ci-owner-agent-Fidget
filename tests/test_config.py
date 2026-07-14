@@ -54,3 +54,27 @@ def test_wecom_fallback_userids_are_parsed_from_env(monkeypatch):
     settings = load_settings()
 
     assert settings.wecom_fallback_userids == ("ci.owner", "team.leader")
+
+
+def test_wecom_bot_defaults_disabled(monkeypatch):
+    for name in ("CI_AGENT_WECOM_BOT_ENABLED", "CI_AGENT_WECOM_BOT_ID", "CI_AGENT_WECOM_BOT_SECRET"):
+        monkeypatch.delenv(name, raising=False)
+    settings = load_settings()
+    assert settings.wecom_bot_enabled is False
+    assert settings.wecom_bot_id is None
+    assert settings.wecom_bot_secret is None
+
+
+def test_wecom_bot_settings_and_secret_redaction(monkeypatch):
+    monkeypatch.setenv("CI_AGENT_WECOM_BOT_ENABLED", "true")
+    monkeypatch.setenv("CI_AGENT_WECOM_BOT_ID", "bot-placeholder")
+    monkeypatch.setenv("CI_AGENT_WECOM_BOT_SECRET", "secret-placeholder")
+    monkeypatch.setenv("CI_AGENT_WECOM_BOT_CONFIRM_TTL_SECONDS", "600")
+    monkeypatch.setenv("CI_AGENT_WECOM_FEEDBACK_CODE_TTL_DAYS", "40")
+    monkeypatch.setenv("CI_AGENT_WECOM_BOT_EVENT_TTL_DAYS", "9")
+    settings = load_settings()
+    assert settings.wecom_bot_enabled is True
+    assert settings.wecom_bot_confirm_ttl_seconds == 600
+    assert settings.wecom_feedback_code_ttl_days == 40
+    assert settings.wecom_bot_event_ttl_days == 9
+    assert public_settings(settings)["wecom_bot_secret"] == "***"

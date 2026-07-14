@@ -72,6 +72,9 @@ Jenkins / 本地日志
 - `ci_feedback`：人工反馈。
 - `ci_notifications`：通知发送记录。
 - `ci_wecom_users`：企业微信用户映射。
+- `ci_feedback_contexts`：构建反馈码及责任项上下文（默认 30 天 TTL）。
+- `ci_wecom_pending_feedback`：等待二次确认的群内反馈（默认 5 分钟 TTL）。
+- `ci_wecom_bot_events`：智能机器人消息幂等记录（默认 7 天 TTL）。
 
 人工反馈会影响后续继承：
 
@@ -834,3 +837,43 @@ steps {
 
 - `ci_test_file_failures`：构建/测试文件唯一索引、文件历史统计索引、`buildTimestamp` 周期索引。
 - `ci_report_notifications`：通知类型、范围、周期和渠道的唯一索引。
+# 企业微信群内反馈（智能机器人长连接）
+
+本项目保留现有企业微信群机器人 Webhook 通知链路，并可选启用企业微信 API 模式智能机器人，通过 WebSocket 长连接接收群内反馈。两条链路彼此独立：Webhook 继续负责 CI 通知，智能机器人负责接收和回复反馈。
+
+1. 在企业微信后台创建 API 模式智能机器人，接入方式选择“长连接”，获取 Bot ID 和 Secret，并将机器人加入研发群。
+2. 安装可选依赖：
+
+   ```bash
+   pip install -e ".[dev,wecom-bot]"
+   ```
+
+3. 启用 MongoDB 历史存储，并配置机器人：
+
+   ```dotenv
+   CI_AGENT_HISTORY_ENABLED=true
+   CI_AGENT_HISTORY_MONGO_URI=mongodb://localhost:27017
+   CI_AGENT_HISTORY_MONGO_DB=ci_owner_agent
+   CI_AGENT_WECOM_BOT_ENABLED=true
+   CI_AGENT_WECOM_BOT_ID=your-bot-id
+   CI_AGENT_WECOM_BOT_SECRET=your-bot-secret
+   ```
+
+4. 以常驻进程启动（不能放在每次 Jenkins 构建结束即退出的临时分析进程中）：
+
+   ```bash
+   ci-owner-agent serve-wecom-bot
+   ```
+
+命令行的 `--bot-id` 和 `--secret` 优先于环境变量。CI 通知出现反馈码后，群成员可发送：
+
+```text
+@CI机器人 CI-7K3M9Q 1 判断正确
+@CI机器人 CI-7K3M9Q 1 责任人改为 @李四
+@CI机器人 CI-7K3M9Q 2 标记偶发
+@CI机器人 CI-7K3M9Q 2 无法定责
+@CI机器人 查看 CI-7K3M9Q
+@CI机器人 帮助
+```
+
+所有会修改数据的命令都需要在 5 分钟内回复确认码。群内所有成员均可提交和覆盖反馈，不设置管理员或责任人白名单；系统会记录提交人的企业微信 userid、可获得的显示名称和操作时间用于审计。只有待确认操作的发起人能确认或取消该次操作，这是防误操作措施，不是业务权限控制。

@@ -34,6 +34,7 @@ class FeedbackStore:
         owner_wecom_userid: str | None = None,
         source_build_number: int | None = None,
         reviewer: str | None = None,
+        reviewer_wecom_userid: str | None = None,
         note: str | None = None,
         source: str = "cli",
     ) -> dict[str, Any]:
@@ -102,6 +103,7 @@ class FeedbackStore:
             "sourceBuildNumber": source_build_number or build_number,
             "note": note,
             "reviewer": reviewer,
+            "reviewerWeComUserId": reviewer_wecom_userid,
             "source": source,
             "isActive": True,
             "createdAt": now,
