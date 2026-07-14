@@ -229,11 +229,13 @@ def test_feedback_write_failure_marks_pending_failed(monkeypatch):
 
 
 # --- Regression: operation written, post-insert lookup failure ---
-
-def test_operation_inserted_then_post_insert_lookup_failure_reconciles_applied(monkeypatch):
+# --- Regression: operation written, post-insert lookup failure ---
+def test_post_insert_lookup_failure_finalizes_existing_prepared_operation(monkeypatch):
+    """apply_feedback inserts prepared operation, then is_current_operation raises;
+    service must finalize, not mark_failed."""
     store, _, context = _setup()
     service = WeComFeedbackService(store)
-    service.handle(_message('msg:create', context['code'] + ' 1 \u5224\u65ad\u6b63\u786e'))
+    service.handle(_message('msg:create', context['code'] + ' 1 判断正确'))
     pending = store.wecom_pending_feedback.docs[0]
     code = pending['confirmationCode']
 
@@ -245,20 +247,20 @@ def test_operation_inserted_then_post_insert_lookup_failure_reconciles_applied(m
     mark_failed_calls = []
     monkeypatch.setattr(service.pending, 'mark_failed', lambda *a, **kw: mark_failed_calls.append(1) or False)
 
-    reply = service.handle(_message('msg:confirm', '\u786e\u8ba4 ' + code))
+    reply = service.handle(_message('msg:confirm', '确认 ' + code))
 
-    assert len(mark_failed_calls) == 1
-    assert '\u5904\u7406\u4e2d' in reply
-    assert store.wecom_pending_feedback.docs[0]['status'] == 'applying'
+    assert len(mark_failed_calls) == 0, 'mark_failed must not be called when operation already exists'
+    assert store.wecom_pending_feedback.docs[0]['status'] == 'applied'
     ops = [d for d in store.feedback.docs if d.get('recordType') == 'operation']
     assert len(ops) == 1
-    assert ops[0].get('isCommitted') == False
-
+    assert ops[0].get('isCommitted') == True
+    assert '已提交' in reply
 
 def test_existing_operation_is_not_marked_failed_after_apply_exception(monkeypatch):
+    """Prepared operation exists; apply_feedback raises; service must finalize, not mark_failed."""
     store, _, context = _setup()
     service = WeComFeedbackService(store)
-    service.handle(_message('msg:create', context['code'] + ' 1 \u5224\u65ad\u6b63\u786e'))
+    service.handle(_message('msg:create', context['code'] + ' 1 判断正确'))
     pending = store.wecom_pending_feedback.docs[0]
     code = pending['confirmationCode']
 
@@ -273,6 +275,7 @@ def test_existing_operation_is_not_marked_failed_after_apply_exception(monkeypat
         'action': 'confirm_owner',
         'feedbackItemKey': 'id:test-failure',
         'submittedAt': dt.datetime.now(dt.timezone.utc),
+        'isCommitted': False,
     })
 
     monkeypatch.setattr(service.feedback, 'apply_feedback',
@@ -281,12 +284,14 @@ def test_existing_operation_is_not_marked_failed_after_apply_exception(monkeypat
     mark_failed_calls = []
     monkeypatch.setattr(service.pending, 'mark_failed', lambda *a, **kw: mark_failed_calls.append(1) or False)
 
-    reply = service.handle(_message('msg:confirm', '\u786e\u8ba4 ' + code))
+    reply = service.handle(_message('msg:confirm', '确认 ' + code))
 
-    assert len(mark_failed_calls) == 0
-    assert '\u6b63\u5728\u786e\u8ba4' in reply
-    assert store.wecom_pending_feedback.docs[0]['status'] == 'applying'
-
+    assert len(mark_failed_calls) == 0, 'mark_failed must not be called when operation exists'
+    ops = [d for d in store.feedback.docs if d.get('recordType') == 'operation']
+    assert len(ops) == 1
+    assert ops[0].get('isCommitted') == True
+    assert store.wecom_pending_feedback.docs[0]['status'] == 'applied'
+    assert '已提交' in reply
 
 # --- Regression: expired status persistence ---
 
@@ -663,8 +668,8 @@ def test_old_worker_cannot_commit_operation_after_losing_token(monkeypatch):
     assert len(visible) == 0
 
 
-def test_new_worker_adopts_prepared_operation_and_commits_once():
-    """Worker B re-claims, adopts prepared op, marks applied, commits; only one committed op."""
+def test_new_worker_adopts_prepared_operation_and_commits_once(monkeypatch):
+    """Worker B claims, re-validates context, adopts prepared op via service.handle()."""
     store, _, context = _setup()
     service = WeComFeedbackService(store)
     service.handle(_message('msg:create', context['code'] + ' 1 \u5224\u65ad\u6b63\u786e'))
@@ -674,6 +679,7 @@ def test_new_worker_adopts_prepared_operation_and_commits_once():
     # Worker A claims
     status_a, claimed_a = service.pending.claim(code, 'wangwu')
     token_a = claimed_a['applyToken']
+    assert status_a == 'claimed'
 
     # Create prepared operation (simulating apply_feedback success)
     service.feedback.apply_feedback(
@@ -685,53 +691,80 @@ def test_new_worker_adopts_prepared_operation_and_commits_once():
         operation_id=pending['operationId'], is_committed=False,
     )
 
-    # Expire lease; worker B re-claims
+    # Expire lease; worker B claims via service.handle()
     claimed_a['applyLeaseUntil'] = dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=1)
-    status_b, claimed_b = service.pending.claim(code, 'wangwu')
-    assert status_b == 'claimed'
-    token_b = claimed_b['applyToken']
 
-    # Worker B marks applied with its token
-    result = service.pending.mark_applied(claimed_b, token_b)
-    assert result == True
+    # Track calls on service.pending
+    mark_applied_calls = []
+    original_mark = service.pending.mark_applied
+    def tracking_mark(pending_doc, token):
+        mark_applied_calls.append(1)
+        return original_mark(pending_doc, token)
+    monkeypatch.setattr(service.pending, 'mark_applied', tracking_mark)
+
+    activate_calls = []
+    original_activate = service.pending.activate_operation_if_pending_applied
+    def tracking_activate(confirmation_code, operation_id, feedback_collection):
+        activate_calls.append(1)
+        return original_activate(confirmation_code, operation_id, feedback_collection)
+    monkeypatch.setattr(service.pending, 'activate_operation_if_pending_applied', tracking_activate)
+
+    reply = service.handle(_message('msg:confirm', '\u786e\u8ba4 ' + code))
+    assert '\u5df2\u63d0\u4ea4' in reply
+
+    assert mark_applied_calls == [1], 'mark_applied must be called exactly once'
+    assert activate_calls == [1], 'activate must be called exactly once'
+
     assert store.wecom_pending_feedback.docs[0]['status'] == 'applied'
-
-    # Worker B commits the prepared operation
-    commit_ok = service.feedback.commit_operation(pending['operationId'])
-    assert commit_ok == True
-
-    # Now visible in list_feedback
-    visible = service.feedback.list_feedback(
-        repo=context['repo'], job=context['job'], branch=context['branch'],
-        build_number=context['buildNumber'],
-    )
-    assert len(visible) == 1
-    assert visible[0].get('isCommitted') == True
-
-    # Total operations: only one
-    ops_all = [d for d in store.feedback.docs if d.get('recordType') == 'operation']
-    assert len(ops_all) == 1
-
-
-def test_stale_retry_does_not_commit_prepared_operation(monkeypatch):
-    """When context changed, stale pending does not commit the prepared operation."""
-    store, _, context = _setup()
+    ops = [d for d in store.feedback.docs if d.get('recordType') == 'operation']
+    assert len(ops) == 1
+    assert ops[0].get('isCommitted') == True
+def test_stale_retry_does_not_commit_prepared_operation():
+    """When context changed, claimed worker marks stale via service, prepared op stays uncommitted."""
+    store = make_store()
+    first_notice = _notice_with_item(failure_id="failure-old", title="\u65e7\u5931\u8d25")
+    store.upsert_notice_snapshot(first_notice, source="test")
+    contexts = FeedbackContextStore(store)
+    context = contexts.get_or_create_for_notice(first_notice)
     service = WeComFeedbackService(store)
     service.handle(_message('msg:create', context['code'] + ' 1 \u5224\u65ad\u6b63\u786e'))
     pending = store.wecom_pending_feedback.docs[0]
     code = pending['confirmationCode']
 
-    # First confirm succeeds
-    reply = service.handle(_message('msg:confirm1', '\u786e\u8ba4 ' + code))
-    assert '\u5df2\u63d0\u4ea4' in reply
-    assert store.wecom_pending_feedback.docs[0]['status'] == 'applied'
+    # Worker A claims
+    status_a, claimed_a = service.pending.claim(code, 'wangwu')
+    assert status_a == 'claimed'
 
-    # Verify operation is committed
+    # Create prepared operation
+    service.feedback.apply_feedback(
+        repo=context['repo'], job=context['job'], branch=context['branch'],
+        build_number=context['buildNumber'],
+        failure_id=pending['feedbackContext'].get('failureId'),
+        failure_signature=pending['feedbackContext'].get('failureSignature'),
+        action='confirm_owner', source='wecom_bot',
+        operation_id=pending['operationId'], is_committed=False,
+    )
+
+    # Expire lease; change context
+    claimed_a['applyLeaseUntil'] = dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=1)
+    second_notice = _notice_with_item(failure_id="failure-new", title="\u65b0\u5931\u8d25")
+    store.upsert_notice_snapshot(second_notice, source="test")
+    contexts.get_or_create_for_notice(second_notice)
+
+    # Worker B claims via service.handle()
+    reply = service.handle(_message('msg:confirm', '\u786e\u8ba4 ' + code))
+    assert '\u8d23\u4efb\u9879\u5df2\u7ecf\u66f4\u65b0' in reply
+
+    assert store.wecom_pending_feedback.docs[0]['status'] == 'stale'
     ops = [d for d in store.feedback.docs if d.get('recordType') == 'operation']
     assert len(ops) == 1
-    assert ops[0].get('isCommitted') == True
-
-
+    assert ops[0].get('isCommitted') == False
+    # Prepared operation must not appear in list_feedback
+    visible = service.feedback.list_feedback(
+        repo=context['repo'], job=context['job'], branch=context['branch'],
+        build_number=context['buildNumber'],
+    )
+    assert len(visible) == 0
 def test_pending_applied_recovers_uncommitted_operation():
     """When pending is applied but operation is prepared (crash recovery), second confirm commits it."""
     store, _, context = _setup()
@@ -764,31 +797,30 @@ def test_pending_applied_recovers_uncommitted_operation():
 
 
 def test_commit_operation_failure_is_retried_on_next_confirmation(monkeypatch):
-    """When commit_operation fails, next confirmation retries and succeeds."""
+    """When activate_operation_if_pending_applied fails on first try, next confirmation retries and succeeds."""
     store, _, context = _setup()
     service = WeComFeedbackService(store)
     service.handle(_message('msg:create', context['code'] + ' 1 \u5224\u65ad\u6b63\u786e'))
     pending = store.wecom_pending_feedback.docs[0]
     code = pending['confirmationCode']
 
-    # First confirm with commit_operation failing
-    commit_calls = []
-    original_commit = service.feedback.commit_operation
-    def failing_commit(op_id):
-        commit_calls.append(1)
-        if len(commit_calls) == 1:
-            return False
-        return original_commit(op_id)
-    monkeypatch.setattr(service.feedback, 'commit_operation', failing_commit)
+    activate_calls = []
+    original_activate = service.pending.activate_operation_if_pending_applied
+    def failing_activate(confirmation_code, operation_id, feedback_collection):
+        activate_calls.append(1)
+        if len(activate_calls) == 1:
+            return 'not_applied'
+        return original_activate(confirmation_code, operation_id, feedback_collection)
+    monkeypatch.setattr(service.pending, 'activate_operation_if_pending_applied', failing_activate)
 
     reply1 = service.handle(_message('msg:confirm1', '\u786e\u8ba4 ' + code))
     assert '\u6b63\u5728\u540c\u6b65' in reply1
     assert store.wecom_pending_feedback.docs[0]['status'] == 'applied'
 
-    # Second confirm retries commit
+    # Second confirm retries activation
     reply2 = service.handle(_message('msg:confirm2', '\u786e\u8ba4 ' + code))
     assert '\u5df2\u63d0\u4ea4' in reply2
-    assert len(commit_calls) == 2
+    assert len(activate_calls) == 2
 
     ops = [d for d in store.feedback.docs if d.get('recordType') == 'operation']
     assert len(ops) == 1
@@ -850,3 +882,220 @@ def test_mark_failed_exception_keeps_uncertain_state(monkeypatch):
     reply = service.handle(_message('msg:confirm', '\u786e\u8ba4 ' + code))
     assert '\u6b63\u5728\u786e\u8ba4' in reply
     assert store.wecom_pending_feedback.docs[0]['status'] == 'applying'
+
+
+# --- Regression: operation activation constraints ---
+
+def test_old_worker_cannot_activate_prepared_operation_after_lease_reclaim():
+    """Old worker cannot activate operation after losing lease; activate_operation_if_pending_applied returns not_applied."""
+    store, _, context = _setup()
+    service = WeComFeedbackService(store)
+    service.handle(_message('msg:create', context['code'] + ' 1 \u5224\u65ad\u6b63\u786e'))
+    pending = store.wecom_pending_feedback.docs[0]
+    code = pending['confirmationCode']
+
+    # Worker A claims
+    status_a, claimed_a = service.pending.claim(code, 'wangwu')
+    token_a = claimed_a['applyToken']
+
+    # Create prepared operation
+    service.feedback.apply_feedback(
+        repo=context['repo'], job=context['job'], branch=context['branch'],
+        build_number=context['buildNumber'],
+        failure_id=pending['feedbackContext'].get('failureId'),
+        failure_signature=pending['feedbackContext'].get('failureSignature'),
+        action='confirm_owner', source='wecom_bot',
+        operation_id=pending['operationId'], is_committed=False,
+    )
+
+    # Expire lease; worker B re-claims
+    claimed_a['applyLeaseUntil'] = dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=1)
+    status_b, claimed_b = service.pending.claim(code, 'wangwu')
+    assert status_b == 'claimed'
+    token_b = claimed_b['applyToken']
+    assert token_b != token_a
+
+    # Worker A cannot mark_applied (old token)
+    result = service.pending.mark_applied(claimed_a, token_a)
+    assert result == False
+
+    # Old worker cannot activate operation (pending is still applying, not applied)
+    activation = service.pending.activate_operation_if_pending_applied(
+        pending['confirmationCode'], pending['operationId'], service.feedback.collection,
+    )
+    assert activation == 'not_applied', f'expected not_applied, got {activation}'
+
+    # Operation still not committed
+    ops = [d for d in store.feedback.docs if d.get('recordType') == 'operation']
+    assert len(ops) == 1
+    assert ops[0].get('isCommitted') == False
+
+    # Prepared operation not visible
+    visible = service.feedback.list_feedback(
+        repo=context['repo'], job=context['job'], branch=context['branch'],
+        build_number=context['buildNumber'],
+    )
+    assert len(visible) == 0
+
+
+def test_operation_activation_is_idempotent():
+    """Concurrent activation calls are idempotent: first committed, second already_committed."""
+    store, _, context = _setup()
+    service = WeComFeedbackService(store)
+    service.handle(_message('msg:create', context['code'] + ' 1 \u5224\u65ad\u6b63\u786e'))
+    pending = store.wecom_pending_feedback.docs[0]
+    code = pending['confirmationCode']
+
+    # Normal confirm flow
+    reply = service.handle(_message('msg:confirm', '\u786e\u8ba4 ' + code))
+    assert '\u5df2\u63d0\u4ea4' in reply
+    assert store.wecom_pending_feedback.docs[0]['status'] == 'applied'
+
+    # First activation
+    activation1 = service.pending.activate_operation_if_pending_applied(
+        pending['confirmationCode'], pending['operationId'], service.feedback.collection,
+    )
+    assert activation1 == 'already_committed', f'expected already_committed, got {activation1}'
+
+    # Second activation
+    activation2 = service.pending.activate_operation_if_pending_applied(
+        pending['confirmationCode'], pending['operationId'], service.feedback.collection,
+    )
+    assert activation2 == 'already_committed', f'expected already_committed, got {activation2}'
+
+    # Only one operation
+    ops = [d for d in store.feedback.docs if d.get('recordType') == 'operation']
+    assert len(ops) == 1
+    assert ops[0].get('isCommitted') == True
+
+
+def test_claimed_worker_adopts_prepared_operation_via_service(monkeypatch):
+    """Worker B claims via service.handle(), re-validates, marks applied, commits; only one committed op."""
+    store, _, context = _setup()
+    service = WeComFeedbackService(store)
+    service.handle(_message('msg:create', context['code'] + ' 1 \u5224\u65ad\u6b63\u786e'))
+    pending = store.wecom_pending_feedback.docs[0]
+    code = pending['confirmationCode']
+
+    # Worker A claims
+    status_a, claimed_a = service.pending.claim(code, 'wangwu')
+    token_a = claimed_a['applyToken']
+    assert status_a == 'claimed'
+
+    # Create prepared operation
+    service.feedback.apply_feedback(
+        repo=context['repo'], job=context['job'], branch=context['branch'],
+        build_number=context['buildNumber'],
+        failure_id=pending['feedbackContext'].get('failureId'),
+        failure_signature=pending['feedbackContext'].get('failureSignature'),
+        action='confirm_owner', source='wecom_bot',
+        operation_id=pending['operationId'], is_committed=False,
+    )
+    submitted_at = pending.get('operationSubmittedAt')
+
+    # Expire lease; worker B claims via service.handle()
+    claimed_a['applyLeaseUntil'] = dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=1)
+
+    # Track call counts
+    apply_feedback_calls = []
+    def tracking_apply(**kw):
+        apply_feedback_calls.append(1)
+        return {'ok': True, 'operation': {}, 'isCurrent': True}
+    monkeypatch.setattr(service.feedback, 'apply_feedback', tracking_apply)
+
+    mark_applied_calls = []
+    original_mark = service.pending.mark_applied
+    def tracking_mark(pending_doc, token):
+        mark_applied_calls.append(1)
+        return original_mark(pending_doc, token)
+    monkeypatch.setattr(service.pending, 'mark_applied', tracking_mark)
+
+    reply = service.handle(_message('msg:confirm', '\u786e\u8ba4 ' + code))
+    assert '\u5df2\u63d0\u4ea4' in reply
+
+    # apply_feedback should NOT be called again (operation already exists)
+    assert len(apply_feedback_calls) == 0, 'apply_feedback must not create a second operation'
+    assert len(mark_applied_calls) == 1, 'mark_applied must be called once'
+
+    assert store.wecom_pending_feedback.docs[0]['status'] == 'applied'
+    assert store.wecom_pending_feedback.docs[0]['applyAttemptCount'] == 2
+    assert store.wecom_pending_feedback.docs[0].get('operationSubmittedAt') == submitted_at
+
+    ops = [d for d in store.feedback.docs if d.get('recordType') == 'operation']
+    assert len(ops) == 1
+    assert ops[0].get('isCommitted') == True
+
+
+def test_claimed_worker_marks_stale_without_committing_prepared_operation():
+    """Worker B claims via service, finds stale context, marks stale without committing prepared op."""
+    store = make_store()
+    first_notice = _notice_with_item(failure_id="failure-old", title="\u65e7\u5931\u8d25")
+    store.upsert_notice_snapshot(first_notice, source="test")
+    contexts = FeedbackContextStore(store)
+    context = contexts.get_or_create_for_notice(first_notice)
+    service = WeComFeedbackService(store)
+    service.handle(_message('msg:create', context['code'] + ' 1 \u5224\u65ad\u6b63\u786e'))
+    pending = store.wecom_pending_feedback.docs[0]
+    code = pending['confirmationCode']
+
+    # Worker A claims
+    status_a, claimed_a = service.pending.claim(code, 'wangwu')
+    assert status_a == 'claimed'
+
+    # Create prepared operation
+    service.feedback.apply_feedback(
+        repo=context['repo'], job=context['job'], branch=context['branch'],
+        build_number=context['buildNumber'],
+        failure_id=pending['feedbackContext'].get('failureId'),
+        failure_signature=pending['feedbackContext'].get('failureSignature'),
+        action='confirm_owner', source='wecom_bot',
+        operation_id=pending['operationId'], is_committed=False,
+    )
+
+    # Expire lease; change context
+    claimed_a['applyLeaseUntil'] = dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=1)
+    second_notice = _notice_with_item(failure_id="failure-new", title="\u65b0\u5931\u8d25")
+    store.upsert_notice_snapshot(second_notice, source="test")
+    contexts.get_or_create_for_notice(second_notice)
+
+    # Worker B claims via service.handle()
+    reply = service.handle(_message('msg:confirm', '\u786e\u8ba4 ' + code))
+    assert '\u8d23\u4efb\u9879\u5df2\u7ecf\u66f4\u65b0' in reply
+
+    assert store.wecom_pending_feedback.docs[0]['status'] == 'stale'
+    ops = [d for d in store.feedback.docs if d.get('recordType') == 'operation']
+    assert len(ops) == 1
+    assert ops[0].get('isCommitted') == False
+
+    # Prepared operation not visible
+    visible = service.feedback.list_feedback(
+        repo=context['repo'], job=context['job'], branch=context['branch'],
+        build_number=context['buildNumber'],
+    )
+    assert len(visible) == 0
+
+
+def test_reconcile_exception_does_not_escape_service(monkeypatch):
+    """When reconcile_applied raises, service returns safe message, exception does not escape."""
+    store, _, context = _setup()
+    service = WeComFeedbackService(store)
+    service.handle(_message('msg:create', context['code'] + ' 1 \u5224\u65ad\u6b63\u786e'))
+    pending = store.wecom_pending_feedback.docs[0]
+    code = pending['confirmationCode']
+
+    # First confirm succeeds (operation committed)
+    service.handle(_message('msg:confirm1', '\u786e\u8ba4 ' + code))
+
+    # Make pending applying again with expired lease (simulating race)
+    store.wecom_pending_feedback.docs[0]['status'] = 'applying'
+    store.wecom_pending_feedback.docs[0]['applyToken'] = 'fake-token'
+    store.wecom_pending_feedback.docs[0]['applyLeaseUntil'] = dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=1)
+
+    # Second confirm: reconcile_applied raises
+    reconcile_calls = []
+    monkeypatch.setattr(service.pending, 'reconcile_applied',
+                        lambda *a, **kw: reconcile_calls.append(1) or (_ for _ in ()).throw(RuntimeError('reconcile failed')))
+
+    reply = service.handle(_message('msg:confirm2', '\u786e\u8ba4 ' + code))
+    assert len(reconcile_calls) == 1, 'reconcile must be called'
+    assert '\u6b63\u5728\u786e\u8ba4' in reply or '\u5904\u7406\u4e2d' in reply or '\u5df2\u7ecf\u63d0\u4ea4' in reply

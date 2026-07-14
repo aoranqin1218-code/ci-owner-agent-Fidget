@@ -63,10 +63,20 @@ class PendingFeedbackStore:
             refreshed = self.collection.find_one({"confirmationCode": code})
             return "expired", refreshed or current
         if current.get("status") == "applying":
-            if current.get("applyLeaseUntil", now) > now:
+            lease = current.get("applyLeaseUntil")
+            if lease is not None and lease > now:
                 return "applying", current
             token = secrets.token_urlsafe(24)
-            doc = self.collection.find_one_and_update({"confirmationCode": code, "status": "applying", "applyLeaseUntil": {"$lte": now}}, {"$set": {"applyToken": token, "applyLeaseUntil": now + self.apply_lease, "updatedAt": now}, "$inc": {"applyAttemptCount": 1}}, return_document=_return_after())
+            query = {
+                "confirmationCode": code,
+                "status": "applying",
+                "$or": [
+                    {"applyLeaseUntil": {"$lte": now}},
+                    {"applyLeaseUntil": None},
+                    {"applyLeaseUntil": {"$exists": False}},
+                ],
+            }
+            doc = self.collection.find_one_and_update(query, {"$set": {"applyToken": token, "applyLeaseUntil": now + self.apply_lease, "updatedAt": now}, "$inc": {"applyAttemptCount": 1}}, return_document=_return_after())
             return ("claimed", doc) if doc else ("applying", self.collection.find_one({"confirmationCode": code}))
         if current.get("status") != "pending":
             return str(current.get("status")), current
@@ -124,6 +134,41 @@ class PendingFeedbackStore:
     def reconcile_applied(self, confirmation_code: str, operation_id: str) -> bool:
         result = self.collection.update_one({"confirmationCode": confirmation_code, "status": "applying", "operationId": operation_id}, {"$set": {"status": "applied", "updatedAt": _utcnow(), "applyToken": None, "applyLeaseUntil": None}}, upsert=False)
         return result.modified_count == 1
+
+    def activate_operation_if_pending_applied(
+        self, confirmation_code: str, operation_id: str, feedback_collection
+    ) -> str:
+        """Atomically activate a prepared operation only if pending is in applied state.
+
+        Returns one of: "committed", "already_committed", "not_applied", "not_found".
+        """
+        pending = self.collection.find_one(
+            {"confirmationCode": confirmation_code, "status": "applied", "operationId": operation_id}
+        )
+        if pending is None:
+            return "not_applied"
+        op = feedback_collection.find_one(
+            {"_id": f"operation:{operation_id}", "recordType": "operation"}
+        )
+        if op is None:
+            return "not_found"
+        if op.get("isCommitted"):
+            return "already_committed"
+        result = feedback_collection.update_one(
+            {"_id": f"operation:{operation_id}", "recordType": "operation", "isCommitted": False},
+            {"$set": {"isCommitted": True}},
+            upsert=False,
+        )
+        if result.modified_count == 1:
+            return "committed"
+        refreshed = feedback_collection.find_one(
+            {"_id": f"operation:{operation_id}", "recordType": "operation"}
+        )
+        if refreshed and refreshed.get("isCommitted"):
+            return "already_committed"
+        if refreshed is None:
+            return "not_found"
+        return "not_applied"
 
     def _terminal(self, doc, token, status, error):
         if not isinstance(token, str) or not token:
