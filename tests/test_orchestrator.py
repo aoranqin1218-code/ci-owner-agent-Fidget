@@ -1198,7 +1198,6 @@ def test_ai_no_owner_different_structured_marker_is_new_evidence():
     "failure_path",
     [
         "/var/app/test/A.test.ts",
-        r"C:\workspace\repo\test\A.test.ts",
         "./test/A.test.ts:12:3",
         "/var/app/server/service/a.ts",
     ],
@@ -1224,6 +1223,29 @@ def test_no_owner_failure_paths_use_repository_normalization(failure_path):
         },
         failure_facts=None,
         changed_files=[ChangedFile(path=changed_path, status="M")],
+    )
+
+
+def test_no_owner_unsupported_windows_absolute_path_does_not_match_changed_file():
+    assert not _has_new_strong_evidence(
+        decision={
+            "failureSignature": "sig-a",
+            "signature": {"signatureKey": "sig-a", "errorType": "Timeout"},
+        },
+        failure_summaries={
+            "chunks": [
+                {
+                    "signature": {
+                        "signatureKey": "sig-a",
+                        "errorType": "Timeout",
+                        "testFile": r"C:\workspace\repo\test\A.test.ts",
+                    },
+                    "signatureHash": "sig-a",
+                }
+            ]
+        },
+        failure_facts=None,
+        changed_files=[ChangedFile(path="test/A.test.ts", status="M")],
     )
 
 
