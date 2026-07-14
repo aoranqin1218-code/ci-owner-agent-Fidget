@@ -129,6 +129,11 @@ class WeComFeedbackService:
                 return "该构建的责任项已经更新，本次确认未提交。请根据最新通知重新发起反馈。"
             return _pending_status_text((self.pending.collection.find_one({"confirmationCode": pending["confirmationCode"]}) or {}).get("status", "applying"))
         except Exception as exc:
+            operation = self.feedback.find_by_operation_id(pending.get("operationId"))
+            if operation:
+                if self.pending.reconcile_applied(pending["confirmationCode"], pending["operationId"]):
+                    return "反馈已提交。"
+                return _pending_status_text((self.pending.collection.find_one({"confirmationCode": pending["confirmationCode"]}) or {}).get("status", "applying"))
             try:
                 if not self.pending.mark_failed(pending, pending.get("applyToken"), str(exc)):
                     return _pending_status_text((self.pending.collection.find_one({"confirmationCode": pending["confirmationCode"]}) or {}).get("status", "applying"))

@@ -59,8 +59,9 @@ class PendingFeedbackStore:
         if current.get("senderUserId") != sender_userid:
             return "forbidden", current
         if current.get("status") == "pending" and current.get("confirmationExpiresAt", current.get("expiresAt", now)) <= now:
-            self._set_status(current, "expired")
-            return "expired", current
+            self.expire_pending(code, sender_userid, now)
+            refreshed = self.collection.find_one({"confirmationCode": code})
+            return "expired", refreshed or current
         if current.get("status") == "applying":
             if current.get("applyLeaseUntil", now) > now:
                 return "applying", current
@@ -82,10 +83,34 @@ class PendingFeedbackStore:
         return ("claimed", doc) if doc else ("already_processed", self.collection.find_one({"confirmationCode": code}))
 
     def cancel(self, code: str, sender_userid: str) -> str:
+        code = code.upper()
         now = _utcnow()
-        self.collection.update_one({"confirmationCode": code.upper(), "senderUserId": sender_userid, "status": "pending", "confirmationExpiresAt": {"$gt": now}}, {"$set": {"status": "cancelled", "updatedAt": now}}, upsert=False)
-        doc = self.collection.find_one({"confirmationCode": code.upper()})
-        return "cancelled" if doc and doc.get("status") == "cancelled" else str((doc or {}).get("status") or "not_found")
+        result = self.collection.update_one(
+            {"confirmationCode": code, "senderUserId": sender_userid, "status": "pending", "confirmationExpiresAt": {"$gt": now}},
+            {"$set": {"status": "cancelled", "updatedAt": now}},
+            upsert=False,
+        )
+        if result.modified_count == 1:
+            return "cancelled"
+        doc = self.collection.find_one({"confirmationCode": code})
+        if doc is None:
+            return "not_found"
+        if doc.get("senderUserId") != sender_userid:
+            return "forbidden"
+        if doc.get("status") != "pending":
+            return str(doc.get("status"))
+        if doc.get("confirmationExpiresAt", now) <= now:
+            self.expire_pending(code, sender_userid, now)
+            return "expired"
+        return "already_processed"
+
+    def expire_pending(self, code: str, sender_userid: str, now: dt.datetime) -> bool:
+        result = self.collection.update_one(
+            {"confirmationCode": code.upper(), "senderUserId": sender_userid, "status": "pending", "confirmationExpiresAt": {"$lte": now}},
+            {"$set": {"status": "expired", "updatedAt": now}},
+            upsert=False,
+        )
+        return result.modified_count == 1
 
     def mark_applied(self, doc: dict[str, Any], apply_token: str) -> bool:
         return self._set_status(doc, "applied", apply_token)

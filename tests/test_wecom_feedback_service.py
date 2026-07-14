@@ -226,3 +226,207 @@ def test_feedback_write_failure_marks_pending_failed(monkeypatch):
 
     assert "反馈写入失败" in reply
     assert store.wecom_pending_feedback.docs[0]["status"] == "failed"
+
+import datetime as dt
+
+
+
+import datetime as dt
+
+# --- Regression: operation written, post-insert lookup failure ---
+
+def test_operation_inserted_then_post_insert_lookup_failure_reconciles_applied(monkeypatch):
+    store, _, context = _setup()
+    service = WeComFeedbackService(store)
+    service.handle(_message('msg:create', context['code'] + ' 1 \u5224\u65ad\u6b63\u786e'))
+    pending = store.wecom_pending_feedback.docs[0]
+    code = pending['confirmationCode']
+
+    original = service.feedback.is_current_operation
+    def failing_is_current(op):
+        raise RuntimeError('post-insert lookup failure')
+    monkeypatch.setattr(service.feedback, 'is_current_operation', failing_is_current)
+
+    mark_failed_calls = []
+    monkeypatch.setattr(service.pending, 'mark_failed', lambda *a, **kw: mark_failed_calls.append(1) or False)
+
+    reply = service.handle(_message('msg:confirm', '\u786e\u8ba4 ' + code))
+
+    assert len(mark_failed_calls) == 0
+    assert '\u5df2\u63d0\u4ea4' in reply
+    assert store.wecom_pending_feedback.docs[0]['status'] == 'applied'
+    ops = [d for d in store.feedback.docs if d.get('recordType') == 'operation']
+    assert len(ops) == 1
+
+
+def test_existing_operation_is_not_marked_failed_after_apply_exception(monkeypatch):
+    store, _, context = _setup()
+    service = WeComFeedbackService(store)
+    service.handle(_message('msg:create', context['code'] + ' 1 \u5224\u65ad\u6b63\u786e'))
+    pending = store.wecom_pending_feedback.docs[0]
+    code = pending['confirmationCode']
+
+    store.feedback.insert_one({
+        '_id': 'operation:' + pending['operationId'],
+        'recordType': 'operation',
+        'repo': context['repo'],
+        'job': context['job'],
+        'branch': context['branch'],
+        'buildNumber': context['buildNumber'],
+        'operationId': pending['operationId'],
+        'action': 'confirm_owner',
+        'feedbackItemKey': 'id:test-failure',
+        'submittedAt': dt.datetime.now(dt.timezone.utc),
+    })
+
+    monkeypatch.setattr(service.feedback, 'apply_feedback',
+                        lambda **kw: (_ for _ in ()).throw(RuntimeError('apply failed')))
+
+    mark_failed_calls = []
+    monkeypatch.setattr(service.pending, 'mark_failed', lambda *a, **kw: mark_failed_calls.append(1) or False)
+
+    reply = service.handle(_message('msg:confirm', '\u786e\u8ba4 ' + code))
+
+    assert len(mark_failed_calls) == 0
+    assert '\u5df2\u63d0\u4ea4' in reply
+    assert store.wecom_pending_feedback.docs[0]['status'] == 'applied'
+
+
+# --- Regression: expired status persistence ---
+
+def test_expired_claim_persists_expired_status():
+    store, _, context = _setup()
+    service = WeComFeedbackService(store)
+    service.handle(_message('msg:create', context['code'] + ' 1 \u5224\u65ad\u6b63\u786e'))
+    pending = store.wecom_pending_feedback.docs[0]
+    code = pending['confirmationCode']
+
+    pending['confirmationExpiresAt'] = dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=1)
+
+    reply = service.handle(_message('msg:confirm', '\u786e\u8ba4 ' + code))
+
+    assert '\u5df2\u8fc7\u671f' in reply
+    assert store.wecom_pending_feedback.docs[0]['status'] == 'expired'
+
+
+def test_expired_pending_remains_expired_on_next_request():
+    store, _, context = _setup()
+    service = WeComFeedbackService(store)
+    service.handle(_message('msg:create', context['code'] + ' 1 \u5224\u65ad\u6b63\u786e'))
+    pending = store.wecom_pending_feedback.docs[0]
+    code = pending['confirmationCode']
+
+    pending['confirmationExpiresAt'] = dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=1)
+
+    reply1 = service.handle(_message('msg:confirm1', '\u786e\u8ba4 ' + code))
+    assert '\u5df2\u8fc7\u671f' in reply1
+    assert store.wecom_pending_feedback.docs[0]['status'] == 'expired'
+
+    reply2 = service.handle(_message('msg:confirm2', '\u786e\u8ba4 ' + code))
+    assert '\u5df2\u8fc7\u671f' in reply2
+    assert store.wecom_pending_feedback.docs[0]['status'] == 'expired'
+
+
+# --- Regression: cancel state classification ---
+
+def test_cancel_returns_forbidden_for_other_user():
+    store, _, context = _setup()
+    service = WeComFeedbackService(store)
+    service.handle(_message('msg:create', context['code'] + ' 1 \u5224\u65ad\u6b63\u786e'))
+    code = store.wecom_pending_feedback.docs[0]['confirmationCode']
+
+    reply = service.handle(_message('msg:cancel', '\u53d6\u6d88 ' + code, userid='other_user'))
+
+    assert '\u53ea\u80fd\u7531\u53d1\u8d77' in reply
+
+
+def test_cancel_returns_expired_after_confirmation_window():
+    store, _, context = _setup()
+    service = WeComFeedbackService(store)
+    service.handle(_message('msg:create', context['code'] + ' 1 \u5224\u65ad\u6b63\u786e'))
+    pending = store.wecom_pending_feedback.docs[0]
+    code = pending['confirmationCode']
+
+    pending['confirmationExpiresAt'] = dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=1)
+
+    reply = service.handle(_message('msg:cancel', '\u53d6\u6d88 ' + code))
+
+    assert '\u5df2\u8fc7\u671f' in reply
+    assert store.wecom_pending_feedback.docs[0]['status'] == 'expired'
+
+
+# --- Regression: CAS token safety ---
+
+def test_old_apply_token_cannot_mark_applied():
+    store, _, context = _setup()
+    service = WeComFeedbackService(store)
+    service.handle(_message('msg:create', context['code'] + ' 1 \u5224\u65ad\u6b63\u786e'))
+    pending = store.wecom_pending_feedback.docs[0]
+    code = pending['confirmationCode']
+
+    status, claimed = service.pending.claim(code, 'wangwu')
+    assert status == 'claimed'
+    original_token = claimed['applyToken']
+
+    claimed['applyToken'] = 'different_token'
+
+    result = service.pending.mark_applied(claimed, original_token)
+    assert result is False
+    assert store.wecom_pending_feedback.docs[0]['status'] == 'applying'
+
+
+def test_old_apply_token_cannot_mark_failed():
+    store, _, context = _setup()
+    service = WeComFeedbackService(store)
+    service.handle(_message('msg:create', context['code'] + ' 1 \u5224\u65ad\u6b63\u786e'))
+    pending = store.wecom_pending_feedback.docs[0]
+    code = pending['confirmationCode']
+
+    status, claimed = service.pending.claim(code, 'wangwu')
+    assert status == 'claimed'
+    original_token = claimed['applyToken']
+
+    claimed['applyToken'] = 'different_token'
+
+    result = service.pending.mark_failed(claimed, original_token, 'test error')
+    assert result is False
+    assert store.wecom_pending_feedback.docs[0]['status'] == 'applying'
+
+
+def test_old_apply_token_cannot_mark_stale():
+    store, _, context = _setup()
+    service = WeComFeedbackService(store)
+    service.handle(_message('msg:create', context['code'] + ' 1 \u5224\u65ad\u6b63\u786e'))
+    pending = store.wecom_pending_feedback.docs[0]
+    code = pending['confirmationCode']
+
+    status, claimed = service.pending.claim(code, 'wangwu')
+    assert status == 'claimed'
+    original_token = claimed['applyToken']
+
+    claimed['applyToken'] = 'different_token'
+
+    result = service.pending.mark_stale(claimed, original_token, 'test reason')
+    assert result is False
+    assert store.wecom_pending_feedback.docs[0]['status'] == 'applying'
+
+
+def test_mark_applied_clears_token_and_lease():
+    store, _, context = _setup()
+    service = WeComFeedbackService(store)
+    service.handle(_message('msg:create', context['code'] + ' 1 \u5224\u65ad\u6b63\u786e'))
+    pending = store.wecom_pending_feedback.docs[0]
+    code = pending['confirmationCode']
+
+    status, claimed = service.pending.claim(code, 'wangwu')
+    assert status == 'claimed'
+    assert claimed['applyToken'] is not None
+    assert claimed['applyLeaseUntil'] is not None
+
+    result = service.pending.mark_applied(claimed, claimed['applyToken'])
+    assert result is True
+
+    refreshed = store.wecom_pending_feedback.docs[0]
+    assert refreshed['status'] == 'applied'
+    assert refreshed.get('applyToken') is None
+    assert refreshed.get('applyLeaseUntil') is None
