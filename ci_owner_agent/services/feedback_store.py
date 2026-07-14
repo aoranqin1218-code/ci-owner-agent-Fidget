@@ -165,16 +165,6 @@ class FeedbackStore:
                 return notice_doc, item
         return notice_doc, None
 
-    def _deactivate_active(self, scope, key, failure_id, failure_signature, now):
-        clauses = [{"feedbackItemKey": key}]
-        if failure_id:
-            clauses.append({"failureId": failure_id})
-        if failure_signature:
-            clauses.append({"failureSignature": failure_signature})
-        query = {**scope, "isActive": True, "$or": clauses}
-        self.collection.update_many(query, {"$set": {"isActive": False, "updatedAt": now}})
-
-
 def _canonical_signature(value: Any) -> str | None:
     raw = str(value or "").strip()
     return build_responsibility_signature(failure_title=None, failure_summary=None, existing_signature=raw) if raw else None

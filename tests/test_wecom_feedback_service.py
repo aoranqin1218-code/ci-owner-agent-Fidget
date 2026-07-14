@@ -430,3 +430,148 @@ def test_mark_applied_clears_token_and_lease():
     assert refreshed['status'] == 'applied'
     assert refreshed.get('applyToken') is None
     assert refreshed.get('applyLeaseUntil') is None
+
+# --- Regression: mark_applied CAS failure and exception reconciliation ---
+
+def test_mark_applied_cas_failure_reconciles_existing_operation(monkeypatch):
+    """mark_applied returns False; must reconcile, not tell user to retry."""
+    store, _, context = _setup()
+    service = WeComFeedbackService(store)
+    service.handle(_message('msg:create', context['code'] + ' 1 \u5224\u65ad\u6b63\u786e'))
+    pending = store.wecom_pending_feedback.docs[0]
+    code = pending['confirmationCode']
+
+    reconcile_calls = []
+    original_reconcile = service.pending.reconcile_applied
+    def tracking_reconcile(code, op_id):
+        reconcile_calls.append(1)
+        return original_reconcile(code, op_id)
+    monkeypatch.setattr(service.pending, 'mark_applied', lambda *a, **kw: False)
+    monkeypatch.setattr(service.pending, 'reconcile_applied', tracking_reconcile)
+
+    reply = service.handle(_message('msg:confirm', '\u786e\u8ba4 ' + code))
+
+    assert len(reconcile_calls) == 1
+    assert '\u5df2\u63d0\u4ea4' in reply
+    assert store.wecom_pending_feedback.docs[0]['status'] == 'applied'
+    ops = [d for d in store.feedback.docs if d.get('recordType') == 'operation']
+    assert len(ops) == 1
+
+
+def test_mark_applied_exception_reconciles_existing_operation(monkeypatch):
+    """mark_applied raises; must reconcile, not tell user to retry."""
+    store, _, context = _setup()
+    service = WeComFeedbackService(store)
+    service.handle(_message('msg:create', context['code'] + ' 1 \u5224\u65ad\u6b63\u786e'))
+    pending = store.wecom_pending_feedback.docs[0]
+    code = pending['confirmationCode']
+
+    reconcile_calls = []
+    original_reconcile = service.pending.reconcile_applied
+    def tracking_reconcile(code, op_id):
+        reconcile_calls.append(1)
+        return original_reconcile(code, op_id)
+    monkeypatch.setattr(service.pending, 'mark_applied',
+                        lambda *a, **kw: (_ for _ in ()).throw(RuntimeError('mark_applied failed')))
+    monkeypatch.setattr(service.pending, 'reconcile_applied', tracking_reconcile)
+
+    reply = service.handle(_message('msg:confirm', '\u786e\u8ba4 ' + code))
+
+    assert len(reconcile_calls) == 1
+    assert '\u5df2\u63d0\u4ea4' in reply
+    assert store.wecom_pending_feedback.docs[0]['status'] == 'applied'
+    ops = [d for d in store.feedback.docs if d.get('recordType') == 'operation']
+    assert len(ops) == 1
+
+
+def test_operation_lookup_failure_keeps_pending_applying(monkeypatch):
+    """When both apply_feedback and find_by_operation_id raise, keep applying, no mark_failed."""
+    store, _, context = _setup()
+    service = WeComFeedbackService(store)
+    service.handle(_message('msg:create', context['code'] + ' 1 \u5224\u65ad\u6b63\u786e'))
+    pending = store.wecom_pending_feedback.docs[0]
+    code = pending['confirmationCode']
+
+    monkeypatch.setattr(service.feedback, 'apply_feedback',
+                        lambda **kw: (_ for _ in ()).throw(RuntimeError('apply failed')))
+
+    find_calls = [0]
+    def stub_find_by_op_id(op_id):
+        find_calls[0] += 1
+        if find_calls[0] == 1:
+            return None  # pre-check succeeds, no operation
+        raise RuntimeError('mongo down')  # exception handler: lookup fails
+
+    monkeypatch.setattr(service.feedback, 'find_by_operation_id', stub_find_by_op_id)
+
+    mark_failed_calls = []
+    monkeypatch.setattr(service.pending, 'mark_failed', lambda *a, **kw: mark_failed_calls.append(1) or False)
+
+    reply = service.handle(_message('msg:confirm', '\u786e\u8ba4 ' + code))
+
+    assert len(mark_failed_calls) == 0
+    assert '\u6b63\u5728\u786e\u8ba4' in reply
+    assert store.wecom_pending_feedback.docs[0]['status'] == 'applying'
+
+
+# --- Regression: lease reclamation preserves state ---
+
+def test_expired_lease_reclaim_preserves_submitted_at():
+    """Re-claim after lease expiry gives new token, increments attempt, preserves submitted_at."""
+    store, _, context = _setup()
+    service = WeComFeedbackService(store)
+    service.handle(_message('msg:create', context['code'] + ' 1 \u5224\u65ad\u6b63\u786e'))
+    pending = store.wecom_pending_feedback.docs[0]
+    code = pending['confirmationCode']
+
+    # Worker A claims
+    status_a, claimed_a = service.pending.claim(code, 'wangwu')
+    assert status_a == 'claimed'
+    token_a = claimed_a['applyToken']
+    first_submitted_at = claimed_a['operationSubmittedAt']
+    assert claimed_a['applyAttemptCount'] == 1
+
+    # Expire the lease
+    claimed_a['applyLeaseUntil'] = dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=1)
+
+    # Worker B re-claims
+    status_b, claimed_b = service.pending.claim(code, 'wangwu')
+    assert status_b == 'claimed'
+    token_b = claimed_b['applyToken']
+
+    assert token_b != token_a
+    assert claimed_b['applyAttemptCount'] == 2
+    assert claimed_b['operationSubmittedAt'] == first_submitted_at
+
+
+def test_old_worker_cannot_finish_after_lease_reclaim():
+    """After lease reclamation, old token cannot mark_applied, mark_failed, or mark_stale."""
+    store, _, context = _setup()
+    service = WeComFeedbackService(store)
+    service.handle(_message('msg:create', context['code'] + ' 1 \u5224\u65ad\u6b63\u786e'))
+    pending = store.wecom_pending_feedback.docs[0]
+    code = pending['confirmationCode']
+
+    # Worker A claims
+    status_a, claimed_a = service.pending.claim(code, 'wangwu')
+    assert status_a == 'claimed'
+    token_a = claimed_a['applyToken']
+
+    # Expire the lease
+    claimed_a['applyLeaseUntil'] = dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=1)
+
+    # Worker B re-claims
+    status_b, claimed_b = service.pending.claim(code, 'wangwu')
+    assert status_b == 'claimed'
+    token_b = claimed_b['applyToken']
+
+    # Old token A cannot finish
+    assert service.pending.mark_applied(claimed_a, token_a) is False
+    assert service.pending.mark_failed(claimed_a, token_a, 'err') is False
+    assert service.pending.mark_stale(claimed_a, token_a, 'reason') is False
+
+    # Pending still applying with token B
+    refreshed = store.wecom_pending_feedback.docs[0]
+    assert refreshed['status'] == 'applying'
+    assert refreshed['applyToken'] == token_b
+    assert refreshed['applyLeaseUntil'] is not None

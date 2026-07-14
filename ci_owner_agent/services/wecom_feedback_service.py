@@ -129,7 +129,17 @@ class WeComFeedbackService:
                 return "该构建的责任项已经更新，本次确认未提交。请根据最新通知重新发起反馈。"
             return _pending_status_text((self.pending.collection.find_one({"confirmationCode": pending["confirmationCode"]}) or {}).get("status", "applying"))
         except Exception as exc:
-            operation = self.feedback.find_by_operation_id(pending.get("operationId"))
+            operation = None
+            lookup_failed = False
+            try:
+                operation = self.feedback.find_by_operation_id(pending.get("operationId"))
+            except Exception:
+                logging.getLogger(__name__).exception(
+                    "Failed to query operation after apply exception"
+                )
+                lookup_failed = True
+            if lookup_failed:
+                return "反馈结果正在确认，请勿重复提交。"
             if operation:
                 if self.pending.reconcile_applied(pending["confirmationCode"], pending["operationId"]):
                     return "反馈已提交。"
@@ -140,14 +150,26 @@ class WeComFeedbackService:
             except Exception:
                 logging.getLogger(__name__).exception("Failed to mark pending feedback failed")
             return "反馈写入失败，请重新发起反馈。"
+        return self._finalize_applied(pending)
+    def _finalize_applied(self, pending: dict[str, Any]) -> str:
         try:
-            if not self.pending.mark_applied(pending, pending.get("applyToken")):
-                return _pending_status_text((self.pending.collection.find_one({"confirmationCode": pending["confirmationCode"]}) or {}).get("status", "applying"))
+            if self.pending.mark_applied(pending, pending.get("applyToken")):
+                try:
+                    context = pending.get("feedbackContext") or {}
+                    intent = ParsedFeedbackIntent.model_validate(pending.get("intent") or {})
+                    return f"反馈已提交：{context.get('code', '?')} 责任项 {context.get('itemIndex', '?')}（{_action_label(intent.action)}）。"
+                except Exception:
+                    return "反馈已提交。"
         except Exception:
             logging.getLogger(__name__).exception("Failed to mark pending feedback applied")
-            return "反馈状态保存失败，请勿重复提交并联系管理员。"
-        return f"反馈已提交：{context['code']} 责任项 {item['itemIndex']}（{_action_label(intent.action)}）。"
-
+        if self.pending.reconcile_applied(pending["confirmationCode"], pending["operationId"]):
+            return "反馈已提交。"
+        refreshed = self.pending.collection.find_one(
+            {"confirmationCode": pending["confirmationCode"]}
+        ) or {}
+        if refreshed.get("status") == "applied":
+            return "反馈已提交。"
+        return "反馈已经写入，状态正在协调，请勿重复提交。"
     def _list(self, intent: ParsedFeedbackIntent) -> str:
         context = self.contexts.get_active(intent.feedback_code or "")
         if context is None:
