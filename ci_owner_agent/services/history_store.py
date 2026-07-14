@@ -56,7 +56,7 @@ class MongoHistoryStore:
                 from pymongo import MongoClient
             except Exception as exc:
                 raise RuntimeError(f"pymongo is not installed: {exc}") from exc
-            client = MongoClient(uri, serverSelectionTimeoutMS=2000)
+            client = MongoClient(uri, serverSelectionTimeoutMS=2000, tz_aware=True, tzinfo=dt.timezone.utc)
         self.client = client
         self.db = client[db_name]
         self.builds = self.db["ci_builds"]

@@ -1340,3 +1340,141 @@ def test_history_store_find_previous_build_returns_none_when_no_match(repo_cache
         current_build_number=5088,
     )
     assert result is None
+
+
+# --- MongoClient configuration regression ---
+
+def test_mongo_history_store_enables_utc_timezone_aware_decoding(monkeypatch):
+    import datetime as dt
+
+    mongo_client_calls = []
+
+    class FakeMongoClient:
+        def __init__(self, uri, **kwargs):
+            mongo_client_calls.append(dict(uri=uri, kwargs=kwargs))
+
+        def __getitem__(self, name):
+            from tests.test_history_store import FakeDb
+            return FakeDb()
+
+    monkeypatch.setattr("pymongo.MongoClient", FakeMongoClient)
+
+    MongoHistoryStore("mongodb://localhost:27017", "test_db")
+
+    assert len(mongo_client_calls) == 1
+    kwargs = mongo_client_calls[0]["kwargs"]
+    assert kwargs.get("serverSelectionTimeoutMS") == 2000
+    assert kwargs.get("tz_aware") is True
+    assert kwargs.get("tzinfo") == dt.timezone.utc
+
+
+def test_mongo_history_store_does_not_replace_injected_client(monkeypatch):
+    mongo_client_created = []
+
+    class FakeMongoClient:
+        def __init__(self, uri, **kwargs):
+            mongo_client_created.append(1)
+
+        def __getitem__(self, name):
+            from tests.test_history_store import FakeDb
+            return FakeDb()
+
+    monkeypatch.setattr("pymongo.MongoClient", FakeMongoClient)
+
+    injected = FakeMongoClient("ignored")
+    calls_before_store = len(mongo_client_created)
+    store = MongoHistoryStore("mongodb://ignored", "test_db", client=injected)
+    assert len(mongo_client_created) == calls_before_store
+    assert store.client is injected
+
+
+# --- Feedback context UTC-aware expiry regression ---
+
+def test_existing_feedback_context_is_reused_with_utc_aware_expiry():
+    import datetime as dt
+    from ci_owner_agent.services.feedback_context_store import FeedbackContextStore
+    from ci_owner_agent.schemas import CiResponsibilityNotice
+    from tests.test_notification_formatter import item, notice_payload
+
+    store = make_store()
+    notice = CiResponsibilityNotice.model_validate(notice_payload([item("张三")]))
+    key = {"repo": notice.repo, "job": notice.job, "branch": notice.branch, "buildNumber": notice.buildNumber}
+    store.notices.update_one(key, {"$set": {**key, "notice": notice.model_dump(mode="json")}}, upsert=True)
+
+    contexts = FeedbackContextStore(store)
+    first = contexts.get_or_create_for_notice(notice)
+    first_code = first["code"]
+    first_created = first["createdAt"]
+
+    # Verify expiresAt is timezone-aware
+    expires = first.get("expiresAt")
+    assert expires is not None
+    assert expires.tzinfo is not None, "expiresAt must be timezone-aware"
+    assert expires.tzinfo == dt.timezone.utc
+
+    # Second call should reuse
+    second = contexts.get_or_create_for_notice(notice)
+    assert second["code"] == first_code
+    assert second["createdAt"] == first_created
+    assert second["expiresAt"].tzinfo is not None
+
+    # Verify no TypeError on datetime comparison
+    # get_active should work without exception
+    active = contexts.get_active(first_code)
+    assert active is not None
+    assert active["code"] == first_code
+
+
+def test_notification_dry_run_keeps_feedback_code_with_existing_context():
+    import datetime as dt
+    from ci_owner_agent.services.feedback_context_store import FeedbackContextStore
+    from ci_owner_agent.schemas import CiResponsibilityNotice
+    from tests.test_notification_formatter import item, notice_payload
+
+    store = make_store()
+    notice = CiResponsibilityNotice.model_validate(notice_payload([item("张三")]))
+    key = {"repo": notice.repo, "job": notice.job, "branch": notice.branch, "buildNumber": notice.buildNumber}
+    store.notices.update_one(key, {"$set": {**key, "notice": notice.model_dump(mode="json")}}, upsert=True)
+
+    contexts = FeedbackContextStore(store)
+    first = contexts.get_or_create_for_notice(notice)
+    first_code = first["code"]
+    old_updated = first.get("updatedAt")
+
+    # Change the notice's responsibility item slightly
+    new_notice = CiResponsibilityNotice.model_validate(notice_payload([item("张三")]))
+    new_notice.responsibilityItems[0].failureTitle = "更新后的失败"
+    store.notices.update_one(key, {"$set": {**key, "notice": new_notice.model_dump(mode="json")}}, upsert=True)
+
+    # Reuse should update items but keep code
+    second = contexts.get_or_create_for_notice(new_notice)
+    assert second["code"] == first_code
+    assert second["updatedAt"] != old_updated
+    assert second["responsibilityItems"][0]["failureTitle"] == "更新后的失败"
+    assert second["expiresAt"].tzinfo is not None
+
+
+def test_feedback_context_compares_utc_aware_expiry():
+    import datetime as dt
+    from ci_owner_agent.services.feedback_context_store import FeedbackContextStore
+    from ci_owner_agent.schemas import CiResponsibilityNotice
+    from tests.test_notification_formatter import item, notice_payload
+
+    store = make_store()
+    notice = CiResponsibilityNotice.model_validate(notice_payload([item("张三")]))
+    key = {"repo": notice.repo, "job": notice.job, "branch": notice.branch, "buildNumber": notice.buildNumber}
+    store.notices.update_one(key, {"$set": {**key, "notice": notice.model_dump(mode="json")}}, upsert=True)
+
+    contexts = FeedbackContextStore(store)
+    first = contexts.get_or_create_for_notice(notice)
+    first_code = first["code"]
+
+    # Active context should be found (not expired)
+    active = contexts.get_active(first_code)
+    assert active is not None
+    assert active["code"] == first_code
+
+    # Expire the context
+    store.feedback_contexts.docs[0]["expiresAt"] = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=1)
+    expired = contexts.get_active(first_code)
+    assert expired is None, "Expired context must not be returned"
