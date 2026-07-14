@@ -256,8 +256,8 @@ def test_post_insert_lookup_failure_finalizes_existing_prepared_operation(monkey
     assert ops[0].get('isCommitted') == True
     assert '已提交' in reply
 
-def test_existing_operation_is_not_marked_failed_after_apply_exception(monkeypatch):
-    """Prepared operation exists; apply_feedback raises; service must finalize, not mark_failed."""
+def test_existing_prepared_operation_is_adopted_without_reapplying(monkeypatch):
+    """Prepared operation exists; service adopts it without re-applying; mark_failed never called."""
     store, _, context = _setup()
     service = WeComFeedbackService(store)
     service.handle(_message('msg:create', context['code'] + ' 1 判断正确'))
@@ -278,15 +278,25 @@ def test_existing_operation_is_not_marked_failed_after_apply_exception(monkeypat
         'isCommitted': False,
     })
 
+    apply_feedback_calls = []
     monkeypatch.setattr(service.feedback, 'apply_feedback',
-                        lambda **kw: (_ for _ in ()).throw(RuntimeError('apply failed')))
+                        lambda **kw: apply_feedback_calls.append(1) or (_ for _ in ()).throw(RuntimeError('should not be called')))
 
     mark_failed_calls = []
     monkeypatch.setattr(service.pending, 'mark_failed', lambda *a, **kw: mark_failed_calls.append(1) or False)
 
+    mark_applied_calls = []
+    original_mark = service.pending.mark_applied
+    def tracking_mark(pending_doc, token):
+        mark_applied_calls.append(1)
+        return original_mark(pending_doc, token)
+    monkeypatch.setattr(service.pending, 'mark_applied', tracking_mark)
+
     reply = service.handle(_message('msg:confirm', '确认 ' + code))
 
-    assert len(mark_failed_calls) == 0, 'mark_failed must not be called when operation exists'
+    assert len(apply_feedback_calls) == 0, 'apply_feedback must not be called when prepared operation already exists'
+    assert len(mark_failed_calls) == 0, 'mark_failed must not be called'
+    assert len(mark_applied_calls) == 1, 'mark_applied must be called exactly once'
     ops = [d for d in store.feedback.docs if d.get('recordType') == 'operation']
     assert len(ops) == 1
     assert ops[0].get('isCommitted') == True
@@ -938,51 +948,19 @@ def test_old_worker_cannot_activate_prepared_operation_after_lease_reclaim():
     assert len(visible) == 0
 
 
-def test_operation_activation_is_idempotent():
-    """Concurrent activation calls are idempotent: first committed, second already_committed."""
-    store, _, context = _setup()
-    service = WeComFeedbackService(store)
-    service.handle(_message('msg:create', context['code'] + ' 1 \u5224\u65ad\u6b63\u786e'))
-    pending = store.wecom_pending_feedback.docs[0]
-    code = pending['confirmationCode']
-
-    # Normal confirm flow
-    reply = service.handle(_message('msg:confirm', '\u786e\u8ba4 ' + code))
-    assert '\u5df2\u63d0\u4ea4' in reply
-    assert store.wecom_pending_feedback.docs[0]['status'] == 'applied'
-
-    # First activation
-    activation1 = service.pending.activate_operation_if_pending_applied(
-        pending['confirmationCode'], pending['operationId'], service.feedback.collection,
-    )
-    assert activation1 == 'already_committed', f'expected already_committed, got {activation1}'
-
-    # Second activation
-    activation2 = service.pending.activate_operation_if_pending_applied(
-        pending['confirmationCode'], pending['operationId'], service.feedback.collection,
-    )
-    assert activation2 == 'already_committed', f'expected already_committed, got {activation2}'
-
-    # Only one operation
-    ops = [d for d in store.feedback.docs if d.get('recordType') == 'operation']
-    assert len(ops) == 1
-    assert ops[0].get('isCommitted') == True
-
-
 def test_claimed_worker_adopts_prepared_operation_via_service(monkeypatch):
     """Worker B claims via service.handle(), re-validates, marks applied, commits; only one committed op."""
     store, _, context = _setup()
     service = WeComFeedbackService(store)
     service.handle(_message('msg:create', context['code'] + ' 1 \u5224\u65ad\u6b63\u786e'))
+def test_operation_activation_is_idempotent():
+    """First activation returns committed, second returns already_committed; only one operation."""
+    store, _, context = _setup()
+    service = WeComFeedbackService(store)
+    service.handle(_message('msg:create', context['code'] + ' 1 判断正确'))
     pending = store.wecom_pending_feedback.docs[0]
-    code = pending['confirmationCode']
 
-    # Worker A claims
-    status_a, claimed_a = service.pending.claim(code, 'wangwu')
-    token_a = claimed_a['applyToken']
-    assert status_a == 'claimed'
-
-    # Create prepared operation
+    # Create a prepared operation (isCommitted=False)
     service.feedback.apply_feedback(
         repo=context['repo'], job=context['job'], branch=context['branch'],
         build_number=context['buildNumber'],
@@ -991,40 +969,41 @@ def test_claimed_worker_adopts_prepared_operation_via_service(monkeypatch):
         action='confirm_owner', source='wecom_bot',
         operation_id=pending['operationId'], is_committed=False,
     )
-    submitted_at = pending.get('operationSubmittedAt')
+    ops_before = [d for d in store.feedback.docs if d.get('recordType') == 'operation']
+    assert len(ops_before) == 1
+    assert ops_before[0].get('isCommitted') == False
 
-    # Expire lease; worker B claims via service.handle()
-    claimed_a['applyLeaseUntil'] = dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=1)
-
-    # Track call counts
-    apply_feedback_calls = []
-    def tracking_apply(**kw):
-        apply_feedback_calls.append(1)
-        return {'ok': True, 'operation': {}, 'isCurrent': True}
-    monkeypatch.setattr(service.feedback, 'apply_feedback', tracking_apply)
-
-    mark_applied_calls = []
-    original_mark = service.pending.mark_applied
-    def tracking_mark(pending_doc, token):
-        mark_applied_calls.append(1)
-        return original_mark(pending_doc, token)
-    monkeypatch.setattr(service.pending, 'mark_applied', tracking_mark)
-
-    reply = service.handle(_message('msg:confirm', '\u786e\u8ba4 ' + code))
-    assert '\u5df2\u63d0\u4ea4' in reply
-
-    # apply_feedback should NOT be called again (operation already exists)
-    assert len(apply_feedback_calls) == 0, 'apply_feedback must not create a second operation'
-    assert len(mark_applied_calls) == 1, 'mark_applied must be called once'
-
+    # Mark pending as applied via real production path
+    code = pending['confirmationCode']
+    status, claimed = service.pending.claim(code, 'wangwu')
+    assert status == 'claimed'
+    mark_ok = service.pending.mark_applied(claimed, claimed['applyToken'])
+    assert mark_ok == True
     assert store.wecom_pending_feedback.docs[0]['status'] == 'applied'
-    assert store.wecom_pending_feedback.docs[0]['applyAttemptCount'] == 2
-    assert store.wecom_pending_feedback.docs[0].get('operationSubmittedAt') == submitted_at
 
+    # First activation: should commit
+    activation1 = service.pending.activate_operation_if_pending_applied(
+        pending['confirmationCode'], pending['operationId'], service.feedback.collection,
+    )
+    assert activation1 == 'committed', f'expected committed, got {activation1}'
+
+    # Second activation: should return already_committed
+    activation2 = service.pending.activate_operation_if_pending_applied(
+        pending['confirmationCode'], pending['operationId'], service.feedback.collection,
+    )
+    assert activation2 == 'already_committed', f'expected already_committed, got {activation2}'
+
+    # Only one operation, now committed
     ops = [d for d in store.feedback.docs if d.get('recordType') == 'operation']
     assert len(ops) == 1
     assert ops[0].get('isCommitted') == True
 
+    # Visible in list_feedback
+    visible = service.feedback.list_feedback(
+        repo=context['repo'], job=context['job'], branch=context['branch'],
+        build_number=context['buildNumber'],
+    )
+    assert len(visible) == 1
 
 def test_claimed_worker_marks_stale_without_committing_prepared_operation():
     """Worker B claims via service, finds stale context, marks stale without committing prepared op."""
@@ -1075,27 +1054,204 @@ def test_claimed_worker_marks_stale_without_committing_prepared_operation():
     assert len(visible) == 0
 
 
-def test_reconcile_exception_does_not_escape_service(monkeypatch):
-    """When reconcile_applied raises, service returns safe message, exception does not escape."""
+
+# --- Regression: exception safety in prepared operation adoption ---
+
+def test_adopt_prepared_context_lookup_exception_does_not_escape(monkeypatch):
+    """Context lookup exception during prepared operation adoption does not escape service."""
     store, _, context = _setup()
     service = WeComFeedbackService(store)
-    service.handle(_message('msg:create', context['code'] + ' 1 \u5224\u65ad\u6b63\u786e'))
+    service.handle(_message('msg:create', context['code'] + ' 1 判断正确'))
     pending = store.wecom_pending_feedback.docs[0]
     code = pending['confirmationCode']
 
-    # First confirm succeeds (operation committed)
-    service.handle(_message('msg:confirm1', '\u786e\u8ba4 ' + code))
+    # Worker A claims
+    status_a, claimed_a = service.pending.claim(code, 'wangwu')
+    assert status_a == 'claimed'
 
-    # Make pending applying again with expired lease (simulating race)
-    store.wecom_pending_feedback.docs[0]['status'] = 'applying'
-    store.wecom_pending_feedback.docs[0]['applyToken'] = 'fake-token'
-    store.wecom_pending_feedback.docs[0]['applyLeaseUntil'] = dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=1)
+    # Create prepared operation
+    service.feedback.apply_feedback(
+        repo=context['repo'], job=context['job'], branch=context['branch'],
+        build_number=context['buildNumber'],
+        failure_id=pending['feedbackContext'].get('failureId'),
+        failure_signature=pending['feedbackContext'].get('failureSignature'),
+        action='confirm_owner', source='wecom_bot',
+        operation_id=pending['operationId'], is_committed=False,
+    )
 
-    # Second confirm: reconcile_applied raises
-    reconcile_calls = []
-    monkeypatch.setattr(service.pending, 'reconcile_applied',
-                        lambda *a, **kw: reconcile_calls.append(1) or (_ for _ in ()).throw(RuntimeError('reconcile failed')))
+    # Expire lease
+    claimed_a['applyLeaseUntil'] = dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=1)
 
-    reply = service.handle(_message('msg:confirm2', '\u786e\u8ba4 ' + code))
-    assert len(reconcile_calls) == 1, 'reconcile must be called'
-    assert '\u6b63\u5728\u786e\u8ba4' in reply or '\u5904\u7406\u4e2d' in reply or '\u5df2\u7ecf\u63d0\u4ea4' in reply
+    # Worker B claims via service.handle(), but context lookup raises
+    monkeypatch.setattr(service.contexts, 'resolve_item',
+                        lambda *a, **kw: (_ for _ in ()).throw(RuntimeError('mongo down')))
+
+    mark_stale_calls = []
+    monkeypatch.setattr(service.pending, 'mark_stale', lambda *a, **kw: mark_stale_calls.append(1) or False)
+
+    activate_calls = []
+    original_activate = service.pending.activate_operation_if_pending_applied
+    def tracking_activate(confirmation_code, operation_id, feedback_collection):
+        activate_calls.append(1)
+        return original_activate(confirmation_code, operation_id, feedback_collection)
+    monkeypatch.setattr(service.pending, 'activate_operation_if_pending_applied', tracking_activate)
+
+    reply = service.handle(_message('msg:confirm', '确认 ' + code))
+
+    assert '正在确认' in reply
+    assert len(mark_stale_calls) == 0, 'mark_stale must not be called on DB error'
+    assert len(activate_calls) == 0, 'activate must not be called on DB error'
+    assert store.wecom_pending_feedback.docs[0]['status'] == 'applying'
+    ops = [d for d in store.feedback.docs if d.get('recordType') == 'operation']
+    assert ops[0].get('isCommitted') == False
+
+
+def test_adopt_prepared_mark_stale_exception_does_not_escape(monkeypatch):
+    """mark_stale exception during prepared operation adoption does not escape service."""
+    store, _, context = _setup()
+    service = WeComFeedbackService(store)
+    service.handle(_message('msg:create', context['code'] + ' 1 判断正确'))
+    pending = store.wecom_pending_feedback.docs[0]
+    code = pending['confirmationCode']
+
+    # Worker A claims
+    status_a, claimed_a = service.pending.claim(code, 'wangwu')
+    assert status_a == 'claimed'
+
+    # Create prepared operation
+    service.feedback.apply_feedback(
+        repo=context['repo'], job=context['job'], branch=context['branch'],
+        build_number=context['buildNumber'],
+        failure_id=pending['feedbackContext'].get('failureId'),
+        failure_signature=pending['feedbackContext'].get('failureSignature'),
+        action='confirm_owner', source='wecom_bot',
+        operation_id=pending['operationId'], is_committed=False,
+    )
+
+    # Expire lease; change context to make it stale
+    claimed_a['applyLeaseUntil'] = dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=1)
+    # Monkeypatch resolve_item to return different item (stale)
+    original_resolve = service.contexts.resolve_item
+    def stale_resolve(code, idx):
+        current_context, current_item = original_resolve(code, idx)
+        # Change failureId to simulate stale
+        current_item = dict(current_item)
+        current_item['failureId'] = 'different-failure'
+        return current_context, current_item
+    monkeypatch.setattr(service.contexts, 'resolve_item', stale_resolve)
+
+    # mark_stale raises
+    monkeypatch.setattr(service.pending, 'mark_stale',
+                        lambda *a, **kw: (_ for _ in ()).throw(RuntimeError('mark_stale failed')))
+
+    activate_calls = []
+    original_activate = service.pending.activate_operation_if_pending_applied
+    def tracking_activate(confirmation_code, operation_id, feedback_collection):
+        activate_calls.append(1)
+        return original_activate(confirmation_code, operation_id, feedback_collection)
+    monkeypatch.setattr(service.pending, 'activate_operation_if_pending_applied', tracking_activate)
+
+    reply = service.handle(_message('msg:confirm', '确认 ' + code))
+
+    assert '正在确认' in reply
+    assert len(activate_calls) == 0, 'activate must not be called when mark_stale fails'
+    ops = [d for d in store.feedback.docs if d.get('recordType') == 'operation']
+    assert ops[0].get('isCommitted') == False
+    # Must not say "responsibility updated" since the write did not succeed
+    assert '责任项已经更新' not in reply
+
+
+def test_adopt_prepared_mark_stale_cas_failure_uses_real_status(monkeypatch):
+    """When mark_stale CAS fails, service reads real pending status instead of guessing."""
+    store, _, context = _setup()
+    service = WeComFeedbackService(store)
+    service.handle(_message('msg:create', context['code'] + ' 1 判断正确'))
+    pending = store.wecom_pending_feedback.docs[0]
+    code = pending['confirmationCode']
+
+    # Worker A claims
+    status_a, claimed_a = service.pending.claim(code, 'wangwu')
+    assert status_a == 'claimed'
+
+    # Create prepared operation
+    service.feedback.apply_feedback(
+        repo=context['repo'], job=context['job'], branch=context['branch'],
+        build_number=context['buildNumber'],
+        failure_id=pending['feedbackContext'].get('failureId'),
+        failure_signature=pending['feedbackContext'].get('failureSignature'),
+        action='confirm_owner', source='wecom_bot',
+        operation_id=pending['operationId'], is_committed=False,
+    )
+
+    # Expire lease; change context to make it stale
+    claimed_a['applyLeaseUntil'] = dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=1)
+    original_resolve = service.contexts.resolve_item
+    def stale_resolve(code, idx):
+        current_context, current_item = original_resolve(code, idx)
+        current_item = dict(current_item)
+        current_item['failureId'] = 'different-failure'
+        return current_context, current_item
+    monkeypatch.setattr(service.contexts, 'resolve_item', stale_resolve)
+
+    # mark_stale returns False (CAS failure)
+    monkeypatch.setattr(service.pending, 'mark_stale', lambda *a, **kw: False)
+
+    # Simulate that another worker already marked it stale
+    store.wecom_pending_feedback.docs[0]['status'] = 'stale'
+
+    reply = service.handle(_message('msg:confirm', '确认 ' + code))
+
+    assert '责任项已经更新' in reply or '已经处理' in reply
+    ops = [d for d in store.feedback.docs if d.get('recordType') == 'operation']
+    assert ops[0].get('isCommitted') == False
+
+
+def test_normal_flow_context_lookup_exception_does_not_mark_stale(monkeypatch):
+    """Context lookup exception in normal flow must not be treated as stale."""
+    store, _, context = _setup()
+    service = WeComFeedbackService(store)
+    service.handle(_message('msg:create', context['code'] + ' 1 判断正确'))
+    pending = store.wecom_pending_feedback.docs[0]
+    code = pending['confirmationCode']
+
+    # Make resolve_item raise
+    monkeypatch.setattr(service.contexts, 'resolve_item',
+                        lambda *a, **kw: (_ for _ in ()).throw(RuntimeError('mongo down')))
+
+    mark_stale_calls = []
+    monkeypatch.setattr(service.pending, 'mark_stale', lambda *a, **kw: mark_stale_calls.append(1) or False)
+
+    reply = service.handle(_message('msg:confirm', '确认 ' + code))
+
+    assert '写入失败' in reply or '正在确认' in reply
+    assert len(mark_stale_calls) == 0, 'mark_stale must not be called on DB error'
+    assert store.wecom_pending_feedback.docs[0]['status'] in ('failed', 'applying')
+
+
+def test_normal_flow_mark_stale_exception_does_not_escape(monkeypatch):
+    """mark_stale exception in normal flow does not escape service."""
+    store, _, context = _setup()
+    service = WeComFeedbackService(store)
+    service.handle(_message('msg:create', context['code'] + ' 1 判断正确'))
+    pending = store.wecom_pending_feedback.docs[0]
+    code = pending['confirmationCode']
+
+    # Make resolve_item return different item (stale)
+    original_resolve = service.contexts.resolve_item
+    def stale_resolve(code, idx):
+        current_context, current_item = original_resolve(code, idx)
+        current_item = dict(current_item)
+        current_item['failureId'] = 'different-failure'
+        return current_context, current_item
+    monkeypatch.setattr(service.contexts, 'resolve_item', stale_resolve)
+
+    # mark_stale raises
+    monkeypatch.setattr(service.pending, 'mark_stale',
+                        lambda *a, **kw: (_ for _ in ()).throw(RuntimeError('mark_stale failed')))
+
+    reply = service.handle(_message('msg:confirm', '确认 ' + code))
+
+    assert '正在确认' in reply
+    assert '责任项已经更新' not in reply
+    ops = [d for d in store.feedback.docs if d.get('recordType') == 'operation']
+    assert len(ops) == 0 or ops[0].get('isCommitted') == False

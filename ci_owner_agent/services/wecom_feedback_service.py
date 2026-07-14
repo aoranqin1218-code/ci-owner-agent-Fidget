@@ -106,9 +106,16 @@ class WeComFeedbackService:
             return _pending_status_text(status)
         return self._execute_apply_and_finalize(message, pending)
 
-    def _adopt_prepared_operation(self, pending: dict[str, Any]) -> str:
-        """Re-validate context for a claimed pending with a prepared operation,
-        then finalize using the current token."""
+    def _safe_resolve_current_item(
+        self,
+        pending: dict[str, Any],
+    ):
+        """Safely resolve current context and item for a pending feedback.
+
+        Returns ("ok", current_context, current_item) on success,
+        ("stale", None, None) when item changed or no longer exists,
+        ("error", None, None) when MongoDB or other unrecoverable error occurs.
+        """
         try:
             context = pending["feedbackContext"]
             try:
@@ -116,16 +123,49 @@ class WeComFeedbackService:
                     str(context.get("feedbackCode") or context.get("code") or ""),
                     int(context.get("itemIndex") or 0),
                 )
-            except ValueError as exc:
-                raise StaleFeedbackError() from exc
+            except ValueError:
+                return ("stale", None, None)
             if not _same_failure(context, current_item):
-                raise StaleFeedbackError()
-        except StaleFeedbackError:
-            if self.pending.mark_stale(pending, pending.get("applyToken"), "责任项在确认前已更新"):
+                return ("stale", None, None)
+            return ("ok", current_context, current_item)
+        except Exception:
+            logging.getLogger(__name__).exception("Failed to resolve current item")
+            return ("error", None, None)
+
+    def _safe_mark_stale(
+        self,
+        pending: dict[str, Any],
+        reason: str,
+    ) -> bool | None:
+        """Safely mark pending as stale.
+
+        Returns True on success, False on CAS failure, None on DB exception.
+        """
+        try:
+            return self.pending.mark_stale(pending, pending.get("applyToken"), reason)
+        except Exception:
+            logging.getLogger(__name__).exception("Failed to mark pending stale")
+            return None
+
+    def _adopt_prepared_operation(self, pending: dict[str, Any]) -> str:
+        """Re-validate context for a claimed pending with a prepared operation,
+        then finalize using the current token.
+
+        All paths are exception-safe: DB failures do not escape this method,
+        and the prepared operation stays uncommitted when state is uncertain.
+        """
+        result = self._safe_resolve_current_item(pending)
+        if result[0] == "error":
+            return "反馈结果正在确认，请勿重复提交。"
+        if result[0] == "stale":
+            stale_ok = self._safe_mark_stale(pending, "责任项在确认前已更新")
+            if stale_ok is True:
                 return "该构建的责任项已经更新，本次确认未提交。请根据最新通知重新发起反馈。"
-            return _pending_status_text(
-                self._safe_read_pending(pending).get("status", "applying")
-            )
+            if stale_ok is False:
+                return _pending_status_text(
+                    self._safe_read_pending(pending).get("status", "applying")
+                )
+            return "反馈结果正在确认，请勿重复提交。"
         return self._finalize_prepared_operation(pending)
 
     def _execute_apply_and_finalize(self, message: WeComInboundMessage, pending: dict[str, Any]) -> str:
@@ -171,11 +211,14 @@ class WeComFeedbackService:
                 is_committed=False,
             )
         except StaleFeedbackError:
-            if self.pending.mark_stale(pending, pending.get("applyToken"), "责任项在确认前已更新"):
+            stale_ok = self._safe_mark_stale(pending, "责任项在确认前已更新")
+            if stale_ok is True:
                 return "该构建的责任项已经更新，本次确认未提交。请根据最新通知重新发起反馈。"
-            return _pending_status_text(
-                self._safe_read_pending(pending).get("status", "applying")
-            )
+            if stale_ok is False:
+                return _pending_status_text(
+                    self._safe_read_pending(pending).get("status", "applying")
+                )
+            return "反馈结果正在确认，请勿重复提交。"
         except Exception as exc:
             operation = self._safe_find_operation(pending)
             if operation is _OPERATION_LOOKUP_FAILED:
