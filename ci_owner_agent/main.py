@@ -384,7 +384,11 @@ def main(argv: list[str] | None = None) -> int:
             feedback_code_ttl_days=settings.wecom_feedback_code_ttl_days,
             event_ttl_days=settings.wecom_bot_event_ttl_days,
         )
-        worker.run()
+        try:
+            worker.run()
+        except Exception as exc:
+            print(f"ERROR: WeCom bot stopped because of a fatal error: {exc}", file=sys.stderr)
+            return 2
         return 0
     parser.print_help()
     return 2

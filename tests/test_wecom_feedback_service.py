@@ -43,6 +43,54 @@ def test_context_reuses_code_and_validates_index():
         raise AssertionError("expected out-of-range error")
 
 
+def _notice_with_item(*, repo="sample-ts-repo", branch="dev", failure_id="failure-old", title="旧失败"):
+    payload = notice_payload([item("张三")])
+    payload["repo"] = repo
+    payload["branch"] = branch
+    payload["responsibilityItems"][0]["failureId"] = failure_id
+    payload["responsibilityItems"][0]["failureSignature"] = f"signature-{failure_id}"
+    payload["responsibilityItems"][0]["failureTitle"] = title
+    return CiResponsibilityNotice.model_validate(payload)
+
+
+def test_same_build_reuses_code_and_refreshes_responsibility_items():
+    store = make_store()
+    contexts = FeedbackContextStore(store)
+    first_notice = _notice_with_item()
+    first = contexts.get_or_create_for_notice(first_notice)
+    original_code = first["code"]
+    original_created_at = first["createdAt"]
+    old_failure_id = first["responsibilityItems"][0]["failureId"]
+
+    second_notice = _notice_with_item(failure_id="failure-new", title="新失败")
+    second = contexts.get_or_create_for_notice(second_notice)
+    resolved_context, resolved_item = contexts.resolve_item(original_code, 1)
+
+    assert second["code"] == original_code
+    assert second["createdAt"] == original_created_at
+    assert second["responsibilityItems"][0]["failureTitle"] == "新失败"
+    assert resolved_context["code"] == original_code
+    assert resolved_item["failureId"] == second_notice.responsibilityItems[0].failureId
+    assert resolved_item["failureId"] != old_failure_id
+    scope = {"repo": second_notice.repo, "job": second_notice.job, "branch": second_notice.branch, "buildNumber": second_notice.buildNumber}
+    assert len(list(store.feedback_contexts.find(scope))) == 1
+
+
+def test_context_refresh_isolated_by_repo_and_branch():
+    store = make_store()
+    contexts = FeedbackContextStore(store)
+    primary = contexts.get_or_create_for_notice(_notice_with_item())
+    other_repo = contexts.get_or_create_for_notice(_notice_with_item(repo="other-repo", title="其他仓库失败"))
+    other_branch = contexts.get_or_create_for_notice(_notice_with_item(branch="feature", title="其他分支失败"))
+
+    refreshed = contexts.get_or_create_for_notice(_notice_with_item(failure_id="failure-new", title="刷新后的失败"))
+
+    assert refreshed["code"] == primary["code"]
+    assert contexts.get_active(other_repo["code"])["responsibilityItems"][0]["failureTitle"] == "其他仓库失败"
+    assert contexts.get_active(other_branch["code"])["responsibilityItems"][0]["failureTitle"] == "其他分支失败"
+    assert len(store.feedback_contexts.docs) == 3
+
+
 def test_pending_then_original_sender_confirms_and_audits():
     store, _, context = _setup()
     service = WeComFeedbackService(store)

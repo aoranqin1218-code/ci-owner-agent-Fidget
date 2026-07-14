@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
+from ci_owner_agent.services.wecom_bot_adapter import is_fatal_sdk_error
 from ci_owner_agent.services.wecom_bot_worker import WeComBotWorker
 from tests.test_history_store import make_store
 
@@ -12,9 +15,17 @@ class FakeAdapter:
         self.replies = []
         self.started = False
         self.stopped = False
+        self.fatal_error_handler = None
 
     def set_text_handler(self, handler):
         self.handler = handler
+
+    def set_fatal_error_handler(self, handler):
+        self.fatal_error_handler = handler
+
+    def emit_sdk_error(self, error):
+        if is_fatal_sdk_error(error):
+            self.fatal_error_handler(error)
 
     async def start(self):
         self.started = True
@@ -62,3 +73,53 @@ def test_run_stops_adapter_cleanly():
         assert adapter.started and adapter.stopped
     asyncio.run(run())
 
+
+def _assert_fatal_error_stops_worker(error):
+    async def run():
+        adapter = FakeAdapter()
+        worker = WeComBotWorker(adapter, make_store())
+        task = asyncio.create_task(worker._run())
+        await asyncio.sleep(0)
+        adapter.emit_sdk_error(error)
+        with pytest.raises(RuntimeError, match="fatal SDK error"):
+            await asyncio.wait_for(task, timeout=1)
+        assert adapter.stopped is True
+
+    asyncio.run(run())
+
+
+def test_authentication_failure_stops_worker_and_propagates_error():
+    _assert_fatal_error_stops_worker(RuntimeError("Authentication failed: invalid credential (code: 40001)"))
+
+
+def test_reconnect_exhaustion_stops_worker_and_propagates_error():
+    _assert_fatal_error_stops_worker(RuntimeError("Max reconnect attempts exceeded"))
+
+
+def test_recoverable_sdk_error_does_not_stop_worker():
+    async def run():
+        adapter = FakeAdapter()
+        worker = WeComBotWorker(adapter, make_store())
+        task = asyncio.create_task(worker._run())
+        await asyncio.sleep(0)
+        adapter.emit_sdk_error(RuntimeError("temporary network error"))
+        await asyncio.sleep(0)
+        assert task.done() is False
+        worker.stop()
+        await task
+        assert adapter.stopped is True
+
+    asyncio.run(run())
+
+
+def test_fatal_error_before_run_still_stops_and_propagates():
+    async def run():
+        adapter = FakeAdapter()
+        worker = WeComBotWorker(adapter, make_store())
+        adapter.emit_sdk_error(RuntimeError("Authentication failed"))
+        with pytest.raises(RuntimeError, match="authentication failed"):
+            await worker._run()
+        assert adapter.started is False
+        assert adapter.stopped is True
+
+    asyncio.run(run())

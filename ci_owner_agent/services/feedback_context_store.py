@@ -19,28 +19,42 @@ class FeedbackContextStore:
             return None
         now = _utcnow()
         key = {"repo": repo, "job": notice.job, "branch": notice.branch, "buildNumber": notice.buildNumber}
+        items = [_context_item(index, item) for index, item in enumerate(notice.responsibilityItems, 1)]
+        refresh = {
+            "responsibilityItems": items,
+            "updatedAt": now,
+            "expiresAt": now + self.ttl,
+            "isActive": True,
+        }
         existing = self.collection.find_one(key)
         if existing and existing.get("isActive", True) and existing.get("expiresAt", now) > now:
-            return existing
-        items = [_context_item(index, item) for index, item in enumerate(notice.responsibilityItems, 1)]
+            self.collection.update_one(
+                {**key, "code": existing.get("code")}, {"$set": refresh}, upsert=False
+            )
+            refreshed = self.collection.find_one(key)
+            if refreshed and refreshed.get("isActive", True) and refreshed.get("expiresAt", now) > now:
+                if refreshed.get("code") != existing.get("code"):
+                    self.collection.update_one(
+                        {**key, "code": refreshed.get("code")}, {"$set": refresh}, upsert=False
+                    )
+                    return self.collection.find_one(key) or refreshed
+                return refreshed
+            existing = refreshed
         for _ in range(8):
             code = "CI-" + "".join(secrets.choice(_ALPHABET) for _ in range(6))
-            doc = {
-                **key,
-                "code": code,
-                "responsibilityItems": items,
-                "createdAt": now,
-                "updatedAt": now,
-                "expiresAt": now + self.ttl,
-                "isActive": True,
-            }
             try:
                 if existing:
                     self.collection.update_one(
-                        {**key, "code": existing.get("code")}, {"$set": doc}, upsert=False
+                        {**key, "code": existing.get("code")},
+                        {"$set": {"code": code, "createdAt": now, **refresh}},
+                        upsert=False,
                     )
                 else:
-                    self.collection.update_one(key, {"$setOnInsert": doc}, upsert=True)
+                    self.collection.update_one(
+                        key,
+                        {"$setOnInsert": {"code": code, "createdAt": now}, "$set": refresh},
+                        upsert=True,
+                    )
                 stored = self.collection.find_one(key)
                 if stored and stored.get("isActive", True) and stored.get("expiresAt", now) > now:
                     return stored
@@ -49,7 +63,10 @@ class FeedbackContextStore:
                     raise
                 concurrent = self.collection.find_one(key)
                 if concurrent and concurrent.get("isActive", True) and concurrent.get("expiresAt", now) > now:
-                    return concurrent
+                    self.collection.update_one(
+                        {**key, "code": concurrent.get("code")}, {"$set": refresh}, upsert=False
+                    )
+                    return self.collection.find_one(key) or concurrent
         raise RuntimeError("unable to allocate a unique feedback code")
 
     def get_active(self, code: str) -> dict[str, Any] | None:

@@ -28,3 +28,26 @@ def test_serve_wecom_bot_missing_optional_sdk_is_clear(monkeypatch, capsys):
     assert result == 2
     assert "wecom-aibot-python-sdk is required" in capsys.readouterr().err
 
+
+def test_cli_returns_nonzero_after_fatal_bot_error(monkeypatch, capsys):
+    monkeypatch.setenv("CI_AGENT_HISTORY_ENABLED", "true")
+    monkeypatch.setattr("ci_owner_agent.main.get_history_store", lambda settings: make_store())
+
+    class FakeSdkAdapter:
+        def __init__(self, bot_id, secret):
+            pass
+
+    class FatalWorker:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def run(self):
+            raise RuntimeError("authentication failed")
+
+    monkeypatch.setattr("ci_owner_agent.services.wecom_bot_adapter.WeComSdkAdapter", FakeSdkAdapter)
+    monkeypatch.setattr("ci_owner_agent.services.wecom_bot_worker.WeComBotWorker", FatalWorker)
+
+    result = main(["serve-wecom-bot", "--bot-id", "placeholder", "--secret", "placeholder"])
+
+    assert result == 2
+    assert "fatal error" in capsys.readouterr().err
