@@ -11,7 +11,8 @@ _ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
 class PendingFeedbackStore:
     def __init__(self, history_store: Any, ttl_seconds: int = 300) -> None:
         self.collection = history_store.wecom_pending_feedback
-        self.ttl = dt.timedelta(seconds=ttl_seconds)
+        self.confirm_ttl = dt.timedelta(seconds=ttl_seconds)
+        self.ttl = dt.timedelta(days=7)
         self.apply_lease = dt.timedelta(seconds=60)
 
     def create(self, *, message: Any, context: dict[str, Any], item: dict[str, Any], intent: Any) -> dict[str, Any]:
@@ -34,7 +35,7 @@ class PendingFeedbackStore:
                 "createdAt": now,
                 "updatedAt": now,
                 "expiresAt": now + self.ttl,
-                "confirmationExpiresAt": now + self.ttl,
+                "confirmationExpiresAt": now + self.confirm_ttl,
             }
             try:
                 self.collection.update_one({"confirmationCode": code}, {"$setOnInsert": doc}, upsert=True)
@@ -68,7 +69,7 @@ class PendingFeedbackStore:
             return ("claimed", doc) if doc else ("applying", self.collection.find_one({"confirmationCode": code}))
         if current.get("status") != "pending":
             return str(current.get("status")), current
-        query = {"confirmationCode": code, "senderUserId": sender_userid, "status": "pending", "expiresAt": {"$gt": now}}
+        query = {"confirmationCode": code, "senderUserId": sender_userid, "status": "pending", "confirmationExpiresAt": {"$gt": now}}
         token = secrets.token_urlsafe(24)
         update = {"$set": {"status": "applying", "applyToken": token, "applyLeaseUntil": now + self.apply_lease, "applyAttemptCount": 1, "operationSubmittedAt": now, "updatedAt": now}}
         try:
@@ -81,28 +82,27 @@ class PendingFeedbackStore:
         return ("claimed", doc) if doc else ("already_processed", self.collection.find_one({"confirmationCode": code}))
 
     def cancel(self, code: str, sender_userid: str) -> str:
-        status, doc = self.claim(code, sender_userid)
-        if status != "claimed" or doc is None:
-            return status
-        self._set_status(doc, "cancelled")
-        return "cancelled"
+        now = _utcnow()
+        self.collection.update_one({"confirmationCode": code.upper(), "senderUserId": sender_userid, "status": "pending", "confirmationExpiresAt": {"$gt": now}}, {"$set": {"status": "cancelled", "updatedAt": now}}, upsert=False)
+        doc = self.collection.find_one({"confirmationCode": code.upper()})
+        return "cancelled" if doc and doc.get("status") == "cancelled" else str((doc or {}).get("status") or "not_found")
 
     def mark_applied(self, doc: dict[str, Any], apply_token: str | None = None) -> bool:
         return self._set_status(doc, "applied", apply_token)
 
-    def mark_failed(self, doc: dict[str, Any], error: str) -> None:
-        self.collection.update_one(
-            {"confirmationCode": doc["confirmationCode"], "status": "applying"},
-            {"$set": {"status": "failed", "error": str(error)[:500], "updatedAt": _utcnow()}},
-            upsert=False,
-        )
+    def mark_failed(self, doc: dict[str, Any], apply_token: str, error: str) -> bool:
+        return self._terminal(doc, apply_token, "failed", error)
 
-    def mark_stale(self, doc: dict[str, Any], reason: str) -> None:
-        self.collection.update_one(
-            {"confirmationCode": doc["confirmationCode"], "status": "applying"},
-            {"$set": {"status": "stale", "error": reason[:500], "updatedAt": _utcnow()}},
-            upsert=False,
-        )
+    def mark_stale(self, doc: dict[str, Any], apply_token: str, reason: str) -> bool:
+        return self._terminal(doc, apply_token, "stale", reason)
+
+    def reconcile_applied(self, confirmation_code: str, operation_id: str) -> bool:
+        self.collection.update_one({"confirmationCode": confirmation_code, "status": "applying", "operationId": operation_id}, {"$set": {"status": "applied", "updatedAt": _utcnow(), "applyToken": None, "applyLeaseUntil": None}}, upsert=False)
+        return bool(self.collection.find_one({"confirmationCode": confirmation_code, "status": "applied", "operationId": operation_id}))
+
+    def _terminal(self, doc, token, status, error):
+        self.collection.update_one({"confirmationCode": doc["confirmationCode"], "status": "applying", "applyToken": token}, {"$set": {"status": status, "error": str(error)[:500], "updatedAt": _utcnow(), "applyToken": None, "applyLeaseUntil": None}}, upsert=False)
+        return bool(self.collection.find_one({"confirmationCode": doc["confirmationCode"], "status": status}))
 
     def _set_status(self, doc: dict[str, Any], status: str, apply_token: str | None = None) -> bool:
         query = {"confirmationCode": doc["confirmationCode"]}

@@ -71,7 +71,13 @@ class WeComFeedbackService:
 
     def _confirm(self, message: WeComInboundMessage, code: str) -> str:
         status, pending = self.pending.claim(code, message.sender_userid)
-        if status != "claimed" or pending is None:
+        if pending is None:
+            return _pending_status_text(status)
+        operation = self.feedback.find_by_operation_id(pending.get("operationId"))
+        if operation:
+            self.pending.reconcile_applied(pending["confirmationCode"], pending["operationId"])
+            return "该确认码已经提交过。" if status == "applied" else "反馈已提交。"
+        if status != "claimed":
             return _pending_status_text(status)
         try:
             context = pending["feedbackContext"]
@@ -112,11 +118,11 @@ class WeComFeedbackService:
                 submitted_at=pending.get("operationSubmittedAt"),
             )
         except StaleFeedbackError:
-            self.pending.mark_stale(pending, "责任项在确认前已更新")
+            self.pending.mark_stale(pending, pending.get("applyToken"), "责任项在确认前已更新")
             return "该构建的责任项已经更新，本次确认未提交。请根据最新通知重新发起反馈。"
         except Exception as exc:
             try:
-                self.pending.mark_failed(pending, str(exc))
+                self.pending.mark_failed(pending, pending.get("applyToken"), str(exc))
             except Exception:
                 logging.getLogger(__name__).exception("Failed to mark pending feedback failed")
             return "反馈写入失败，请重新发起反馈。"

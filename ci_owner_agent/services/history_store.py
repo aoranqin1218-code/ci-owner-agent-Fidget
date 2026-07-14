@@ -105,7 +105,8 @@ class MongoHistoryStore:
             unique=True,
         )
         self.feedback.create_index([("repo", 1), ("job", 1), ("branch", 1), ("buildNumber", 1), ("failureId", 1)])
-        self.feedback.create_index([("repo", 1), ("job", 1), ("branch", 1), ("failureSignature", 1), ("isActive", 1)])
+        _create_index(self.feedback, [("operationId", 1)], unique=True)
+        _create_index(self.feedback, [("recordType", 1), ("repo", 1), ("job", 1), ("branch", 1), ("buildNumber", 1), ("feedbackItemKey", 1), ("submittedAt", -1), ("operationId", -1)])
         _create_index(
             self.feedback,
             [("repo", 1), ("job", 1), ("branch", 1), ("buildNumber", 1), ("feedbackItemKey", 1)],
@@ -125,6 +126,7 @@ class MongoHistoryStore:
         _create_index(self.feedback_contexts, [("expiresAt", 1)], expireAfterSeconds=0)
         self.wecom_pending_feedback.create_index([("confirmationCode", 1)], unique=True)
         self.wecom_pending_feedback.create_index([("eventKey", 1)], unique=True)
+        _create_index(self.wecom_pending_feedback, [("status", 1), ("applyLeaseUntil", 1)])
         _create_index(self.wecom_pending_feedback, [("expiresAt", 1)], expireAfterSeconds=0)
         self.wecom_bot_events.create_index([("eventKey", 1)], unique=True)
         self.wecom_bot_events.create_index([("status", 1), ("leaseUntil", 1)])
