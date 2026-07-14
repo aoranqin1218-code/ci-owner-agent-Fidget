@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 from ci_owner_agent.config import load_settings
 from ci_owner_agent.schemas import BuildInfo, CiResponsibilityNotice
 from ci_owner_agent.server import create_app
+from ci_owner_agent.services.feedback_store import FeedbackStore
 from tests.test_history_store import focused_chunk, make_store
 from tests.test_notification_formatter import item, notice_payload
 
@@ -73,7 +74,7 @@ def test_feedback_post_correct_owner_writes_active_feedback():
     )
 
     assert response.status_code == 303
-    active = [doc for doc in store.feedback.docs if doc.get("isActive")]
+    active = FeedbackStore(store).list_feedback(repo=notice.repo, job=notice.job, branch=notice.branch, build_number=notice.buildNumber)
     assert len(active) == 1
     assert active[0]["correctedOwner"]["name"] == "Li Si"
 
@@ -99,7 +100,7 @@ def test_feedback_post_saves_wecom_userid():
     )
 
     assert response.status_code == 303
-    active = [doc for doc in store.feedback.docs if doc.get("isActive")]
+    active = FeedbackStore(store).list_feedback(repo=notice.repo, job=notice.job, branch=notice.branch, build_number=notice.buildNumber)
     assert active[0]["correctedOwnerWeComUserId"] == "lisi.userid"
 
 
@@ -207,7 +208,7 @@ def test_feedback_post_accepts_valid_token():
     )
 
     assert response.status_code == 303
-    active = [doc for doc in store.feedback.docs if doc.get("isActive")]
+    active = FeedbackStore(store).list_feedback(repo=notice.repo, job=notice.job, branch=notice.branch, build_number=notice.buildNumber)
     assert len(active) == 1
     assert active[0]["action"] == "confirm_owner"
 
