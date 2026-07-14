@@ -61,6 +61,7 @@ class Settings:
     notification_dedup_enabled: bool
     metrics_enabled: bool
     metrics_file: Path
+    weekly_test_report_config_file: Path
 
 
 def _int_env(name: str, default: int) -> int:
@@ -183,6 +184,9 @@ def load_settings(env_file: str | Path | None = None) -> Settings:
         notification_dedup_enabled=_bool_env("CI_AGENT_NOTIFICATION_DEDUP_ENABLED", True),
         metrics_enabled=_bool_env("CI_AGENT_METRICS_ENABLED", False),
         metrics_file=Path(os.getenv("CI_AGENT_METRICS_FILE", "./runs/metrics/ci_analysis_metrics.jsonl")).expanduser(),
+        weekly_test_report_config_file=Path(
+            os.getenv("CI_AGENT_WEEKLY_TEST_REPORT_CONFIG_FILE", "config/weekly-test-report.yml")
+        ).expanduser(),
     )
 
 
@@ -213,4 +217,5 @@ def public_settings(settings: Settings) -> dict[str, object]:
     data["wecom_user_mapping_file"] = str(settings.wecom_user_mapping_file) if settings.wecom_user_mapping_file else None
     data["test_maintainer_mapping_file"] = str(settings.test_maintainer_mapping_file) if settings.test_maintainer_mapping_file else None
     data["wecom_fallback_userids"] = list(settings.wecom_fallback_userids)
+    data["weekly_test_report_config_file"] = str(settings.weekly_test_report_config_file)
     return data

@@ -780,3 +780,51 @@ python -m pytest tests/test_history_store.py
 7. 关闭 dry-run，正式发送通知
 8. 接入 Jenkins analyze 或批量脚本
 ```
+
+## 测试文件失败统计与每周通知
+
+启用历史存储后，每次分析会把 Jenkins 的真实构建时间保存为 UTC `buildTimestamp`，并把 Agent 执行时间另存为
+`analyzedAt`。本地分析可通过 `analyze-local --build-timestamp 2026-07-13T16:35:00+08:00` 提供真实时间；
+缺少该值的历史记录仍计入历史总数，但不会归入任何自然周。Git commit 时间不会被当作构建时间。
+
+测试文件统计按 `repo + job + branch + testFilePath` 隔离。同一文件在同一构建中只产生一条
+`ci_test_file_failures` 事件，`failureItemCount` 保留该文件的实际失败项数。有效构建分母只包含
+`SUCCESS`、`FAILURE` 和 `UNSTABLE`。完整构建序列用于计算连续失败；`ABORTED`/`NOT_BUILT` 跳过，
+其他测试失败会中断当前文件的连续失败。
+
+周报阈值位于 `config/weekly-test-report.yml`，也可用
+`CI_AGENT_WEEKLY_TEST_REPORT_CONFIG_FILE` 指向其他文件。配置严格校验，支持
+`weeklyFailedBuildCount`、`consecutiveFailureCount`、`weeklyFailureRate`、
+`totalFailedBuildCount`、`minimumCompletedBuildCount` 以及规则内 `all`/`any`。
+`topN` 只限制展示数量，绝不会把未达阈值的项目提升为重点；普通项目默认不 @ 维护人，没有重点项目时默认不发送。
+
+```powershell
+python -m ci_owner_agent test-failure-stats --repo fx-code `
+  --job services/fx-code-unittest --branch dev --period current-week --top 20 --format json
+
+python -m ci_owner_agent weekly-test-report --repo fx-code `
+  --job services/fx-code-unittest --branch dev --period previous-week --notify
+
+python scripts/backfill_test_file_failures.py --repo fx-code `
+  --job services/fx-code-unittest --branch dev --dry-run
+```
+
+周报发送记录独立保存在 `ci_report_notifications`，同一周期、范围和渠道默认只发送一次；使用
+`weekly-test-report --force --notify` 可重发，`--dry-run` 不调用 webhook，也不写成功发送记录。
+历史回填只读取已有 notice、失败块和构建记录，不调用 LLM；确认 dry-run 结果后去掉 `--dry-run`，需要替换旧事件时加 `--overwrite`。
+
+Jenkins 可由外部调度器每周触发（Python 进程本身不常驻调度）：
+
+```groovy
+triggers {
+    cron('H 9 * * 1')
+}
+steps {
+    powershell 'python -m ci_owner_agent weekly-test-report --repo fx-code --job services/fx-code-unittest --branch dev --period previous-week --notify'
+}
+```
+
+新增 Mongo 集合及关键索引：
+
+- `ci_test_file_failures`：构建/测试文件唯一索引、文件历史统计索引、`buildTimestamp` 周期索引。
+- `ci_report_notifications`：通知类型、范围、周期和渠道的唯一索引。

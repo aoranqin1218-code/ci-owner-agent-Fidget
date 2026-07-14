@@ -56,6 +56,8 @@ class MongoHistoryStore:
         self.failure_chunks = self.db["ci_failure_chunks"]
         self.failure_facts = self.db["ci_failure_facts"]
         self.notifications = self.db["ci_notifications"]
+        self.test_file_failures = self.db["ci_test_file_failures"]
+        self.report_notifications = self.db["ci_report_notifications"]
         self.feedback = self.db["ci_feedback"]
         self.wecom_users = self.db["ci_wecom_users"]
         self.ensure_indexes()
@@ -67,9 +69,11 @@ class MongoHistoryStore:
         return cls(settings.history_mongo_uri, settings.history_mongo_db)
 
     def ensure_indexes(self) -> None:
-        self.builds.create_index([("job", 1), ("branch", 1), ("buildNumber", 1)], unique=True)
-        self.builds.create_index([("job", 1), ("branch", 1), ("result", 1), ("buildNumber", -1)])
-        self.notices.create_index([("job", 1), ("branch", 1), ("buildNumber", 1)], unique=True)
+        _drop_legacy_unique_index(self.builds, [("job", 1), ("branch", 1), ("buildNumber", 1)])
+        _drop_legacy_unique_index(self.notices, [("job", 1), ("branch", 1), ("buildNumber", 1)])
+        self.builds.create_index([("repo", 1), ("job", 1), ("branch", 1), ("buildNumber", 1)], unique=True)
+        self.builds.create_index([("repo", 1), ("job", 1), ("branch", 1), ("result", 1), ("buildNumber", -1)])
+        self.notices.create_index([("repo", 1), ("job", 1), ("branch", 1), ("buildNumber", 1)], unique=True)
         self.failure_chunks.create_index([("job", 1), ("branch", 1), ("buildNumber", 1)])
         self.failure_chunks.create_index([("job", 1), ("branch", 1), ("chunkHash", 1)])
         self.failure_facts.create_index([("job", 1), ("branch", 1), ("buildNumber", 1)])
@@ -77,6 +81,20 @@ class MongoHistoryStore:
         self.failure_facts.create_index([("job", 1), ("branch", 1), ("signatureKey", 1)])
         self.failure_facts.create_index([("job", 1), ("branch", 1), ("historyEligible", 1), ("buildNumber", 1)])
         self.notifications.create_index([("job", 1), ("branch", 1), ("buildNumber", 1), ("noticeHash", 1), ("channel", 1)])
+        self.test_file_failures.create_index(
+            [("repo", 1), ("job", 1), ("branch", 1), ("buildNumber", 1), ("testFilePath", 1)], unique=True
+        )
+        self.test_file_failures.create_index(
+            [("repo", 1), ("job", 1), ("branch", 1), ("testFilePath", 1), ("buildNumber", -1)]
+        )
+        self.test_file_failures.create_index([("buildTimestamp", -1), ("job", 1), ("branch", 1)])
+        self.report_notifications.create_index(
+            [
+                ("notificationType", 1), ("repo", 1), ("job", 1), ("branch", 1),
+                ("periodStart", 1), ("periodEnd", 1), ("channel", 1),
+            ],
+            unique=True,
+        )
         self.feedback.create_index([("job", 1), ("branch", 1), ("buildNumber", 1), ("failureId", 1)])
         self.feedback.create_index([("job", 1), ("branch", 1), ("failureSignature", 1), ("isActive", 1)])
         self.wecom_users.create_index([("wecomUserId", 1)])
@@ -96,10 +114,12 @@ class MongoHistoryStore:
         error_chunks: list[dict],
     ) -> dict:
         now = dt.datetime.now(dt.timezone.utc)
+        build_timestamp = _utc_datetime(build_info.timestamp)
         canonical_chunks = [_canonical_history_chunk(chunk) for chunk in error_chunks]
         enrich_responsibility_item_signatures(notice, {"chunks": canonical_chunks}, None)
         branch = build_info.branch
-        key = {"job": build_info.job, "branch": branch, "buildNumber": build_info.buildNumber}
+        repo = notice.repo or ""
+        key = {"repo": repo, "job": build_info.job, "branch": branch, "buildNumber": build_info.buildNumber}
         self.builds.update_one(
             key,
             {
@@ -111,8 +131,11 @@ class MongoHistoryStore:
                     "lastSuccessfulBuildNumber": last_successful_build_number,
                     "lastSuccessfulCommit": last_successful_commit,
                     "buildUrl": build_info.buildUrl,
-                    "createdAt": now,
-                }
+                    "buildTimestamp": build_timestamp,
+                    "analyzedAt": now,
+                    "updatedAt": now,
+                },
+                "$setOnInsert": {"createdAt": now},
             },
             upsert=True,
         )
@@ -130,10 +153,12 @@ class MongoHistoryStore:
                     "ownerCommit": notice.owner.commit,
                     "hasHighConfidenceOwner": notice.hasHighConfidenceOwner,
                     "failureReason": notice.failureReason,
+                    "buildTimestamp": build_timestamp,
+                    "analyzedAt": now,
                     **item_summary,
-                    "createdAt": now,
+                    "updatedAt": now,
                 }
-            },
+                , "$setOnInsert": {"createdAt": now}},
             upsert=True,
         )
         self.failure_chunks.delete_many(key)
@@ -165,7 +190,50 @@ class MongoHistoryStore:
                 },
                 upsert=True,
             )
-        return {"ok": True, "chunksSaved": len(chunks_to_save), "inputChunks": len(error_chunks)}
+        event_result = self.replace_test_file_failures(build_info=build_info, notice=notice)
+        return {"ok": True, "chunksSaved": len(chunks_to_save), "inputChunks": len(error_chunks), **event_result}
+
+    def replace_test_file_failures(self, *, build_info: BuildInfo, notice: CiResponsibilityNotice) -> dict:
+        from ci_owner_agent.services.responsibility_path_enricher import is_test_file_path
+
+        repo = notice.repo or ""
+        key = {"repo": repo, "job": build_info.job, "branch": build_info.branch, "buildNumber": build_info.buildNumber}
+        self.test_file_failures.delete_many(key)
+        if str(build_info.result).upper() == "SUCCESS":
+            return {"testFileFailuresSaved": 0, "unidentifiedTestFileItems": 0}
+        grouped: dict[str, list] = {}
+        unidentified = 0
+        for item in notice.responsibilityItems:
+            if not is_test_file_path(item.testFilePath):
+                unidentified += 1
+                continue
+            grouped.setdefault(str(item.testFilePath), []).append(item)
+        now = dt.datetime.now(dt.timezone.utc)
+        timestamp = _utc_datetime(build_info.timestamp)
+        for path, items in grouped.items():
+            failure_ids = list(dict.fromkeys(item.failureId for item in items if item.failureId))
+            signatures = list(dict.fromkeys(item.failureSignature for item in items if item.failureSignature))
+            responsibility_types = list(dict.fromkeys(item.responsibilityType for item in items))
+            owner_names = list(dict.fromkeys(
+                item.owner.name for item in items
+                if item.owner.name and item.owner.name != NO_OWNER_NAME
+            ))
+            event_key = {**key, "testFilePath": path}
+            doc = {
+                **event_key,
+                "buildUrl": build_info.buildUrl,
+                "buildTimestamp": timestamp,
+                "failureItemCount": len(items),
+                "failureIds": failure_ids,
+                "failureSignatures": signatures,
+                "responsibilityTypes": responsibility_types,
+                "ownerNames": owner_names,
+                "updatedAt": now,
+            }
+            self.test_file_failures.update_one(
+                event_key, {"$set": doc, "$setOnInsert": {"createdAt": now}}, upsert=True
+            )
+        return {"testFileFailuresSaved": len(grouped), "unidentifiedTestFileItems": unidentified}
 
     def save_failure_facts(
         self,
@@ -180,7 +248,7 @@ class MongoHistoryStore:
             None,
             {"ok": True, "facts": [fact.model_dump(mode="json") for fact in facts]},
         )
-        key = {"job": build_info.job, "branch": build_info.branch, "buildNumber": build_info.buildNumber}
+        key = {"repo": notice.repo or "", "job": build_info.job, "branch": build_info.branch, "buildNumber": build_info.buildNumber}
         self.failure_facts.delete_many(key)
         notice_doc = notice.model_dump(mode="json")
         for idx, fact in enumerate(facts):
@@ -380,6 +448,27 @@ class MongoHistoryStore:
 def get_history_store(settings: Settings) -> MongoHistoryStore | None:
     if not settings.history_enabled:
         return None
+
+
+def _utc_datetime(value: str | dt.datetime | None) -> dt.datetime | None:
+    if value is None:
+        return None
+    parsed = value if isinstance(value, dt.datetime) else dt.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        raise ValueError("build timestamp must include a timezone")
+    return parsed.astimezone(dt.timezone.utc)
+
+
+def _drop_legacy_unique_index(collection, spec: list[tuple[str, int]]) -> None:
+    """Remove the old cross-repository uniqueness constraint during index migration."""
+    if not hasattr(collection, "list_indexes") or not hasattr(collection, "drop_index"):
+        return
+    target = tuple(spec)
+    for index in collection.list_indexes():
+        key = index.get("key") or {}
+        items = tuple(key.items()) if hasattr(key, "items") else tuple(key)
+        if index.get("unique") and items == target:
+            collection.drop_index(index["name"])
     try:
         return MongoHistoryStore.from_settings(settings)
     except Exception as exc:

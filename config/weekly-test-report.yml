@@ -1,0 +1,33 @@
+timezone: Asia/Shanghai
+topN: 20
+
+important:
+  enabled: true
+  rules:
+    - name: weekly-high-frequency
+      matchMode: all
+      thresholds:
+        weeklyFailedBuildCount: 3
+    - name: consecutive-failure
+      matchMode: all
+      thresholds:
+        consecutiveFailureCount: 2
+    - name: high-failure-rate
+      matchMode: all
+      thresholds:
+        weeklyFailureRate: 0.20
+        minimumCompletedBuildCount: 5
+    - name: historically-unstable-and-still-failing
+      matchMode: all
+      thresholds:
+        totalFailedBuildCount: 20
+        weeklyFailedBuildCount: 1
+
+normal:
+  includeBelowThreshold: true
+  minimumWeeklyFailedBuildCount: 1
+
+notification:
+  sendWhenNoImportantItems: false
+  mentionMaintainersForNormalItems: false
+  mentionMaintainersForImportantItems: true

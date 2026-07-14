@@ -263,6 +263,27 @@ class CiResponsibilityNotice(StrictModel):
         return self
 
 
+class TestFileFailureStat(StrictModel):
+    __test__ = False
+    repo: str
+    job: str
+    branch: str | None = None
+    testFilePath: str
+    totalFailedBuildCount: int = 0
+    totalFailureItemCount: int = 0
+    currentConsecutiveFailureCount: int = 0
+    periodFailedBuildCount: int = 0
+    periodFailureItemCount: int = 0
+    periodCompletedBuildCount: int = 0
+    periodFailureRate: float = 0.0
+    firstFailureAt: str | None = None
+    lastFailureAt: str | None = None
+    lastFailureBuildNumber: int | None = None
+    isImportant: bool = False
+    matchedRuleNames: list[str] = Field(default_factory=list)
+    matchedThresholds: list[str] = Field(default_factory=list)
+
+
 def _no_owner() -> Owner:
     return Owner(type="no_high_confidence_owner", name=NO_OWNER_NAME, email=None, commit=None, confidence=0)
 

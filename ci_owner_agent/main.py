@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import csv
+import io
 import json
 import sys
 from contextlib import nullcontext
@@ -9,7 +11,7 @@ from pathlib import Path
 from ci_owner_agent.constants import NO_OWNER_NAME
 from ci_owner_agent.config import load_settings
 from ci_owner_agent.orchestrator import analyze_jenkins, analyze_local, failure_without_context
-from ci_owner_agent.schemas import BuildInfo, CiResponsibilityNotice
+from ci_owner_agent.schemas import BuildInfo, CiResponsibilityNotice, TestFileFailureStat
 from ci_owner_agent.services.feedback_store import FeedbackStore
 from ci_owner_agent.services.git_client import GitClient
 from ci_owner_agent.services.history_store import get_history_store
@@ -19,6 +21,9 @@ from ci_owner_agent.services.notification_formatter import format_wecom_markdown
 from ci_owner_agent.services.test_maintainer_mapping import TestMaintainerResolver
 from ci_owner_agent.services.wecom_mongo_user_mapping import build_wecom_notice_mapper
 from ci_owner_agent.services.wecom_notifier import send_wecom_markdown
+from ci_owner_agent.services.test_failure_stats import TestFailureStatsService
+from ci_owner_agent.services.weekly_test_report_config import load_weekly_test_report_config, parse_aware_datetime, resolve_period
+from ci_owner_agent.services.weekly_test_report_service import WeeklyTestReportService
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -68,6 +73,17 @@ def build_parser() -> argparse.ArgumentParser:
     local.add_argument("--notify", action="store_true")
     local.add_argument("--notify-dry-run", action="store_true")
     local.add_argument("--force-notify", action="store_true")
+    local.add_argument("--build-timestamp", default=None, help="Build time as timezone-aware ISO 8601")
+
+    stats = subparsers.add_parser("test-failure-stats", help="Query deterministic test-file failure statistics")
+    _add_weekly_scope_arguments(stats)
+    stats.add_argument("--format", choices=["json", "csv", "markdown"], default="json")
+
+    weekly = subparsers.add_parser("weekly-test-report", help="Generate or send the weekly test failure report")
+    _add_weekly_scope_arguments(weekly)
+    weekly.add_argument("--notify", action="store_true")
+    weekly.add_argument("--dry-run", action="store_true")
+    weekly.add_argument("--force", action="store_true")
 
     notify = subparsers.add_parser("notify-notice", help="Send or preview a WeCom markdown notice")
     notify.add_argument("--notice-file", required=True)
@@ -109,6 +125,12 @@ def main(argv: list[str] | None = None) -> int:
     except SystemExit as exc:
         return int(exc.code or 0)
     if args.command == "analyze-local":
+        if args.build_timestamp:
+            try:
+                args.build_timestamp = parse_aware_datetime(args.build_timestamp).isoformat()
+            except ValueError as exc:
+                print(f"ERROR: {exc}", file=sys.stderr)
+                return 2
         git_client = GitClient(settings.repo_cache_dir, max_output_chars=settings.max_tool_output_chars)
         recorder = _start_metrics(settings, args.job, args.build, args.repo, "analyze-local")
         try:
@@ -131,6 +153,7 @@ def main(argv: list[str] | None = None) -> int:
                     last_successful_build_number=args.last_success_build,
                     previous_build_number=args.previous_build,
                     previous_commit=args.previous_commit,
+                    build_timestamp=args.build_timestamp,
                 )
         except ValueError as exc:
             recorder.record_error(exc)
@@ -142,6 +165,43 @@ def main(argv: list[str] | None = None) -> int:
         with use_metrics_recorder(recorder):
             _maybe_notify_notice(notice, settings, args.notify, args.notify_dry_run, args.force_notify)
         _finish_metrics(recorder, settings)
+        return 0
+    if args.command in {"test-failure-stats", "weekly-test-report"}:
+        store = get_history_store(settings)
+        if store is None:
+            print("ERROR: history store disabled or unavailable", file=sys.stderr)
+            return 2
+        try:
+            config = load_weekly_test_report_config(args.config_file or settings.weekly_test_report_config_file)
+            if args.top is not None and args.top <= 0:
+                raise ValueError("--top must be a positive integer")
+            period_start, period_end = resolve_period(
+                timezone_name=config.timezone, period=args.period, period_start=args.period_start, period_end=args.period_end
+            )
+        except ValueError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            return 2
+        jobs, branches = _split_values(args.job), _split_values(args.branch)
+        if args.command == "test-failure-stats":
+            values = TestFailureStatsService(store, config).aggregate(args.repo, jobs, branches, period_start, period_end)[: args.top or config.topN]
+            _print_stats(values, args.format)
+            return 0
+        resolver = TestMaintainerResolver.from_yaml(settings.test_maintainer_mapping_file)
+        service = WeeklyTestReportService(store, config, resolver=resolver,
+                                          fallback_userids=settings.wecom_fallback_userids,
+                                          webhook_url=settings.wecom_webhook_url,
+                                          mention_mode=settings.wecom_mention_mode)
+        report = service.generate(repo=args.repo, jobs=jobs, branches=branches, period_start=period_start,
+                                  period_end=period_end, top_n=args.top)
+        print(report["markdown"])
+        if args.notify or args.dry_run:
+            result = service.notify(report, repo=args.repo, jobs=jobs, branches=branches, period_start=period_start,
+                                    period_end=period_end, dry_run=args.dry_run, force=args.force)
+            if not result.get("ok"):
+                print(f"ERROR: weekly report notification failed: {result.get('error')}", file=sys.stderr)
+                return 2
+            if result.get("reason"):
+                print(json.dumps({k: v for k, v in result.items() if k != "markdown"}, ensure_ascii=False))
         return 0
     if args.command == "analyze":
         recorder = _start_metrics(settings, args.job, args.build, args.repo, "analyze")
@@ -363,6 +423,41 @@ def _notify_notice(notice: CiResponsibilityNotice, settings, *, dry_run: bool, f
                 error=send_result.get("error"),
             )
         return {**send_result, "markdown": markdown}
+
+
+def _add_weekly_scope_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--repo", default=None)
+    parser.add_argument("--job", action="append", default=[])
+    parser.add_argument("--branch", action="append", default=[])
+    parser.add_argument("--period", choices=["current-week", "previous-week"], default="previous-week")
+    parser.add_argument("--period-start", default=None)
+    parser.add_argument("--period-end", default=None)
+    parser.add_argument("--top", type=int, default=None)
+    parser.add_argument("--config-file", default=None)
+
+
+def _split_values(values: list[str]) -> list[str] | None:
+    result = [part.strip() for value in values for part in value.split(",") if part.strip()]
+    return list(dict.fromkeys(result)) or None
+
+
+def _print_stats(stats, output_format: str) -> None:
+    docs = [item.model_dump(mode="json") for item in stats]
+    if output_format == "json":
+        print(json.dumps(docs, ensure_ascii=False, indent=2))
+    elif output_format == "csv":
+        buffer = io.StringIO()
+        fields = list(docs[0]) if docs else list(TestFileFailureStat.model_fields)
+        writer = csv.DictWriter(buffer, fieldnames=fields)
+        writer.writeheader()
+        for doc in docs:
+            writer.writerow({k: json.dumps(v, ensure_ascii=False) if isinstance(v, list) else v for k, v in doc.items()})
+        print(buffer.getvalue(), end="")
+    else:
+        print("| testFilePath | periodFailedBuildCount | consecutive | failureRate | important |")
+        print("|---|---:|---:|---:|---|")
+        for item in stats:
+            print(f"| {item.testFilePath} | {item.periodFailedBuildCount} | {item.currentConsecutiveFailureCount} | {item.periodFailureRate:.1%} | {item.isImportant} |")
 
 
 if __name__ == "__main__":

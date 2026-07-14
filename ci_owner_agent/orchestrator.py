@@ -1013,6 +1013,7 @@ def analyze_local(
     last_successful_build_number: int | None = None,
     previous_build_number: int | None = None,
     previous_commit: str | None = None,
+    build_timestamp: str | None = None,
 ) -> CiResponsibilityNotice:
     settings = settings or load_settings()
     log_provider = LocalFileLogProvider(console_file, max_output_chars=max_output_chars)
@@ -1038,7 +1039,7 @@ def analyze_local(
         buildUrl=build_url,
         branch=branch,
         commit=head_commit,
-        timestamp=None,
+        timestamp=build_timestamp,
         durationMs=None,
         logTail=log_tail,
         warnings=[] if result else [f"result detected from log: {detected}"],
