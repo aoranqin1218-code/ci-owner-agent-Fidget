@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import uuid
 from typing import Any
 
@@ -68,9 +69,7 @@ class FeedbackStore:
         failure_signature = canonical_item_signature(item)
         feedback_item_key = build_feedback_item_key(item)
         operation_id = operation_id or uuid.uuid4().hex
-        existing_operation = self.collection.find_one({"operationId": operation_id})
-        if existing_operation:
-            return {"ok": True, "feedback": existing_operation}
+        active_id = build_active_feedback_id(repo, job, branch, build_number, feedback_item_key)
         build_url = (notice_doc.get("notice") or {}).get("buildUrl")
         original_owner = (item.get("owner") if item else None) or ((notice_doc.get("notice") or {}).get("owner"))
         corrected_owner = None
@@ -105,17 +104,20 @@ class FeedbackStore:
             "reviewerWeComUserId": reviewer_wecom_userid,
             "source": source,
         }
-        for attempt in range(4):
-            now = dt.datetime.now(dt.timezone.utc)
-            self._deactivate_active(scope, feedback_item_key, failure_id, failure_signature, now)
-            doc = {**base_doc, "isActive": True, "createdAt": now, "updatedAt": now}
-            try:
-                self.collection.insert_one(doc)
-                return {"ok": True, "feedback": doc}
-            except DuplicateKeyError:
-                if attempt == 3:
-                    raise
-        raise RuntimeError("unable to serialize feedback write")
+        now = dt.datetime.now(dt.timezone.utc)
+        doc = {**base_doc, "_id": active_id, "recordType": "active", "activeOperationId": operation_id, "isActive": True, "createdAt": now, "updatedAt": now}
+        existing = self.collection.find_one({"_id": active_id, "recordType": "active"})
+        if existing and existing.get("operationId") == operation_id:
+            return {"ok": True, "feedback": existing}
+        operation = {**base_doc, "_id": f"operation:{operation_id}", "recordType": "operation", "isActive": False, "createdAt": now, "updatedAt": now}
+        try:
+            self.collection.insert_one(operation)
+        except DuplicateKeyError:
+            stored = self.collection.find_one({"_id": operation["_id"]})
+            if not stored or any(stored.get(field) != operation.get(field) for field in ("repo", "job", "branch", "buildNumber", "feedbackItemKey", "action")):
+                raise ValueError("operation id already exists with different feedback content")
+        self.collection.find_one_and_replace({"_id": active_id, "recordType": "active"}, doc, upsert=True, return_document=False)
+        return {"ok": True, "feedback": doc, "operation": operation}
 
     def list_feedback(self, *, repo: str, job: str, branch: str, build_number: int) -> list[dict[str, Any]]:
         repo = str(repo or "").strip()
@@ -179,6 +181,11 @@ def canonical_item_signature(item: dict[str, Any]) -> str | None:
         test_file_path=item.get("testFilePath"), failure_file_path=item.get("failureFilePath"),
     )
     return None if signature == "unknown_failure" else signature
+
+
+def build_active_feedback_id(repo: str, job: str, branch: str, build_number: int, feedback_item_key: str) -> str:
+    raw = "\0".join([repo, job, branch, str(build_number), feedback_item_key])
+    return "active:" + hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 def _responsibility_type_for_action(action: str) -> str | None:

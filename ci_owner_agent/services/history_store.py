@@ -112,7 +112,7 @@ class MongoHistoryStore:
             unique=True,
             partialFilterExpression={"isActive": True, "feedbackItemKey": {"$exists": True}},
         )
-        _create_index(self.feedback, [("operationId", 1)], unique=True, partialFilterExpression={"operationId": {"$exists": True}})
+        _create_index(self.feedback, [("operationId", 1)], unique=True, partialFilterExpression={"recordType": "operation", "operationId": {"$exists": True}})
         self.wecom_users.create_index([("wecomUserId", 1)])
         self.wecom_users.create_index([("normalizedEmail", 1)])
         self.wecom_users.create_index([("authorName", 1)])

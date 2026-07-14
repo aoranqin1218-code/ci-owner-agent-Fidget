@@ -113,9 +113,9 @@ def test_feedback_update_with_same_failure_id_does_not_deactivate_other_branch()
     feedback.apply_feedback(repo="repo-a", job="job-x", branch="dev", build_number=100, failure_id="same-id", failure_signature=None, action="confirm_owner")
     assert feedback.list_feedback(repo="repo-a", job="job-x", branch="dev", build_number=100)[0]["action"] == "confirm_owner"
     assert feedback.list_feedback(repo="repo-a", job="job-x", branch="release", build_number=100)[0]["action"] == "mark_flaky"
-    inactive_dev = [doc for doc in store.feedback.docs if doc["branch"] == "dev" and not doc["isActive"]]
-    assert len(inactive_dev) == 1
-    assert all(doc["isActive"] for doc in store.feedback.docs if doc["branch"] == "release")
+    inactive_dev = [doc for doc in store.feedback.docs if doc["branch"] == "dev" and doc.get("recordType") == "operation"]
+    assert len(inactive_dev) == 2
+    assert len([doc for doc in store.feedback.docs if doc["branch"] == "release" and doc.get("recordType") == "active"]) == 1
 
 
 def test_feedback_update_with_same_signature_does_not_deactivate_other_branch():
@@ -132,7 +132,7 @@ def test_feedback_update_with_same_signature_does_not_deactivate_other_branch():
     feedback.apply_feedback(repo="repo-a", job="job-x", branch="dev", build_number=100, failure_id=None, failure_signature="same-signature", action="confirm_owner")
     assert feedback.list_feedback(repo="repo-a", job="job-x", branch="dev", build_number=100)[0]["action"] == "confirm_owner"
     assert feedback.list_feedback(repo="repo-a", job="job-x", branch="release", build_number=100)[0]["action"] == "mark_flaky"
-    assert all(doc["isActive"] for doc in store.feedback.docs if doc["branch"] == "release")
+    assert len([doc for doc in store.feedback.docs if doc["branch"] == "release" and doc.get("recordType") == "active"]) == 1
 
 
 def test_feedback_fills_original_owner_and_signature_from_notice(repo_cache, sample_repo, logs):
@@ -208,7 +208,7 @@ def test_concurrent_feedback_keeps_one_active_audit_history():
         results = list(executor.map(submit, ("A", "B")))
     assert all(result["ok"] for result in results)
     assert len([doc for doc in store.feedback.docs if doc["isActive"]]) == 1
-    assert len(store.feedback.docs) == 2
+    assert len([doc for doc in store.feedback.docs if doc.get("recordType") == "operation"]) == 2
 
 
 def test_history_overlay_correct_owner_changes_inherited_owner(repo_cache, sample_repo, logs):

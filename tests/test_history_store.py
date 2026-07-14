@@ -70,6 +70,18 @@ class FakeCollection:
             doc[field] = (doc.get(field) or 0) + increment
         return doc if bool(return_document) else before
 
+    def find_one_and_replace(self, query, replacement, upsert=False, return_document=False):
+        doc = self.find_one(query)
+        before = dict(doc) if doc else None
+        if doc is None:
+            if not upsert:
+                return None
+            self.insert_one(replacement)
+            return replacement if bool(return_document) else None
+        index = self.docs.index(doc)
+        self.docs[index] = dict(replacement)
+        return self.docs[index] if bool(return_document) else before
+
     def find_one(self, query):
         for doc in self.docs:
             if _matches(doc, query):
