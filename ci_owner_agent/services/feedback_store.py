@@ -131,14 +131,6 @@ class FeedbackStore:
             operation = stored
         return {"ok": True, "feedback": operation, "operation": operation, "isCurrent": self.is_current_operation(operation)}
 
-    def commit_operation(self, operation_id: str) -> bool:
-        result = self.collection.update_one(
-            {"_id": f"operation:{operation_id}", "recordType": "operation", "isCommitted": False},
-            {"$set": {"isCommitted": True}},
-            upsert=False,
-        )
-        return result.modified_count == 1
-
     def list_feedback(self, *, repo: str, job: str, branch: str, build_number: int) -> list[dict[str, Any]]:
         repo = str(repo or "").strip()
         branch = str(branch or "").strip()

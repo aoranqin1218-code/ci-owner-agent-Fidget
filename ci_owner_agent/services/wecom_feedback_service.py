@@ -169,19 +169,25 @@ class WeComFeedbackService:
         return self._finalize_prepared_operation(pending)
 
     def _execute_apply_and_finalize(self, message: WeComInboundMessage, pending: dict[str, Any]) -> str:
-        """Execute apply_feedback then finalize the prepared operation."""
-        try:
-            context = pending["feedbackContext"]
-            try:
-                current_context, current_item = self.contexts.resolve_item(
-                    str(context.get("feedbackCode") or context.get("code") or ""),
-                    int(context.get("itemIndex") or 0),
+        """Execute apply_feedback then finalize the prepared operation.
+
+        Uses _safe_resolve_current_item so that MongoDB failures are not
+        mistaken for stale items and do not cause permanent mark_failed.
+        """
+        resolve_result = self._safe_resolve_current_item(pending)
+        if resolve_result[0] == "error":
+            return "反馈结果正在确认，请勿重复提交。"
+        if resolve_result[0] == "stale":
+            stale_ok = self._safe_mark_stale(pending, "责任项在确认前已更新")
+            if stale_ok is True:
+                return "该构建的责任项已经更新，本次确认未提交。请根据最新通知重新发起反馈。"
+            if stale_ok is False:
+                return _pending_status_text(
+                    self._safe_read_pending(pending).get("status", "applying")
                 )
-            except ValueError as exc:
-                raise StaleFeedbackError() from exc
-            if not _same_failure(context, current_item):
-                raise StaleFeedbackError()
-            context, item = current_context, current_item
+            return "反馈结果正在确认，请勿重复提交。"
+        _context, item = resolve_result[1], resolve_result[2]
+        try:
             intent = ParsedFeedbackIntent.model_validate(pending["intent"])
             owner_name = intent.target_display_name
             owner_email = None
@@ -191,10 +197,10 @@ class WeComFeedbackService:
                     owner_name = matches[0].get("displayName") or owner_name
                     owner_email = matches[0].get("preferredEmail")
             self.feedback.apply_feedback(
-                repo=context["repo"],
-                job=context["job"],
-                branch=context["branch"],
-                build_number=context["buildNumber"],
+                repo=_context["repo"],
+                job=_context["job"],
+                branch=_context["branch"],
+                build_number=_context["buildNumber"],
                 failure_id=item.get("failureId"),
                 failure_signature=item.get("failureSignature"),
                 action=intent.action or "",
@@ -210,15 +216,6 @@ class WeComFeedbackService:
                 submitted_at=pending.get("operationSubmittedAt"),
                 is_committed=False,
             )
-        except StaleFeedbackError:
-            stale_ok = self._safe_mark_stale(pending, "责任项在确认前已更新")
-            if stale_ok is True:
-                return "该构建的责任项已经更新，本次确认未提交。请根据最新通知重新发起反馈。"
-            if stale_ok is False:
-                return _pending_status_text(
-                    self._safe_read_pending(pending).get("status", "applying")
-                )
-            return "反馈结果正在确认，请勿重复提交。"
         except Exception as exc:
             operation = self._safe_find_operation(pending)
             if operation is _OPERATION_LOOKUP_FAILED:
