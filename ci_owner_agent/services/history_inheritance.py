@@ -10,8 +10,8 @@ INHERITABLE_OWNER_TYPES = {"high_confidence", "medium_confidence", "inherited_fa
 BLOCKING_FEEDBACK_ACTIONS = {"mark_flaky", "mark_no_owner"}
 
 
-def active_feedback_docs(store: Any, job: str, branch: str | None) -> list[dict]:
-    query: dict[str, Any] = {"job": job, "isActive": True}
+def active_feedback_docs(store: Any, repo: str, job: str, branch: str | None) -> list[dict]:
+    query: dict[str, Any] = {"repo": repo, "job": job, "isActive": True}
     docs = list(store.feedback.find(query))
     if branch is not None:
         docs = [doc for doc in docs if doc.get("branch") in {branch, None}]
@@ -29,6 +29,7 @@ def sort_feedback_docs(docs: list[dict]) -> list[dict]:
 def find_feedback_override_for_failure_signature(
     store: Any,
     *,
+    repo: str,
     job: str,
     branch: str | None,
     build_number: int | None,
@@ -38,7 +39,7 @@ def find_feedback_override_for_failure_signature(
     failure_signature = canonicalize_failure_signature(failure_signature)
     if not failure_signature:
         return None
-    feedback_docs = active_feedback_docs(store, job, branch)
+    feedback_docs = active_feedback_docs(store, repo, job, branch)
     return find_feedback_override(
         feedback_docs,
         job=job,

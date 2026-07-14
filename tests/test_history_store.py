@@ -371,7 +371,7 @@ def test_mongo_history_store_queries_by_last_successful_build(repo_cache, sample
     for build in [5067, 5072, 5075]:
         build_info = BuildInfo(job=context.job, buildNumber=build, result="FAILURE", buildUrl=context.build_url, branch=context.branch, commit=context.head_commit)
         store.save_analysis(build_info, notice, context.base_commit, context.head_commit, 5068, context.base_commit, [focused_chunk(f"FAIL getJsSdkConfig {build}")])
-    chunks = store.find_historical_failure_chunks(context.job, context.branch, current_build_number=5076, last_successful_build_number=5068)
+    chunks = store.find_historical_failure_chunks(context.repo, context.job, context.branch, current_build_number=5076, last_successful_build_number=5068)
     assert {item["buildNumber"] for item in chunks} == {5072, 5075}
 
 
@@ -388,7 +388,7 @@ def test_history_store_find_previous_build(repo_cache, sample_repo, logs):
     store.save_analysis(previous_build, notice, context.base_commit, "previous-head", 5086, context.base_commit, [])
     store.save_analysis(other_branch_build, notice, context.base_commit, "feature-head", 5086, context.base_commit, [])
 
-    result = store.find_previous_build(job=context.job, branch="dev", current_build_number=5088)
+    result = store.find_previous_build(repo=context.repo, job=context.job, branch="dev", current_build_number=5088)
 
     assert result["buildNumber"] == 5087
     assert result["headCommit"] == "previous-head"
@@ -409,7 +409,7 @@ def test_mongo_history_store_notice_query_filters_branch(repo_cache, sample_repo
     store.save_analysis(dev_build, dev_notice, context.base_commit, context.head_commit, 5068, context.base_commit, [focused_chunk("FAIL dev branch")])
     store.save_analysis(other_build, other_notice, context.base_commit, context.head_commit, 5068, context.base_commit, [focused_chunk("FAIL feature branch")])
 
-    chunks = store.find_historical_failure_chunks(context.job, "dev", current_build_number=5076, last_successful_build_number=5068)
+    chunks = store.find_historical_failure_chunks(context.repo, context.job, "dev", current_build_number=5076, last_successful_build_number=5068)
     assert {item["branch"] for item in chunks} == {"dev"}
     assert all(item["noticeDoc"]["ownerName"] != "Other Branch Owner" for item in chunks)
 
@@ -680,8 +680,9 @@ def test_mark_flaky_blocks_owner_and_returns_no_owner_decision(repo_cache, sampl
     build_info = BuildInfo(job=context.job, buildNumber=5088, result="FAILURE", buildUrl="local://job/5088", branch=context.branch, commit=context.head_commit)
     store.save_analysis(build_info, notice, context.base_commit, context.head_commit, 5087, context.base_commit, [chunk])
     store.feedback.docs.append(
-        {
-            "job": context.job,
+            {
+                "repo": context.repo,
+                "job": context.job,
             "branch": context.branch,
             "buildNumber": 5088,
             "failureSignature": signature,
@@ -716,8 +717,9 @@ def test_correct_owner_has_priority_over_no_owner(repo_cache, sample_repo, logs)
     build_info = BuildInfo(job=context.job, buildNumber=5088, result="FAILURE", buildUrl="local://job/5088", branch=context.branch, commit=context.head_commit)
     store.save_analysis(build_info, notice, context.base_commit, context.head_commit, 5087, context.base_commit, [chunk])
     store.feedback.docs.append(
-        {
-            "job": context.job,
+            {
+                "repo": context.repo,
+                "job": context.job,
             "branch": context.branch,
             "buildNumber": 5088,
             "failureSignature": signature,
@@ -963,6 +965,7 @@ def test_active_feedback_prefers_newer_update_for_same_signature():
     store.feedback.docs.extend(
         [
             {
+                "repo": "sample-ts-repo",
                 "job": "services/fx-code-unittest",
                 "branch": "dev",
                 "buildNumber": 1,
@@ -974,6 +977,7 @@ def test_active_feedback_prefers_newer_update_for_same_signature():
                 "updatedAt": "2026-01-01T00:00:00",
             },
             {
+                "repo": "sample-ts-repo",
                 "job": "services/fx-code-unittest",
                 "branch": "dev",
                 "buildNumber": 1,
@@ -989,6 +993,7 @@ def test_active_feedback_prefers_newer_update_for_same_signature():
 
     feedback = find_feedback_override_for_failure_signature(
         store,
+        repo="sample-ts-repo",
         job="services/fx-code-unittest",
         branch="dev",
         build_number=2,
@@ -1030,6 +1035,7 @@ def test_find_historical_failure_facts_returns_saved_facts(repo_cache, sample_re
     _save_fact_build(store, context, build=7)
 
     facts = store.find_historical_failure_facts(
+        repo=context.repo,
         job=context.job,
         branch="dev",
         current_build_number=8,
@@ -1048,6 +1054,7 @@ def test_find_historical_failure_facts_respects_last_successful_build(repo_cache
     _save_fact_build(store, context, build=7)
 
     facts = store.find_historical_failure_facts(
+        repo=context.repo,
         job=context.job,
         branch="dev",
         current_build_number=8,
@@ -1064,6 +1071,7 @@ def test_find_historical_failure_facts_excludes_current_and_future(repo_cache, s
     _save_fact_build(store, context, build=9)
 
     facts = store.find_historical_failure_facts(
+        repo=context.repo,
         job=context.job,
         branch="dev",
         current_build_number=8,
@@ -1081,6 +1089,7 @@ def test_find_historical_failure_facts_filters_ineligible_and_generic(repo_cache
     _save_fact_build(store, context, build=7)
 
     facts = store.find_historical_failure_facts(
+        repo=context.repo,
         job=context.job,
         branch="dev",
         current_build_number=8,
@@ -1098,6 +1107,7 @@ def test_find_historical_failure_facts_filters_branch(repo_cache, sample_repo, l
     _save_fact_build(store, context, build=7, branch="dev")
 
     facts = store.find_historical_failure_facts(
+        repo=context.repo,
         job=context.job,
         branch="dev",
         current_build_number=8,
@@ -1114,6 +1124,7 @@ def test_find_historical_failure_facts_limits_max_facts(repo_cache, sample_repo,
         _save_fact_build(store, context, build=build)
 
     facts = store.find_historical_failure_facts(
+        repo=context.repo,
         job=context.job,
         branch="dev",
         current_build_number=8,
@@ -1168,6 +1179,7 @@ def test_history_store_find_previous_build(repo_cache, sample_repo, logs):
 
     # Query for branch="dev" should return #5087 with headCommit="previous"
     result = store.find_previous_build(
+        repo=context.repo,
         job=context.job,
         branch="dev",
         current_build_number=5088,
@@ -1196,6 +1208,7 @@ def test_history_store_find_previous_build_matches_branch_none(repo_cache, sampl
 
     # branch="dev" query should match branch=None builds
     result = store.find_previous_build(
+        repo=context.repo,
         job=context.job,
         branch="dev",
         current_build_number=5087,
@@ -1243,6 +1256,7 @@ def test_history_store_find_previous_build_skips_missing_head_commit(repo_cache,
     store.save_analysis(build_5086, notice, "base", "previous", 5068, "base", [])
 
     result = store.find_previous_build(
+        repo=context.repo,
         job=context.job,
         branch="dev",
         current_build_number=5088,
@@ -1257,6 +1271,7 @@ def test_history_store_find_previous_build_returns_none_when_no_match(repo_cache
     store = make_store()
 
     result = store.find_previous_build(
+        repo=context.repo,
         job=context.job,
         branch="dev",
         current_build_number=5088,

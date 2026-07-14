@@ -22,6 +22,7 @@ from tests.test_history_store import make_store
 
 def notice_payload(items):
     return {
+        "repo": "sample-ts-repo",
         "job": "services/fx-code-unittest",
         "buildNumber": 5099,
         "buildUrl": "https://jenkins.example/job/5099/",

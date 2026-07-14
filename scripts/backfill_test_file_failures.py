@@ -6,14 +6,14 @@ import json
 from ci_owner_agent.config import load_settings
 from ci_owner_agent.schemas import BuildInfo, CiResponsibilityNotice
 from ci_owner_agent.services.history_store import get_history_store
+from ci_owner_agent.services.history_store import group_test_file_failure_items
 from ci_owner_agent.services.responsibility_path_enricher import enrich_responsibility_item_paths
-from ci_owner_agent.services.responsibility_path_enricher import is_test_file_path
 
 
-def backfill(store, *, repo: str | None = None, job: str | None = None, branch: str | None = None,
+def backfill(store, *, repo: str, job: str | None = None, branch: str | None = None,
              build_from: int | None = None, build_to: int | None = None, dry_run: bool = False,
              overwrite: bool = False) -> dict:
-    query = {}
+    query = {"repo": repo}
     if job is not None:
         query["job"] = job
     if branch is not None:
@@ -24,41 +24,37 @@ def backfill(store, *, repo: str | None = None, job: str | None = None, branch: 
     for notice_doc in notices:
         raw_notice = notice_doc.get("notice") or {}
         notice = CiResponsibilityNotice.model_validate(raw_notice)
-        effective_repo = notice.repo or notice_doc.get("repo") or ""
-        if repo is not None and effective_repo != repo:
+        effective_repo = str(notice.repo or "").strip()
+        if effective_repo != repo:
             continue
         number = int(notice_doc.get("buildNumber") or 0)
         if build_from is not None and number < build_from or build_to is not None and number > build_to:
             continue
         result["scannedBuildCount"] += 1
-        scope = {"repo": effective_repo, "job": notice_doc.get("job"),
-                 "branch": notice_doc.get("branch"), "buildNumber": number}
+        scope = {"repo": effective_repo, "job": notice.job, "branch": notice.branch, "buildNumber": number}
         existing = list(store.test_file_failures.find(scope))
         if existing and not overwrite:
             result["skippedEventCount"] += len(existing)
             continue
-        chunks = list(store.failure_chunks.find({"job": notice.job, "branch": notice.branch, "buildNumber": number}))
-        enrich_responsibility_item_paths(notice, {"chunks": chunks}, None, repo=notice.repo or scope["repo"])
-        build_doc = store.builds.find_one({"job": notice.job, "branch": notice.branch, "buildNumber": number}) or {}
+        chunks = list(store.failure_chunks.find(scope))
+        fact_docs = list(store.failure_facts.find(scope))
+        failure_facts = {"ok": True, "facts": [doc["fact"] for doc in fact_docs if isinstance(doc.get("fact"), dict)]}
+        enrich_responsibility_item_paths(notice, {"chunks": chunks}, failure_facts, repo=effective_repo)
+        build_doc = store.builds.find_one(scope) or {}
         timestamp = build_doc.get("buildTimestamp") or notice_doc.get("buildTimestamp")
         if timestamp is None:
             result["missingBuildTimestampCount"] += 1
         build_info = BuildInfo(job=notice.job, buildNumber=number, result=notice.result, buildUrl=notice.buildUrl,
                                branch=notice.branch, commit=notice.headCommit,
                                timestamp=timestamp.isoformat() if hasattr(timestamp, "isoformat") else timestamp)
-        identifiable = sum(1 for item in notice.responsibilityItems if is_test_file_path(item.testFilePath))
-        result["unidentifiedPathCount"] += len(notice.responsibilityItems) - identifiable
+        grouped, unidentified = group_test_file_failure_items(notice)
+        result["unidentifiedPathCount"] += unidentified
         if dry_run:
             if existing:
-                result["updatedEventCount"] += identifiable
+                result["updatedEventCount"] += len(grouped)
             else:
-                result["createdEventCount"] += identifiable
+                result["createdEventCount"] += len(grouped)
             continue
-        if build_doc and build_doc.get("repo") != scope["repo"]:
-            store.builds.update_one(
-                {"job": notice.job, "branch": notice.branch, "buildNumber": number},
-                {"$set": {"repo": scope["repo"]}},
-            )
         saved = store.replace_test_file_failures(build_info=build_info, notice=notice)["testFileFailuresSaved"]
         if existing:
             result["updatedEventCount"] += saved
@@ -69,7 +65,7 @@ def backfill(store, *, repo: str | None = None, job: str | None = None, branch: 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Backfill ci_test_file_failures without invoking an LLM")
-    parser.add_argument("--repo")
+    parser.add_argument("--repo", required=True)
     parser.add_argument("--job")
     parser.add_argument("--branch")
     parser.add_argument("--build-from", type=int)

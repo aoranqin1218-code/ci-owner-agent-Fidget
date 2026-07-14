@@ -55,6 +55,7 @@ class FeedbackStore:
             failure_id = failure_id or item.get("failureId")
             failure_signature = failure_signature or item.get("failureSignature")
         branch = notice_doc.get("branch") if notice_doc else None
+        repo = notice_doc.get("repo") if notice_doc else None
         build_url = (notice_doc.get("notice") or {}).get("buildUrl") if notice_doc else None
         original_owner = (item.get("owner") if item else None) or ((notice_doc.get("notice") or {}).get("owner") if notice_doc else None)
         corrected_owner = None
@@ -68,15 +69,16 @@ class FeedbackStore:
             ).model_dump(mode="json")
 
         now = dt.datetime.now(dt.timezone.utc)
-        deactivate_query = {"job": job, "buildNumber": build_number, "isActive": True}
+        deactivate_query = {"repo": repo, "job": job, "buildNumber": build_number, "isActive": True}
         existing = list(self.collection.find(deactivate_query))
         for doc in existing:
             same_id = failure_id and doc.get("failureId") == failure_id
             same_sig = failure_signature and doc.get("failureSignature") == failure_signature
             if same_id or same_sig:
-                self.collection.update_one({"job": doc.get("job"), "buildNumber": doc.get("buildNumber"), "failureId": doc.get("failureId"), "createdAt": doc.get("createdAt")}, {"$set": {"isActive": False, "updatedAt": now}}, upsert=False)
+                self.collection.update_one({"repo": doc.get("repo"), "job": doc.get("job"), "buildNumber": doc.get("buildNumber"), "failureId": doc.get("failureId"), "createdAt": doc.get("createdAt")}, {"$set": {"isActive": False, "updatedAt": now}}, upsert=False)
 
         doc = {
+            "repo": repo,
             "job": job,
             "branch": branch,
             "buildNumber": build_number,
@@ -97,7 +99,7 @@ class FeedbackStore:
             "updatedAt": now,
         }
         self.collection.update_one(
-            {"job": job, "buildNumber": build_number, "failureId": failure_id, "failureSignature": failure_signature, "createdAt": now},
+            {"repo": repo, "job": job, "buildNumber": build_number, "failureId": failure_id, "failureSignature": failure_signature, "createdAt": now},
             {"$set": doc},
             upsert=True,
         )

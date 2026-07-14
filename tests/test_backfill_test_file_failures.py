@@ -7,7 +7,7 @@ from tests.test_history_store import make_store
 def test_backfill_dry_run_is_read_only_and_missing_timestamp_stays_missing():
     store = make_store()
     store.notices.docs.append({
-        "job": "j", "branch": "dev", "buildNumber": 1,
+        "repo": "r", "job": "j", "branch": "dev", "buildNumber": 1,
         "notice": {
             "repo": "r", "job": "j", "branch": "dev", "buildNumber": 1, "buildUrl": "u", "result": "FAILURE",
             "owner": {"type": "no_high_confidence_owner", "name": "暂无高置信责任人", "confidence": 0},

@@ -29,5 +29,4 @@ normal:
 
 notification:
   sendWhenNoImportantItems: false
-  mentionMaintainersForNormalItems: false
   mentionMaintainersForImportantItems: true

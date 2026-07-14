@@ -81,6 +81,7 @@ def history_search_similar_failures(
                 "signatureHash": hashlib.sha256(signature_key.encode("utf-8")).hexdigest(),
             })
         historical = history_store.find_historical_failure_chunks(
+            repo=context.repo,
             job=context.job,
             branch=context.branch,
             current_build_number=context.build_number,

@@ -401,7 +401,7 @@ def _notify_notice(notice: CiResponsibilityNotice, settings, *, dry_run: bool, f
             mention_mode=settings.wecom_mention_mode,
         )
         if store and settings.notification_dedup_enabled and not force and store.notification_sent(
-            job=notice.job, branch=notice.branch, build_number=notice.buildNumber, notice_hash=digest
+            repo=str(notice.repo or ""), job=notice.job, branch=notice.branch, build_number=notice.buildNumber, notice_hash=digest
         ):
             return {"ok": True, "status": "skipped", "markdown": markdown}
         if dry_run:
@@ -426,7 +426,7 @@ def _notify_notice(notice: CiResponsibilityNotice, settings, *, dry_run: bool, f
 
 
 def _add_weekly_scope_arguments(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--repo", default=None)
+    parser.add_argument("--repo", required=True)
     parser.add_argument("--job", action="append", default=[])
     parser.add_argument("--branch", action="append", default=[])
     parser.add_argument("--period", choices=["current-week", "previous-week"], default="previous-week")

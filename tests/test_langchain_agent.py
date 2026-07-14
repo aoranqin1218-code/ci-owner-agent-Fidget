@@ -77,6 +77,7 @@ def make_lc_context(repo_cache, sample_repo, logs):
 
 def high_confidence_payload(context):
     return {
+        "repo": context.repo,
         "job": context.job,
         "buildNumber": context.build_number,
         "buildUrl": context.build_url,

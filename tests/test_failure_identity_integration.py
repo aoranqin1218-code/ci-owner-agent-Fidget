@@ -33,6 +33,7 @@ def _fact(object_id: str) -> FailureFact:
 def _notice(object_id: str) -> CiResponsibilityNotice:
     notice = CiResponsibilityNotice.model_validate(
         {
+            "repo": "repo",
             "job": "job",
             "buildNumber": 8,
             "buildUrl": "local://8",
@@ -121,6 +122,7 @@ def test_same_canonical_fact_is_recalled_and_feedback_uses_canonical_signature()
     store.save_failure_facts(build_info=build, notice=notice, facts=[first])
 
     historical = store.find_historical_failure_facts(
+        repo="repo",
         job="job",
         branch="dev",
         current_build_number=8,

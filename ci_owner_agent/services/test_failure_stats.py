@@ -29,8 +29,7 @@ class TestFailureStatsService:
         if branches:
             query["branch"] = {"$in": branches}
         events = list(self.store.test_file_failures.find(query))
-        builds = list(self.store.builds.find({}))
-        builds = [b for b in builds if _scope_match(b, repo, jobs, branches)]
+        builds = list(self.store.builds.find(query))
 
         events_by_key: dict[tuple, list[dict]] = defaultdict(list)
         for event in events:
@@ -85,12 +84,8 @@ def _consecutive(builds: list[dict], events: dict[int, dict]) -> int:
     return count
 
 
-def _scope_match(doc: dict, repo: str | None, jobs: list[str] | None, branches: list[str] | None) -> bool:
-    return (repo is None or doc.get("repo") == repo) and (not jobs or doc.get("job") in jobs) and (not branches or doc.get("branch") in branches)
-
-
 def _scope_key(doc: dict) -> tuple:
-    return (doc.get("repo") or "", doc.get("job"), doc.get("branch"))
+    return (doc.get("repo"), doc.get("job"), doc.get("branch"))
 
 
 def _file_key(doc: dict) -> tuple:

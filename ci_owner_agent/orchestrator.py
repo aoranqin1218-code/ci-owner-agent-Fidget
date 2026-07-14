@@ -149,6 +149,7 @@ def analyze_failed_build(
             source="repo_sync",
         )
     investigation_scope = _resolve_investigation_scope(
+        repo=repo,
         build_info=build_info,
         base_commit=base_commit,
         head_commit=head_commit,
@@ -325,6 +326,7 @@ def _read_git_range(
 
 def _resolve_investigation_scope(
     *,
+    repo: str,
     build_info: BuildInfo,
     base_commit: str | None,
     head_commit: str | None,
@@ -353,6 +355,7 @@ def _resolve_investigation_scope(
     if history_store is not None:
         try:
             previous_doc = history_store.find_previous_build(
+                repo=repo,
                 job=build_info.job,
                 branch=build_info.branch,
                 current_build_number=build_info.buildNumber,

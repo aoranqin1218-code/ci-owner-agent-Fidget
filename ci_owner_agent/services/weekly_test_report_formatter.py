@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 from zoneinfo import ZoneInfo
 import re
@@ -8,6 +9,23 @@ from ci_owner_agent.schemas import TestFileFailureStat
 from ci_owner_agent.services.notification_formatter import format_test_maintainer_mentions
 from ci_owner_agent.services.test_maintainer_mapping import TestMaintainer
 from ci_owner_agent.services.weekly_test_report_config import WeeklyTestReportConfig
+
+
+@dataclass(frozen=True)
+class WeeklyReportGroups:
+    important: list[TestFileFailureStat]
+    normal: list[TestFileFailureStat]
+    ignored: list[TestFileFailureStat]
+
+
+def classify_weekly_report_stats(stats: list[TestFileFailureStat], config: WeeklyTestReportConfig) -> WeeklyReportGroups:
+    important = [stat for stat in stats if stat.isImportant]
+    normal = [
+        stat for stat in stats
+        if not stat.isImportant and stat.periodFailedBuildCount >= config.normal.minimumWeeklyFailedBuildCount
+    ]
+    ignored = [stat for stat in stats if stat not in important and stat not in normal]
+    return WeeklyReportGroups(important=important, normal=normal, ignored=ignored)
 
 
 def format_weekly_test_report(
@@ -19,8 +37,8 @@ def format_weekly_test_report(
 ) -> str:
     maintainers = maintainers or {}
     limit = top_n or config.topN
-    important = [s for s in stats if s.isImportant]
-    normal = [s for s in stats if not s.isImportant and s.periodFailedBuildCount >= config.normal.minimumWeeklyFailedBuildCount]
+    groups = classify_weekly_report_stats(stats, config)
+    important, normal = groups.important, groups.normal
     selected_important = important[:limit]
     remaining = max(0, limit - len(selected_important))
     selected_normal = normal[:remaining] if config.normal.includeBelowThreshold else []

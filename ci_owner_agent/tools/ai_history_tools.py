@@ -109,6 +109,7 @@ def history_search_similar_failure_facts(
 
         feedback = find_feedback_override_for_failure_signature(
             history_store,
+            repo=context.repo,
             job=context.job,
             branch=context.branch,
             build_number=historical_doc.get("buildNumber"),
@@ -216,6 +217,7 @@ def _new_diagnostics() -> dict:
 
 def _find_historical_facts_with_diagnostics(history_store: MongoHistoryStore, context: AgentRuntimeContext) -> tuple[list[dict], dict]:
     kwargs = {
+        "repo": context.repo,
         "job": context.job,
         "branch": context.branch,
         "current_build_number": context.build_number,

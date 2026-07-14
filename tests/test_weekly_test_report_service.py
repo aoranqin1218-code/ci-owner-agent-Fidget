@@ -22,7 +22,7 @@ def _stat(path="test/A.test.ts", important=True):
 
 
 def test_formatter_strictly_separates_normal_items_without_mentions_and_hides_details():
-    config = WeeklyTestReportConfig.model_validate({"normal": {"includeBelowThreshold": False}})
+    config = WeeklyTestReportConfig.model_validate({"important": {"enabled": False}, "normal": {"includeBelowThreshold": False}})
     markdown = format_weekly_test_report([_stat(important=False)], period_start=START, period_end=END, config=config)
     assert "其他失败测试" in markdown
     assert "共 1 个测试文件" in markdown
@@ -31,7 +31,7 @@ def test_formatter_strictly_separates_normal_items_without_mentions_and_hides_de
 
 
 def test_formatter_top_n_reports_omitted_count_without_changing_priority():
-    config = WeeklyTestReportConfig(topN=1)
+    config = WeeklyTestReportConfig.model_validate({"important": {"enabled": False}, "topN": 1})
     stats = [_stat("test/A.test.ts"), _stat("test/B.test.ts")]
     markdown = format_weekly_test_report(stats, period_start=START, period_end=END, config=config)
     assert "另有 1 项" in markdown
@@ -39,7 +39,7 @@ def test_formatter_top_n_reports_omitted_count_without_changing_priority():
 
 
 def test_formatter_length_limit_removes_whole_items_and_reports_omission():
-    config = WeeklyTestReportConfig(topN=20)
+    config = WeeklyTestReportConfig.model_validate({"important": {"enabled": False}, "topN": 20})
     stats = [_stat(f"test/{'很长的测试路径' * 15}/{index}.test.ts") for index in range(20)]
     markdown = format_weekly_test_report(stats, period_start=START, period_end=END, config=config)
     assert len(markdown.encode("utf-8")) <= 4200
@@ -47,7 +47,7 @@ def test_formatter_length_limit_removes_whole_items_and_reports_omission():
 
 
 def test_service_skips_no_important_and_dry_run_does_not_write():
-    store = make_store(); config = WeeklyTestReportConfig()
+    store = make_store(); config = WeeklyTestReportConfig.model_validate({"important": {"enabled": False}})
     service = WeeklyTestReportService(store, config)
     report = {"importantItemCount": 0, "normalItemCount": 2, "markdown": "x", "digest": "d"}
     result = service.notify(report, repo="r", jobs=["j"], branches=["dev"],
@@ -62,7 +62,7 @@ def test_service_skips_no_important_and_dry_run_does_not_write():
 
 
 def test_notification_period_dedup_and_force(monkeypatch):
-    store = make_store(); config = WeeklyTestReportConfig()
+    store = make_store(); config = WeeklyTestReportConfig.model_validate({"important": {"enabled": False}})
     service = WeeklyTestReportService(store, config, webhook_url="https://example.invalid")
     calls = []
     monkeypatch.setattr("ci_owner_agent.services.weekly_test_report_service.send_wecom_markdown",

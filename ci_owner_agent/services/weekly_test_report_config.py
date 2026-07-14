@@ -52,7 +52,6 @@ class NormalConfig(_StrictModel):
 
 class NotificationConfig(_StrictModel):
     sendWhenNoImportantItems: bool = False
-    mentionMaintainersForNormalItems: bool = False
     mentionMaintainersForImportantItems: bool = True
 
 
@@ -74,6 +73,8 @@ class WeeklyTestReportConfig(_StrictModel):
 
     @model_validator(mode="after")
     def unique_rule_names(self) -> "WeeklyTestReportConfig":
+        if self.important.enabled and not self.important.rules:
+            raise ValueError("important.rules must contain at least one rule when important.enabled is true")
         names = [rule.name for rule in self.important.rules]
         if len(names) != len(set(names)):
             raise ValueError("important rule names must be unique")
