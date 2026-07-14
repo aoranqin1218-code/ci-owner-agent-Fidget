@@ -87,7 +87,7 @@ class PendingFeedbackStore:
         doc = self.collection.find_one({"confirmationCode": code.upper()})
         return "cancelled" if doc and doc.get("status") == "cancelled" else str((doc or {}).get("status") or "not_found")
 
-    def mark_applied(self, doc: dict[str, Any], apply_token: str | None = None) -> bool:
+    def mark_applied(self, doc: dict[str, Any], apply_token: str) -> bool:
         return self._set_status(doc, "applied", apply_token)
 
     def mark_failed(self, doc: dict[str, Any], apply_token: str, error: str) -> bool:
@@ -97,23 +97,23 @@ class PendingFeedbackStore:
         return self._terminal(doc, apply_token, "stale", reason)
 
     def reconcile_applied(self, confirmation_code: str, operation_id: str) -> bool:
-        self.collection.update_one({"confirmationCode": confirmation_code, "status": "applying", "operationId": operation_id}, {"$set": {"status": "applied", "updatedAt": _utcnow(), "applyToken": None, "applyLeaseUntil": None}}, upsert=False)
-        return bool(self.collection.find_one({"confirmationCode": confirmation_code, "status": "applied", "operationId": operation_id}))
+        result = self.collection.update_one({"confirmationCode": confirmation_code, "status": "applying", "operationId": operation_id}, {"$set": {"status": "applied", "updatedAt": _utcnow(), "applyToken": None, "applyLeaseUntil": None}}, upsert=False)
+        return result.modified_count == 1
 
     def _terminal(self, doc, token, status, error):
-        self.collection.update_one({"confirmationCode": doc["confirmationCode"], "status": "applying", "applyToken": token}, {"$set": {"status": status, "error": str(error)[:500], "updatedAt": _utcnow(), "applyToken": None, "applyLeaseUntil": None}}, upsert=False)
-        return bool(self.collection.find_one({"confirmationCode": doc["confirmationCode"], "status": status}))
+        result = self.collection.update_one({"confirmationCode": doc["confirmationCode"], "status": "applying", "applyToken": token}, {"$set": {"status": status, "error": str(error)[:500], "updatedAt": _utcnow(), "applyToken": None, "applyLeaseUntil": None}}, upsert=False)
+        return result.modified_count == 1
 
     def _set_status(self, doc: dict[str, Any], status: str, apply_token: str | None = None) -> bool:
         query = {"confirmationCode": doc["confirmationCode"]}
         if apply_token:
             query.update({"status": "applying", "applyToken": apply_token})
-        self.collection.update_one(
+        result = self.collection.update_one(
             query,
             {"$set": {"status": status, "updatedAt": _utcnow()}},
             upsert=False,
         )
-        return bool(self.collection.find_one({"confirmationCode": doc["confirmationCode"], "status": status}))
+        return result.modified_count == 1
 
 
 class WeComEventStore:

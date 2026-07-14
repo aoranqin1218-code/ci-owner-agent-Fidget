@@ -73,10 +73,17 @@ class WeComFeedbackService:
         status, pending = self.pending.claim(code, message.sender_userid)
         if pending is None:
             return _pending_status_text(status)
+        if status in {"forbidden", "not_found", "expired", "cancelled", "failed", "stale"}:
+            return _pending_status_text(status)
+        if status == "applied":
+            return "该确认码已经提交过。"
+        if status not in {"claimed", "applying"}:
+            return _pending_status_text(status)
         operation = self.feedback.find_by_operation_id(pending.get("operationId"))
         if operation:
-            self.pending.reconcile_applied(pending["confirmationCode"], pending["operationId"])
-            return "该确认码已经提交过。" if status == "applied" else "反馈已提交。"
+            if self.pending.reconcile_applied(pending["confirmationCode"], pending["operationId"]):
+                return "反馈已提交。"
+            return _pending_status_text((self.pending.collection.find_one({"confirmationCode": pending["confirmationCode"]}) or {}).get("status", "applying"))
         if status != "claimed":
             return _pending_status_text(status)
         try:

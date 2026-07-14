@@ -47,7 +47,7 @@ class FakeCollection:
         is_insert = doc is None
         if doc is None:
             if not upsert:
-                return
+                return type("Result", (), {"modified_count": 0})()
             doc = dict(key)
             self.docs.append(doc)
         if is_insert:
@@ -55,6 +55,7 @@ class FakeCollection:
         doc.update(update.get("$set", {}))
         for field, increment in update.get("$inc", {}).items():
             doc[field] = (doc.get(field) or 0) + increment
+        return type("Result", (), {"modified_count": 1})()
 
     def find_one_and_update(self, query, update, upsert=False, return_document=False):
         doc = self.find_one(query)

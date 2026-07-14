@@ -108,6 +108,16 @@ def test_pending_then_original_sender_confirms_and_audits():
     assert "已经提交过" in service.handle(_message("msg:again", f"确认 {confirmation}"))
 
 
+def test_forbidden_user_cannot_reconcile_existing_operation():
+    store, _, context = _setup()
+    service = WeComFeedbackService(store)
+    service.handle(_message("create", f"{context['code']} 1 判断正确"))
+    pending = store.wecom_pending_feedback.docs[0]
+    service.feedback.apply_feedback(repo=context["repo"], job=context["job"], branch=context["branch"], build_number=context["buildNumber"], failure_id=pending["feedbackContext"]["failureId"], failure_signature=None, action="confirm_owner", operation_id=pending["operationId"])
+    assert "只能由发起" in service.handle(_message("other", f"确认 {pending['confirmationCode']}", userid="other"))
+    assert pending["status"] == "pending"
+
+
 def test_pending_confirmation_is_rejected_when_item_changed():
     store = make_store()
     first_notice = _notice_with_item(failure_id="failure-old", title="旧失败")
