@@ -12,6 +12,7 @@ class PendingFeedbackStore:
     def __init__(self, history_store: Any, ttl_seconds: int = 300) -> None:
         self.collection = history_store.wecom_pending_feedback
         self.ttl = dt.timedelta(seconds=ttl_seconds)
+        self.apply_lease = dt.timedelta(seconds=60)
 
     def create(self, *, message: Any, context: dict[str, Any], item: dict[str, Any], intent: Any) -> dict[str, Any]:
         existing = self.collection.find_one({"eventKey": message.event_key})
@@ -33,6 +34,7 @@ class PendingFeedbackStore:
                 "createdAt": now,
                 "updatedAt": now,
                 "expiresAt": now + self.ttl,
+                "confirmationExpiresAt": now + self.ttl,
             }
             try:
                 self.collection.update_one({"confirmationCode": code}, {"$setOnInsert": doc}, upsert=True)
@@ -55,13 +57,20 @@ class PendingFeedbackStore:
             return "not_found", None
         if current.get("senderUserId") != sender_userid:
             return "forbidden", current
-        if current.get("expiresAt", now) <= now:
+        if current.get("status") == "pending" and current.get("confirmationExpiresAt", current.get("expiresAt", now)) <= now:
             self._set_status(current, "expired")
             return "expired", current
+        if current.get("status") == "applying":
+            if current.get("applyLeaseUntil", now) > now:
+                return "applying", current
+            token = secrets.token_urlsafe(24)
+            doc = self.collection.find_one_and_update({"confirmationCode": code, "status": "applying", "applyLeaseUntil": {"$lte": now}}, {"$set": {"applyToken": token, "applyLeaseUntil": now + self.apply_lease, "updatedAt": now}, "$inc": {"applyAttemptCount": 1}}, return_document=_return_after())
+            return ("claimed", doc) if doc else ("applying", self.collection.find_one({"confirmationCode": code}))
         if current.get("status") != "pending":
             return str(current.get("status")), current
         query = {"confirmationCode": code, "senderUserId": sender_userid, "status": "pending", "expiresAt": {"$gt": now}}
-        update = {"$set": {"status": "applying", "updatedAt": now}}
+        token = secrets.token_urlsafe(24)
+        update = {"$set": {"status": "applying", "applyToken": token, "applyLeaseUntil": now + self.apply_lease, "applyAttemptCount": 1, "operationSubmittedAt": now, "updatedAt": now}}
         try:
             from pymongo import ReturnDocument
 
@@ -78,8 +87,8 @@ class PendingFeedbackStore:
         self._set_status(doc, "cancelled")
         return "cancelled"
 
-    def mark_applied(self, doc: dict[str, Any]) -> None:
-        self._set_status(doc, "applied")
+    def mark_applied(self, doc: dict[str, Any], apply_token: str | None = None) -> bool:
+        return self._set_status(doc, "applied", apply_token)
 
     def mark_failed(self, doc: dict[str, Any], error: str) -> None:
         self.collection.update_one(
@@ -95,12 +104,16 @@ class PendingFeedbackStore:
             upsert=False,
         )
 
-    def _set_status(self, doc: dict[str, Any], status: str) -> None:
+    def _set_status(self, doc: dict[str, Any], status: str, apply_token: str | None = None) -> bool:
+        query = {"confirmationCode": doc["confirmationCode"]}
+        if apply_token:
+            query.update({"status": "applying", "applyToken": apply_token})
         self.collection.update_one(
-            {"confirmationCode": doc["confirmationCode"]},
+            query,
             {"$set": {"status": status, "updatedAt": _utcnow()}},
             upsert=False,
         )
+        return bool(self.collection.find_one({"confirmationCode": doc["confirmationCode"], "status": status}))
 
 
 class WeComEventStore:

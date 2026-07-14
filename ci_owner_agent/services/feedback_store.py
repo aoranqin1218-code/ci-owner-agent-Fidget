@@ -61,6 +61,18 @@ class FeedbackStore:
             raise ValueError("owner-name is required for correct_owner")
         if action == "correct_owner" and owner_type not in CORRECT_OWNER_TYPES:
             raise ValueError("owner-type for correct_owner must be high_confidence or medium_confidence")
+        operation_id = operation_id or uuid.uuid4().hex
+        request_payload = {"repo": repo, "job": job, "branch": branch, "buildNumber": build_number,
+            "requestedFailureId": failure_id, "canonicalRequestedFailureSignature": _canonical_signature(failure_signature),
+            "action": action, "ownerName": owner_name, "ownerEmail": owner_email, "ownerType": owner_type,
+            "ownerCommit": owner_commit, "ownerWeComUserId": owner_wecom_userid, "sourceBuildNumber": source_build_number,
+            "note": note, "reviewer": reviewer, "reviewerWeComUserId": reviewer_wecom_userid, "source": source}
+        request_hash = _hash_payload(request_payload)
+        existing = self.find_by_operation_id(operation_id)
+        if existing:
+            if existing.get("requestHash") != request_hash:
+                raise ValueError("operation id already exists with different feedback content")
+            return {"ok": True, "feedback": existing, "operation": existing, "isCurrent": self.is_current_operation(existing)}
 
         notice_doc, item = self._find_notice_item(repo, job, branch, build_number, failure_id, failure_signature)
         if not notice_doc:
@@ -70,7 +82,6 @@ class FeedbackStore:
         failure_id = item.get("failureId")
         failure_signature = canonical_item_signature(item)
         feedback_item_key = build_feedback_item_key(item)
-        operation_id = operation_id or uuid.uuid4().hex
         build_url = (notice_doc.get("notice") or {}).get("buildUrl")
         original_owner = (item.get("owner") if item else None) or ((notice_doc.get("notice") or {}).get("owner"))
         corrected_owner = None
@@ -107,13 +118,13 @@ class FeedbackStore:
         }
         now = dt.datetime.now(dt.timezone.utc)
         submitted_at = submitted_at or now
-        payload_hash = hashlib.sha256(json.dumps(base_doc, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")).hexdigest()
-        operation = {**base_doc, "_id": f"operation:{operation_id}", "recordType": "operation", "payloadHash": payload_hash, "submittedAt": submitted_at, "createdAt": now}
+        payload_hash = _hash_payload(base_doc)
+        operation = {**base_doc, "_id": f"operation:{operation_id}", "recordType": "operation", "requestHash": request_hash, "payloadHash": payload_hash, "submittedAt": submitted_at, "createdAt": now}
         try:
             self.collection.insert_one(operation)
         except DuplicateKeyError:
             stored = self.collection.find_one({"_id": operation["_id"]})
-            if not stored or stored.get("payloadHash") != payload_hash:
+            if not stored or stored.get("requestHash") != request_hash:
                 raise ValueError("operation id already exists with different feedback content")
             operation = stored
         return {"ok": True, "feedback": operation, "operation": operation, "isCurrent": self.is_current_operation(operation)}
@@ -167,6 +178,10 @@ class FeedbackStore:
 def _canonical_signature(value: Any) -> str | None:
     raw = str(value or "").strip()
     return build_responsibility_signature(failure_title=None, failure_summary=None, existing_signature=raw) if raw else None
+
+
+def _hash_payload(payload: dict[str, Any]) -> str:
+    return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")).hexdigest()
 
 
 def build_feedback_item_key(item: dict[str, Any]) -> str:

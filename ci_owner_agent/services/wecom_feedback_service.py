@@ -109,6 +109,7 @@ class WeComFeedbackService:
                 note=intent.note,
                 source="wecom_bot",
                 operation_id=pending.get("operationId"),
+                submitted_at=pending.get("operationSubmittedAt"),
             )
         except StaleFeedbackError:
             self.pending.mark_stale(pending, "责任项在确认前已更新")
@@ -120,7 +121,7 @@ class WeComFeedbackService:
                 logging.getLogger(__name__).exception("Failed to mark pending feedback failed")
             return "反馈写入失败，请重新发起反馈。"
         try:
-            self.pending.mark_applied(pending)
+            self.pending.mark_applied(pending, pending.get("applyToken"))
         except Exception:
             logging.getLogger(__name__).exception("Failed to mark pending feedback applied")
             return "反馈状态保存失败，请勿重复提交并联系管理员。"

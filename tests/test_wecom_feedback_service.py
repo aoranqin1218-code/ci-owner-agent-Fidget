@@ -188,7 +188,7 @@ def test_cancel_and_expired_pending_do_not_write():
 
     service.handle(_message("msg:create2", f"{context['code']} 1 无法定责"))
     expired = store.wecom_pending_feedback.docs[1]
-    expired["expiresAt"] = dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=1)
+    expired["confirmationExpiresAt"] = dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=1)
     assert "已过期" in service.handle(_message("msg:expired", f"确认 {expired['confirmationCode']}"))
     assert store.feedback.docs == []
 
