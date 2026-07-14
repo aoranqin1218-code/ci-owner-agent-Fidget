@@ -73,3 +73,56 @@ def test_notification_period_dedup_and_force(monkeypatch):
     forced = service.notify(report, repo="r", jobs=["j"], branches=["dev"], period_start=START, period_end=END, force=True)
     assert first["sent"] and second["reason"] == "already_sent" and forced["sent"]
     assert len(calls) == 2
+
+
+def _save_build(store, *, job: str, number: int, result, timestamp: datetime, branch: str = "dev"):
+    store.builds.update_one(
+        {"repo": "r", "job": job, "branch": branch, "buildNumber": number},
+        {"$set": {"repo": "r", "job": job, "branch": branch, "buildNumber": number, "result": result, "buildTimestamp": timestamp}},
+        upsert=True,
+    )
+
+
+def test_weekly_completed_builds_include_success_only_scope_and_normalize_result_case():
+    store = make_store()
+    for number, result in enumerate(["SUCCESS", "success", "Failure", "unstable", "ABORTED", "NOT_BUILT", "UNKNOWN", None], start=1):
+        _save_build(store, job="job-a", number=number, result=result, timestamp=START)
+    service = WeeklyTestReportService(store, WeeklyTestReportConfig.model_validate({"important": {"enabled": False}}))
+    report = service.generate(repo="r", jobs=["job-a"], branches=["dev"], period_start=START, period_end=END)
+    assert report["completedBuildCount"] == 4
+    assert report["failedBuildCount"] == 0
+
+
+def test_weekly_completed_builds_multi_job_and_period_boundaries():
+    store = make_store()
+    for number in range(30):
+        _save_build(store, job="job-a", number=number, result="SUCCESS", timestamp=START)
+    for number, result in enumerate(["SUCCESS"] * 5 + ["FAILURE"] * 3, start=100):
+        _save_build(store, job="job-b", number=number, result=result, timestamp=START)
+    _save_build(store, job="job-b", number=200, result="SUCCESS", timestamp=END)
+    _save_build(store, job="job-b", number=201, result="SUCCESS", timestamp=START.replace(year=2025))
+    store.test_file_failures.update_one(
+        {"repo": "r", "job": "job-b", "branch": "dev", "buildNumber": 105, "testFilePath": "a"},
+        {"$set": {"repo": "r", "job": "job-b", "branch": "dev", "buildNumber": 105, "testFilePath": "a", "buildTimestamp": START}}, upsert=True,
+    )
+    store.test_file_failures.update_one(
+        {"repo": "r", "job": "job-b", "branch": "dev", "buildNumber": 106, "testFilePath": "b"},
+        {"$set": {"repo": "r", "job": "job-b", "branch": "dev", "buildNumber": 106, "testFilePath": "b", "buildTimestamp": START}}, upsert=True,
+    )
+    service = WeeklyTestReportService(store, WeeklyTestReportConfig.model_validate({"important": {"enabled": False}}))
+    report = service.generate(repo="r", jobs=["job-b", "job-a", "job-a"], branches=["dev", "dev"], period_start=START, period_end=END)
+    assert report["completedBuildCount"] == 38
+    assert report["failedBuildCount"] == 2
+
+
+def test_weekly_notification_dedup_is_scope_order_independent(monkeypatch):
+    store = make_store()
+    service = WeeklyTestReportService(store, WeeklyTestReportConfig.model_validate({"important": {"enabled": False}}), webhook_url="https://example.invalid")
+    calls = []
+    monkeypatch.setattr("ci_owner_agent.services.weekly_test_report_service.send_wecom_markdown", lambda *_: calls.append(1) or {"ok": True})
+    report = {"importantItemCount": 1, "normalItemCount": 0, "markdown": "x", "digest": "d"}
+    first = service.notify(report, repo="r", jobs=["job-b", "job-a", "job-a"], branches=["release", "dev", "dev"], period_start=START, period_end=END)
+    second = service.notify(report, repo="r", jobs=["job-a", "job-b"], branches=["dev", "release"], period_start=START, period_end=END)
+    assert first["sent"] is True
+    assert second["reason"] == "already_sent"
+    assert calls == [1]

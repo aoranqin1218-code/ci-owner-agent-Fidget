@@ -40,7 +40,7 @@ class WeeklyTestReportService:
                              for d in scoped_events if _in_period(d.get("buildTimestamp"), period_start, period_end)})
         completed_builds = sum(
             1 for doc in self.store.builds.find(query)
-            if doc.get("result") in VALID_COMPLETED_RESULTS and _in_period(doc.get("buildTimestamp"), period_start, period_end)
+            if str(doc.get("result") or "").upper() in VALID_COMPLETED_RESULTS and _in_period(doc.get("buildTimestamp"), period_start, period_end)
         )
         unidentified = 0
         for doc in self.store.notices.find(query):
