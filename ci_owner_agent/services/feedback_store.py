@@ -46,6 +46,7 @@ class FeedbackStore:
         source: str = "cli",
         operation_id: str | None = None,
         submitted_at: dt.datetime | None = None,
+        is_committed: bool = True,
     ) -> dict[str, Any]:
         repo = str(repo or "").strip()
         branch = str(branch or "").strip()
@@ -115,6 +116,7 @@ class FeedbackStore:
             "reviewer": reviewer,
             "reviewerWeComUserId": reviewer_wecom_userid,
             "source": source,
+            "isCommitted": is_committed,
         }
         now = dt.datetime.now(dt.timezone.utc)
         submitted_at = submitted_at or now
@@ -128,6 +130,14 @@ class FeedbackStore:
                 raise ValueError("operation id already exists with different feedback content")
             operation = stored
         return {"ok": True, "feedback": operation, "operation": operation, "isCurrent": self.is_current_operation(operation)}
+
+    def commit_operation(self, operation_id: str) -> bool:
+        result = self.collection.update_one(
+            {"_id": f"operation:{operation_id}", "recordType": "operation", "isCommitted": False},
+            {"$set": {"isCommitted": True}},
+            upsert=False,
+        )
+        return result.modified_count == 1
 
     def list_feedback(self, *, repo: str, job: str, branch: str, build_number: int) -> list[dict[str, Any]]:
         repo = str(repo or "").strip()
@@ -195,7 +205,7 @@ def canonical_item_signature(item: dict[str, Any]) -> str | None:
 
 
 def current_feedback_operations(collection: Any, *, repo: str, job: str, branch: str, build_number: int | None = None) -> list[dict]:
-    query = {"recordType": "operation", "repo": repo, "job": job, "branch": branch}
+    query = {"recordType": "operation", "isCommitted": True, "repo": repo, "job": job, "branch": branch}
     if build_number is not None:
         query["buildNumber"] = build_number
     docs = sorted(list(collection.find(query)), key=lambda doc: (doc.get("submittedAt"), doc.get("operationId")), reverse=True)

@@ -20,6 +20,9 @@ CI-XXXXXX 1 无法定责
 确认 ABCD / 取消 ABCD"""
 
 
+_OPERATION_LOOKUP_FAILED = object()
+
+
 class WeComFeedbackService:
     def __init__(self, history_store: Any, *, context_ttl_days: int = 30, confirm_ttl_seconds: int = 300) -> None:
         self.history_store = history_store
@@ -76,14 +79,24 @@ class WeComFeedbackService:
         if status in {"forbidden", "not_found", "expired", "cancelled", "failed", "stale"}:
             return _pending_status_text(status)
         if status == "applied":
-            return "该确认码已经提交过。"
+            return self._recover_applied_uncommitted(pending)
         if status not in {"claimed", "applying"}:
             return _pending_status_text(status)
-        operation = self.feedback.find_by_operation_id(pending.get("operationId"))
-        if operation:
-            if self.pending.reconcile_applied(pending["confirmationCode"], pending["operationId"]):
-                return "反馈已提交。"
-            return _pending_status_text((self.pending.collection.find_one({"confirmationCode": pending["confirmationCode"]}) or {}).get("status", "applying"))
+        operation = self._safe_find_operation(pending)
+        if operation is _OPERATION_LOOKUP_FAILED:
+            return "反馈结果正在确认，请勿重复提交。"
+        if operation is None and status == "applying":
+            return _pending_status_text(status)
+        if operation is not None:
+            if operation.get("isCommitted"):
+                if self.pending.reconcile_applied(pending["confirmationCode"], pending["operationId"]):
+                    return "反馈已提交。"
+                return _pending_status_text(
+                    (self.pending.collection.find_one({"confirmationCode": pending["confirmationCode"]}) or {}).get("status", "applying")
+                )
+            if pending.get("status") == "applied":
+                return self._safe_commit_and_report(pending)
+            return "反馈结果正在确认，请勿重复提交。"
         if status != "claimed":
             return _pending_status_text(status)
         try:
@@ -123,24 +136,25 @@ class WeComFeedbackService:
                 source="wecom_bot",
                 operation_id=pending.get("operationId"),
                 submitted_at=pending.get("operationSubmittedAt"),
+                is_committed=False,
             )
         except StaleFeedbackError:
             if self.pending.mark_stale(pending, pending.get("applyToken"), "责任项在确认前已更新"):
                 return "该构建的责任项已经更新，本次确认未提交。请根据最新通知重新发起反馈。"
             return _pending_status_text((self.pending.collection.find_one({"confirmationCode": pending["confirmationCode"]}) or {}).get("status", "applying"))
         except Exception as exc:
-            operation = None
-            lookup_failed = False
-            try:
-                operation = self.feedback.find_by_operation_id(pending.get("operationId"))
-            except Exception:
-                logging.getLogger(__name__).exception(
-                    "Failed to query operation after apply exception"
-                )
-                lookup_failed = True
-            if lookup_failed:
+            operation = self._safe_find_operation(pending)
+            if operation is _OPERATION_LOOKUP_FAILED:
                 return "反馈结果正在确认，请勿重复提交。"
-            if operation:
+            if operation is None:
+                try:
+                    if not self.pending.mark_failed(pending, pending.get("applyToken"), str(exc)):
+                        return _pending_status_text((self.pending.collection.find_one({"confirmationCode": pending["confirmationCode"]}) or {}).get("status", "applying"))
+                except Exception:
+                    logging.getLogger(__name__).exception("Failed to mark pending feedback failed")
+                    return "反馈结果正在确认，请勿重复提交。"
+                return "反馈写入失败，请重新发起反馈。"
+            if operation.get("isCommitted"):
                 if self.pending.reconcile_applied(pending["confirmationCode"], pending["operationId"]):
                     return "反馈已提交。"
                 return _pending_status_text((self.pending.collection.find_one({"confirmationCode": pending["confirmationCode"]}) or {}).get("status", "applying"))
@@ -149,27 +163,57 @@ class WeComFeedbackService:
                     return _pending_status_text((self.pending.collection.find_one({"confirmationCode": pending["confirmationCode"]}) or {}).get("status", "applying"))
             except Exception:
                 logging.getLogger(__name__).exception("Failed to mark pending feedback failed")
+                return "反馈结果正在确认，请勿重复提交。"
             return "反馈写入失败，请重新发起反馈。"
-        return self._finalize_applied(pending)
-    def _finalize_applied(self, pending: dict[str, Any]) -> str:
+        return self._finalize_prepared_operation(pending)
+
+    def _finalize_prepared_operation(self, pending: dict[str, Any]) -> str:
         try:
             if self.pending.mark_applied(pending, pending.get("applyToken")):
+                return self._safe_commit_and_report(pending)
+        except Exception:
+            logging.getLogger(__name__).exception("Failed to mark pending feedback applied")
+        refreshed = self.pending.collection.find_one(
+            {"confirmationCode": pending["confirmationCode"]}
+        ) or {}
+        status = refreshed.get("status", "")
+        if status == "applied":
+            return self._safe_commit_and_report(pending)
+        if status == "applying":
+            return "反馈已经写入，状态正在协调，请勿重复提交。"
+        if status in {"stale", "failed", "cancelled", "expired"}:
+            return _pending_status_text(status)
+        return "反馈结果正在确认，请勿重复提交。"
+
+    def _recover_applied_uncommitted(self, pending: dict[str, Any]) -> str:
+        operation = self._safe_find_operation(pending)
+        if operation is _OPERATION_LOOKUP_FAILED or operation is None:
+            return "反馈结果正在确认，请勿重复提交。"
+        if operation.get("isCommitted"):
+            return "该确认码已经提交过。"
+        return self._safe_commit_and_report(pending)
+
+    def _safe_find_operation(self, pending: dict[str, Any]) -> dict | None:
+        try:
+            return self.feedback.find_by_operation_id(pending.get("operationId"))
+        except Exception:
+            logging.getLogger(__name__).exception("Failed to query operation")
+            return _OPERATION_LOOKUP_FAILED
+
+    def _safe_commit_and_report(self, pending: dict[str, Any]) -> str:
+        try:
+            if self.feedback.commit_operation(pending["operationId"]):
                 try:
                     context = pending.get("feedbackContext") or {}
                     intent = ParsedFeedbackIntent.model_validate(pending.get("intent") or {})
                     return f"反馈已提交：{context.get('code', '?')} 责任项 {context.get('itemIndex', '?')}（{_action_label(intent.action)}）。"
                 except Exception:
                     return "反馈已提交。"
+            return "反馈已接收，结果正在同步。"
         except Exception:
-            logging.getLogger(__name__).exception("Failed to mark pending feedback applied")
-        if self.pending.reconcile_applied(pending["confirmationCode"], pending["operationId"]):
-            return "反馈已提交。"
-        refreshed = self.pending.collection.find_one(
-            {"confirmationCode": pending["confirmationCode"]}
-        ) or {}
-        if refreshed.get("status") == "applied":
-            return "反馈已提交。"
-        return "反馈已经写入，状态正在协调，请勿重复提交。"
+            logging.getLogger(__name__).exception("Failed to commit operation")
+            return "反馈已接收，结果正在同步。"
+
     def _list(self, intent: ParsedFeedbackIntent) -> str:
         context = self.contexts.get_active(intent.feedback_code or "")
         if context is None:
