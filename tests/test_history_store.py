@@ -30,11 +30,29 @@ class FakeCollection:
         doc = self.find_one(key)
         is_insert = doc is None
         if doc is None:
+            if not upsert:
+                return
             doc = dict(key)
             self.docs.append(doc)
         if is_insert:
             doc.update(update.get("$setOnInsert", {}))
         doc.update(update.get("$set", {}))
+        for field, increment in update.get("$inc", {}).items():
+            doc[field] = (doc.get(field) or 0) + increment
+
+    def find_one_and_update(self, query, update, upsert=False, return_document=False):
+        doc = self.find_one(query)
+        before = dict(doc) if doc is not None else None
+        if doc is None and upsert:
+            doc = {key: value for key, value in query.items() if not key.startswith("$")}
+            self.docs.append(doc)
+            doc.update(update.get("$setOnInsert", {}))
+        if doc is None:
+            return None
+        doc.update(update.get("$set", {}))
+        for field, increment in update.get("$inc", {}).items():
+            doc[field] = (doc.get(field) or 0) + increment
+        return doc if bool(return_document) else before
 
     def find_one(self, query):
         for doc in self.docs:
@@ -69,9 +87,15 @@ class FakeClient:
 
 def _matches(doc, query):
     for key, expected in query.items():
+        if key == "$or":
+            if not any(_matches(doc, branch) for branch in expected):
+                return False
+            continue
         value = doc.get(key)
         if isinstance(expected, dict):
             if "$lt" in expected and not (value < expected["$lt"]):
+                return False
+            if "$lte" in expected and not (value <= expected["$lte"]):
                 return False
             if "$gt" in expected and not (value > expected["$gt"]):
                 return False

@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
+from types import SimpleNamespace
 
 import pytest
 
 from ci_owner_agent.services.wecom_bot_adapter import is_fatal_sdk_error
 from ci_owner_agent.services.wecom_bot_worker import WeComBotWorker
+from ci_owner_agent.services.pending_feedback_store import WeComEventStore
 from tests.test_history_store import make_store
 
 
@@ -41,14 +44,64 @@ def _frame(msgid="m1", content="帮助"):
     return {"headers": {"req_id": "r1"}, "body": {"msgid": msgid, "chatid": "c", "from": {"userid": "u"}, "text": {"content": content}}}
 
 
-def test_worker_replies_and_deduplicates_events():
+def _event_message(event_key="event:m1"):
+    return SimpleNamespace(
+        event_key=event_key,
+        message_id="m1",
+        request_id="r1",
+        chat_id="c",
+        sender_userid="u",
+    )
+
+
+def test_failed_event_can_be_reclaimed():
+    store = make_store()
+    events = WeComEventStore(store)
+    message = _event_message()
+    assert events.claim(message)[0] == "claimed"
+    events.mark_failed(message.event_key, "temporary failure")
+
+    status, event = events.claim(message)
+
+    assert status == "claimed"
+    assert event["attemptCount"] == 2
+    assert event["status"] == "processing"
+
+
+def test_expired_processing_event_can_be_reclaimed():
+    store = make_store()
+    events = WeComEventStore(store)
+    message = _event_message()
+    assert events.claim(message)[0] == "claimed"
+    store.wecom_bot_events.docs[0]["leaseUntil"] = dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=1)
+
+    status, event = events.claim(message)
+
+    assert status == "claimed"
+    assert event["attemptCount"] == 2
+
+
+def test_unexpired_processing_event_is_not_processed_twice():
+    store = make_store()
+    events = WeComEventStore(store)
+    message = _event_message()
+    assert events.claim(message)[0] == "claimed"
+
+    status, event = events.claim(message)
+
+    assert status == "processing"
+    assert event["attemptCount"] == 1
+
+
+def test_completed_duplicate_event_replays_saved_reply():
     async def run():
         adapter = FakeAdapter()
         worker = WeComBotWorker(adapter, make_store())
         await worker.handle_frame(_frame())
         await worker.handle_frame(_frame())
-        assert len(adapter.replies) == 1
+        assert len(adapter.replies) == 2
         assert "群内反馈命令" in adapter.replies[0]
+        assert adapter.replies[1] == adapter.replies[0]
     asyncio.run(run())
 
 
@@ -59,6 +112,51 @@ def test_bad_message_does_not_escape_and_still_replies():
         await worker.handle_frame({"body": {"text": {"content": "帮助"}}})
         assert len(adapter.replies) == 1
         assert "消息处理失败" in adapter.replies[0]
+    asyncio.run(run())
+
+
+def test_worker_marks_event_failed_when_business_processing_fails():
+    async def run():
+        adapter = FakeAdapter()
+        store = make_store()
+        worker = WeComBotWorker(adapter, store)
+
+        def fail(_message):
+            raise RuntimeError("temporary failure")
+
+        worker.service.handle = fail
+        await worker.handle_frame(_frame())
+
+        assert store.wecom_bot_events.docs[0]["status"] == "failed"
+        assert "消息处理失败" in adapter.replies[0]
+
+    asyncio.run(run())
+
+
+def test_retry_after_failure_does_not_duplicate_feedback():
+    async def run():
+        adapter = FakeAdapter()
+        store = make_store()
+        worker = WeComBotWorker(adapter, store)
+        calls = 0
+
+        def fail_once_then_succeed(_message):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise RuntimeError("temporary failure")
+            return "反馈已提交。"
+
+        worker.service.handle = fail_once_then_succeed
+        frame = _frame(content="确认 ABCD")
+        await worker.handle_frame(frame)
+        await worker.handle_frame(frame)
+        await worker.handle_frame(frame)
+
+        assert calls == 2
+        assert adapter.replies[-1] == "反馈已提交。"
+        assert store.wecom_bot_events.docs[0]["status"] == "completed"
+
     asyncio.run(run())
 
 

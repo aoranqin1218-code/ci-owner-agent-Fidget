@@ -86,7 +86,7 @@ def test_feedback_isolated_by_repo_and_requires_repo():
     store = make_store()
     store.notices.update_one(
         {"repo": "repo-a", "job": "job", "branch": "dev", "buildNumber": 1},
-        {"$set": {"repo": "repo-a", "job": "job", "branch": "dev", "buildNumber": 1, "notice": {"responsibilityItems": []}}},
+        {"$set": {"repo": "repo-a", "job": "job", "branch": "dev", "buildNumber": 1, "notice": {"responsibilityItems": [{"failureId": "failure-x"}]}}},
         upsert=True,
     )
     feedback = FeedbackStore(store)
@@ -102,7 +102,7 @@ def test_feedback_update_with_same_failure_id_does_not_deactivate_other_branch()
     for branch in ("dev", "release"):
         store.notices.update_one(
             {"repo": "repo-a", "job": "job-x", "branch": branch, "buildNumber": 100},
-            {"$set": {"repo": "repo-a", "job": "job-x", "branch": branch, "buildNumber": 100, "notice": {"responsibilityItems": []}}},
+            {"$set": {"repo": "repo-a", "job": "job-x", "branch": branch, "buildNumber": 100, "notice": {"responsibilityItems": [{"failureId": "same-id"}]}}},
             upsert=True,
         )
     feedback = FeedbackStore(store)
@@ -121,7 +121,7 @@ def test_feedback_update_with_same_signature_does_not_deactivate_other_branch():
     for branch in ("dev", "release"):
         store.notices.update_one(
             {"repo": "repo-a", "job": "job-x", "branch": branch, "buildNumber": 100},
-            {"$set": {"repo": "repo-a", "job": "job-x", "branch": branch, "buildNumber": 100, "notice": {"responsibilityItems": []}}},
+            {"$set": {"repo": "repo-a", "job": "job-x", "branch": branch, "buildNumber": 100, "notice": {"responsibilityItems": [{"failureId": "signature-item", "failureSignature": "same-signature"}]}}},
             upsert=True,
         )
     feedback = FeedbackStore(store)
@@ -150,6 +150,21 @@ def test_feedback_fills_original_owner_and_signature_from_notice(repo_cache, sam
     )
     assert result["feedback"]["failureSignature"] == "sig-same"
     assert result["feedback"]["originalOwner"]["name"] == "Zhang San"
+
+
+def test_apply_feedback_rejects_failure_not_present_in_notice():
+    store = make_store()
+    store.notices.update_one(
+        {"repo": "repo-a", "job": "job", "branch": "dev", "buildNumber": 1},
+        {"$set": {"notice": {"responsibilityItems": [{"failureId": "present", "failureSignature": "present-sig"}]}}},
+        upsert=True,
+    )
+
+    with pytest.raises(ValueError, match="failure item no longer exists"):
+        FeedbackStore(store).apply_feedback(
+            repo="repo-a", job="job", branch="dev", build_number=1,
+            failure_id="missing", failure_signature=None, action="mark_flaky",
+        )
 
 
 def test_history_overlay_correct_owner_changes_inherited_owner(repo_cache, sample_repo, logs):

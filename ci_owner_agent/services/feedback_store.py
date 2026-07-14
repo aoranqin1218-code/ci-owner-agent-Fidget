@@ -53,18 +53,13 @@ class FeedbackStore:
         if action == "correct_owner" and owner_type not in CORRECT_OWNER_TYPES:
             raise ValueError("owner-type for correct_owner must be high_confidence or medium_confidence")
 
-        failure_signature = build_responsibility_signature(
-            failure_title=None,
-            failure_summary=None,
-            existing_signature=failure_signature,
-        ) if failure_signature else None
-
         notice_doc, item = self._find_notice_item(repo, job, branch, build_number, failure_id, failure_signature)
         if not notice_doc:
             raise ValueError(f"notice not found for repo={repo}, job={job}, branch={branch}, build={build_number}")
-        if item:
-            failure_id = failure_id or item.get("failureId")
-            failure_signature = failure_signature or item.get("failureSignature")
+        if item is None:
+            raise ValueError("failure item no longer exists in the current notice")
+        failure_id = failure_id or item.get("failureId")
+        failure_signature = item.get("failureSignature") or failure_signature
         build_url = (notice_doc.get("notice") or {}).get("buildUrl")
         original_owner = (item.get("owner") if item else None) or ((notice_doc.get("notice") or {}).get("owner"))
         corrected_owner = None
@@ -130,11 +125,24 @@ class FeedbackStore:
         if not notice_doc:
             return None, None
         notice = notice_doc.get("notice") or {}
+        requested_signature = build_responsibility_signature(
+            failure_title=None,
+            failure_summary=None,
+            existing_signature=failure_signature,
+        ) if failure_signature else None
         for item in notice.get("responsibilityItems") or []:
             if failure_id and item.get("failureId") == failure_id:
                 return notice_doc, item
-            if failure_signature and item.get("failureSignature") == failure_signature:
-                return notice_doc, item
+            if failure_signature:
+                if item.get("failureSignature") == failure_signature:
+                    return notice_doc, item
+                item_signature = build_responsibility_signature(
+                    failure_title=item.get("failureTitle"),
+                    failure_summary=item.get("failureSummary"),
+                    existing_signature=item.get("failureSignature"),
+                )
+                if item_signature == requested_signature:
+                    return notice_doc, item
         return notice_doc, None
 
 

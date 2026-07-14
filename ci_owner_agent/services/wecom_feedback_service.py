@@ -4,6 +4,7 @@ from typing import Any
 
 from ci_owner_agent.services.feedback_context_store import FeedbackContextStore
 from ci_owner_agent.services.feedback_store import FeedbackStore
+from ci_owner_agent.services.failure_identity import build_responsibility_signature
 from ci_owner_agent.services.pending_feedback_store import PendingFeedbackStore
 from ci_owner_agent.services.wecom_bot_models import ParsedFeedbackIntent, WeComInboundMessage
 from ci_owner_agent.services.wecom_feedback_parser import parse_feedback_intent
@@ -72,7 +73,18 @@ class WeComFeedbackService:
         if status != "claimed" or pending is None:
             return _pending_status_text(status)
         context = pending["feedbackContext"]
-        item = context["item"]
+        try:
+            current_context, current_item = self.contexts.resolve_item(
+                str(context.get("feedbackCode") or context.get("code") or ""), int(context.get("itemIndex") or 0)
+            )
+        except ValueError:
+            self.pending.mark_stale(pending, "责任项在确认前已更新")
+            return "该构建的责任项已经更新，本次确认未提交。请根据最新通知重新发起反馈。"
+        if not _same_failure(context, current_item):
+            self.pending.mark_stale(pending, "责任项在确认前已更新")
+            return "该构建的责任项已经更新，本次确认未提交。请根据最新通知重新发起反馈。"
+        context = current_context
+        item = current_item
         intent = ParsedFeedbackIntent.model_validate(pending["intent"])
         owner_name = intent.target_display_name
         owner_email = None
@@ -148,6 +160,23 @@ def _pending_status_text(status: str, cancelled: bool = False) -> str:
         "applied": "该确认码已经提交过。",
         "applying": "该确认码正在处理中，请勿重复提交。",
         "failed": "该确认码上次写入失败，请重新发起反馈。",
+        "stale": "该确认码对应的责任项已经更新，请重新发起反馈。",
         "already_processed": "该确认码已经处理，不能重复使用。",
     }.get(status, f"确认码状态为 {status}，不能继续操作。")
 
+
+def _same_failure(pending_context: dict[str, Any], current_item: dict[str, Any]) -> bool:
+    pending_id = str(pending_context.get("failureId") or "").strip()
+    current_id = str(current_item.get("failureId") or "").strip()
+    if pending_id and current_id:
+        return pending_id == current_id
+    pending_signature = _canonical_signature(pending_context.get("failureSignature"))
+    current_signature = _canonical_signature(current_item.get("failureSignature"))
+    return bool(pending_signature and current_signature and pending_signature == current_signature)
+
+
+def _canonical_signature(value: Any) -> str | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    return build_responsibility_signature(failure_title=None, failure_summary=None, existing_signature=raw)

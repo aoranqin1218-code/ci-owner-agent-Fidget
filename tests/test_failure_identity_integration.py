@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from ci_owner_agent.schemas import BuildInfo, CiResponsibilityNotice, FailureFact
 from ci_owner_agent.services.feedback_store import FeedbackStore
 from ci_owner_agent.services.notification_formatter import notification_digest
@@ -137,7 +139,7 @@ def test_same_canonical_fact_is_recalled_and_feedback_uses_canonical_signature()
         branch="dev",
         build_number=7,
         failure_id=None,
-        failure_signature=f"E11000_duplicate_key_finex.bpm_tasks__id_{OBJECT_B}",
+        failure_signature=notice.responsibilityItems[0].failureSignature,
         action="mark_flaky",
     )["feedback"]
     assert OBJECT_B not in (feedback["failureSignature"] or "")
@@ -190,14 +192,13 @@ def test_distinct_long_semantic_identities_do_not_collide_or_reuse_feedback():
         commit=first_notice.headCommit,
     )
     store.save_analysis(build, first_notice, first_notice.baseCommit, first_notice.headCommit, None, None, [])
-    feedback = FeedbackStore(store).apply_feedback(
-        repo=first_notice.repo,
-        job=first_notice.job,
-        branch=first_notice.branch,
-        build_number=first_notice.buildNumber,
-        failure_id=None,
-        failure_signature=second_signature,
-        action="mark_flaky",
-    )["feedback"]
-    assert feedback["failureId"] is None
-    assert feedback["failureSignature"] == second_item.failureSignature
+    with pytest.raises(ValueError, match="no longer exists"):
+        FeedbackStore(store).apply_feedback(
+            repo=first_notice.repo,
+            job=first_notice.job,
+            branch=first_notice.branch,
+            build_number=first_notice.buildNumber,
+            failure_id=None,
+            failure_signature=second_signature,
+            action="mark_flaky",
+        )

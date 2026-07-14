@@ -117,9 +117,20 @@ class MongoHistoryStore:
         )
         _create_index(self.feedback_contexts, [("expiresAt", 1)], expireAfterSeconds=0)
         self.wecom_pending_feedback.create_index([("confirmationCode", 1)], unique=True)
+        self.wecom_pending_feedback.create_index([("eventKey", 1)], unique=True)
         _create_index(self.wecom_pending_feedback, [("expiresAt", 1)], expireAfterSeconds=0)
         self.wecom_bot_events.create_index([("eventKey", 1)], unique=True)
+        self.wecom_bot_events.create_index([("status", 1), ("leaseUntil", 1)])
         _create_index(self.wecom_bot_events, [("expiresAt", 1)], expireAfterSeconds=0)
+
+    def upsert_notice_snapshot(self, notice: CiResponsibilityNotice, *, source: str | None = None) -> dict[str, Any]:
+        """Persist the minimum notice state required for feedback without analysis side effects."""
+        now = dt.datetime.now(dt.timezone.utc)
+        repo = _required_repo(notice)
+        key = {"repo": repo, "job": notice.job, "branch": notice.branch, "buildNumber": notice.buildNumber}
+        doc = {**key, "notice": notice.model_dump(mode="json"), "source": source, "updatedAt": now}
+        self.notices.update_one(key, {"$set": doc, "$setOnInsert": {"createdAt": now}}, upsert=True)
+        return self.notices.find_one(key) or {**doc, "createdAt": now}
 
     def save_analysis(
         self,

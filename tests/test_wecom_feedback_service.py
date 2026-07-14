@@ -108,6 +108,44 @@ def test_pending_then_original_sender_confirms_and_audits():
     assert "已经提交过" in service.handle(_message("msg:again", f"确认 {confirmation}"))
 
 
+def test_pending_confirmation_is_rejected_when_item_changed():
+    store = make_store()
+    first_notice = _notice_with_item(failure_id="failure-old", title="旧失败")
+    store.upsert_notice_snapshot(first_notice, source="test")
+    contexts = FeedbackContextStore(store)
+    context = contexts.get_or_create_for_notice(first_notice)
+    service = WeComFeedbackService(store)
+    service.handle(_message("msg:create", f"{context['code']} 1 判断正确"))
+    confirmation = store.wecom_pending_feedback.docs[0]["confirmationCode"]
+
+    second_notice = _notice_with_item(failure_id="failure-new", title="新失败")
+    store.upsert_notice_snapshot(second_notice, source="test")
+    contexts.get_or_create_for_notice(second_notice)
+    reply = service.handle(_message("msg:confirm", f"确认 {confirmation}"))
+
+    assert "责任项已经更新" in reply
+    assert store.feedback.docs == []
+    assert store.wecom_pending_feedback.docs[0]["status"] == "stale"
+    assert "已经更新" in service.handle(_message("msg:again", f"确认 {confirmation}"))
+
+
+def test_pending_confirmation_succeeds_when_context_refreshes_but_item_is_same():
+    store = make_store()
+    notice = _notice_with_item(failure_id="failure-same", title="同一失败")
+    store.upsert_notice_snapshot(notice, source="test")
+    contexts = FeedbackContextStore(store)
+    context = contexts.get_or_create_for_notice(notice)
+    service = WeComFeedbackService(store)
+    service.handle(_message("msg:create", f"{context['code']} 1 判断正确"))
+    confirmation = store.wecom_pending_feedback.docs[0]["confirmationCode"]
+
+    contexts.get_or_create_for_notice(notice)
+    reply = service.handle(_message("msg:confirm", f"确认 {confirmation}"))
+
+    assert "反馈已提交" in reply
+    assert store.feedback.docs[0]["failureId"] == notice.responsibilityItems[0].failureId
+
+
 def test_cancel_and_expired_pending_do_not_write():
     store, _, context = _setup()
     service = WeComFeedbackService(store)

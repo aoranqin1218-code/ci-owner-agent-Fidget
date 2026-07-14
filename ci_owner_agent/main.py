@@ -451,10 +451,11 @@ def _notify_notice(notice: CiResponsibilityNotice, settings, *, dry_run: bool, f
         feedback_code = None
         if store:
             try:
+                store.upsert_notice_snapshot(notice, source="notification")
                 context = FeedbackContextStore(store, settings.wecom_feedback_code_ttl_days).get_or_create_for_notice(notice)
                 feedback_code = context.get("code") if context else None
             except Exception as exc:
-                print(f"WARNING: feedback code unavailable: {exc}", file=sys.stderr)
+                print(f"WARNING: feedback context unavailable: {exc}", file=sys.stderr)
         markdown = format_wecom_markdown_notice(
             notice,
             feedback_base_url=feedback_base_url,

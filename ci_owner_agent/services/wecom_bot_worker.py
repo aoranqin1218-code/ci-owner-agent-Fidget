@@ -89,12 +89,26 @@ class WeComBotWorker:
     async def handle_frame(self, frame: Mapping[str, Any]) -> None:
         try:
             message = normalize_wecom_text_frame(frame)
-            is_new = await asyncio.to_thread(self.events.mark_once, message)
-            if not is_new:
-                return
-            reply = await asyncio.to_thread(self.service.handle, message)
+            claim_status, event = await asyncio.to_thread(self.events.claim, message)
+            if claim_status == "completed":
+                reply = str((event or {}).get("replyText") or "消息已处理完成。")
+            elif claim_status == "processing":
+                reply = "相同消息正在处理中，请稍后。"
+            elif claim_status != "claimed":
+                reply = "消息暂时无法处理，请稍后重试。"
+            else:
+                reply = await asyncio.to_thread(self.service.handle, message)
+                try:
+                    await asyncio.to_thread(self.events.mark_completed, message.event_key, reply)
+                except Exception:
+                    logging.getLogger(__name__).exception("Failed to mark WeCom message event completed")
         except Exception as exc:
             logging.getLogger(__name__).exception("Failed to process WeCom text message")
+            if "message" in locals():
+                try:
+                    await asyncio.to_thread(self.events.mark_failed, message.event_key, str(exc))
+                except Exception:
+                    logging.getLogger(__name__).exception("Failed to mark WeCom message event failed")
             reply = f"消息处理失败：{str(exc)[:200]}"
         try:
             await self.adapter.reply(frame, reply)
