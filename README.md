@@ -452,6 +452,7 @@ python -m ci_owner_agent analyze-local `
 | `--notify` | 否 | 本次分析后发送通知。 |
 | `--notify-dry-run` | 否 | 只预览通知，不发送。 |
 | `--force-notify` | 否 | 忽略通知去重，强制发送。 |
+| `--output-file` | 否 | 将 notice JSON 直接写入文件（UTF-8 无 BOM），避免 PowerShell 管道转码。 |
 
 `analyze-local` 会检查日志中的 `Checking out Revision <sha>` 或 `git checkout -f <sha>`。如果日志实际 checkout commit 和 `--head-commit` 不一致，会直接失败，避免对错误 commit 做定责。
 
@@ -481,6 +482,7 @@ python -m ci_owner_agent analyze `
 | `--notify` | 否 | 本次分析后发送通知。 |
 | `--notify-dry-run` | 否 | 通知 dry-run。 |
 | `--force-notify` | 否 | 忽略通知去重。 |
+| `--output-file` | 否 | 将 notice JSON 直接写入文件（UTF-8 无 BOM），避免 PowerShell 管道转码。 |
 
 `analyze` 会读取当前构建和 `lastSuccessfulBuild`，用上次成功 commit 作为 base commit，再进入正式分析流程。
 
@@ -500,6 +502,23 @@ python -m ci_owner_agent notify-notice `
 | `--dry-run` | 只打印 Markdown，不发送。 |
 | `--force` | 忽略通知去重。 |
 | `--feedback-base-url` | 覆盖配置中的反馈页基础 URL。 |
+
+> **Windows 用户注意**：PowerShell 5.1 的 `Set-Content -Encoding utf8` 会在文件头写入 UTF-8 BOM，且通过管道传递 Python stdout 可能导致中文乱码。推荐使用 `--output-file` 直接保存 notice JSON：
+>
+> ```powershell
+> python -m ci_owner_agent analyze `
+>   --job services/fx-code-unittest `
+>   --build 5154 `
+>   --repo fx-code `
+>   --output-file .\\runs\\5154.notice.json
+>
+> python -m ci_owner_agent notify-notice `
+>   --notice-file .\\runs\\5154.notice.json `
+>   --dry-run `
+>   --force
+> ```
+>
+> `notify-notice` 已兼容带 BOM 和不带 BOM 的 UTF-8 JSON 文件。如果文件已经出现中文乱码，必须重新执行分析生成，不能用 `utf-8-sig` 恢复。
 
 ### 5.4 人工反馈：`feedback`
 

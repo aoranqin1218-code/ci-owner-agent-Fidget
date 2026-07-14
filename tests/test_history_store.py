@@ -1425,7 +1425,7 @@ def test_existing_feedback_context_is_reused_with_utc_aware_expiry():
     assert active["code"] == first_code
 
 
-def test_notification_dry_run_keeps_feedback_code_with_existing_context():
+def test_existing_feedback_context_refresh_keeps_feedback_code():
     import datetime as dt
     from ci_owner_agent.services.feedback_context_store import FeedbackContextStore
     from ci_owner_agent.schemas import CiResponsibilityNotice

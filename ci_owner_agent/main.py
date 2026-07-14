@@ -32,14 +32,31 @@ if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 
-def _print_json(model) -> None:
+def _serialize_json(model) -> str:
+    return json.dumps(model.model_dump(mode="json"), ensure_ascii=False, indent=2) + "\n"
 
-    text = json.dumps(model.model_dump(), ensure_ascii=False, indent=2)
 
+def _emit_json(model, output_file=None) -> None:
+    text = _serialize_json(model)
+    if output_file:
+        path = Path(output_file)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            print(f"ERROR: unable to create output directory: {exc}", file=sys.stderr)
+            raise SystemExit(2) from exc
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        try:
+            tmp.write_text(text, encoding="utf-8")
+            tmp.replace(path)
+        except OSError as exc:
+            print(f"ERROR: unable to write notice file: {exc}", file=sys.stderr)
+            raise SystemExit(2) from exc
+        return
     try:
-        sys.stdout.write(text + "\n")
+        sys.stdout.write(text)
     except UnicodeEncodeError:
-        sys.stdout.buffer.write((text + "\n").encode("utf-8", errors="replace"))
+        sys.stdout.buffer.write(text.encode("utf-8", errors="replace"))
         sys.stdout.buffer.flush()
 
 
@@ -55,6 +72,7 @@ def build_parser() -> argparse.ArgumentParser:
     analyze.add_argument("--notify", action="store_true")
     analyze.add_argument("--notify-dry-run", action="store_true")
     analyze.add_argument("--force-notify", action="store_true")
+    analyze.add_argument("--output-file", default=None)
 
     local = subparsers.add_parser("analyze-local", help="Analyze a local console log and local Git cache")
     local.add_argument("--repo", required=True)
@@ -68,6 +86,7 @@ def build_parser() -> argparse.ArgumentParser:
     local.add_argument("--log-tail-lines", type=int, default=None)
     local.add_argument("--result", choices=["SUCCESS", "FAILURE", "UNSTABLE", "ABORTED", "UNKNOWN"], default=None)
     local.add_argument("--ignore-checkout-commit-mismatch", action="store_true")
+    local.add_argument("--output-file", default=None)
     local.add_argument("--last-success-build", type=int, default=None)
     local.add_argument("--previous-build", type=int, default=None)
     local.add_argument("--previous-commit", default=None)
@@ -170,7 +189,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"ERROR: {exc}", file=sys.stderr)
             return 2
         recorder.record_notice(notice)
-        _print_json(notice)
+        _emit_json(notice, args.output_file)
         with use_metrics_recorder(recorder):
             _maybe_notify_notice(notice, settings, args.notify, args.notify_dry_run, args.force_notify)
         _finish_metrics(recorder, settings)
@@ -231,7 +250,7 @@ def main(argv: list[str] | None = None) -> int:
                 repo=args.repo,
             )
             recorder.record_notice(notice)
-            _print_json(notice)
+            _emit_json(notice, args.output_file)
             with use_metrics_recorder(recorder):
                 _maybe_notify_notice(notice, settings, args.notify, args.notify_dry_run, args.force_notify)
             _finish_metrics(recorder, settings)
@@ -254,7 +273,7 @@ def main(argv: list[str] | None = None) -> int:
                 settings=settings,
             )
         recorder.record_notice(notice)
-        _print_json(notice)
+        _emit_json(notice, args.output_file)
         with use_metrics_recorder(recorder):
             _maybe_notify_notice(notice, settings, args.notify, args.notify_dry_run, args.force_notify)
         _finish_metrics(recorder, settings)
@@ -265,7 +284,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"ERROR: notice file not found: {notice_path}", file=sys.stderr)
             return 2
         try:
-            data = json.loads(notice_path.read_text(encoding="utf-8"))
+            data = json.loads(notice_path.read_text(encoding="utf-8-sig"))
         except Exception as exc:
             print(f"ERROR: invalid notice json: {exc}", file=sys.stderr)
             return 2

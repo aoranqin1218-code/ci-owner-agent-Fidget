@@ -77,3 +77,34 @@ def test_notification_without_mongodb_still_formats(monkeypatch):
     assert result["ok"] is True
     assert "反馈码：" not in result["markdown"]
     assert "提交反馈" in result["markdown"]
+def test_notify_notice_dry_run_includes_existing_feedback_code(monkeypatch):
+    from ci_owner_agent.config import load_settings
+    from ci_owner_agent.schemas import CiResponsibilityNotice
+    from ci_owner_agent.main import _notify_notice
+    from ci_owner_agent.services.feedback_context_store import FeedbackContextStore
+    from tests.test_notification_formatter import item, notice_payload
+    from dataclasses import replace
+
+    store = make_store()
+    notice = CiResponsibilityNotice.model_validate(notice_payload([item("张三")]))
+    settings = replace(load_settings(), notification_dedup_enabled=False, wecom_user_mapping_file=None)
+    monkeypatch.setattr("ci_owner_agent.main.get_history_store", lambda settings: store)
+
+    # First call creates the feedback context
+    first = _notify_notice(notice, settings, dry_run=True, force=False, feedback_base_url=None)
+    code = store.feedback_contexts.docs[0]["code"]
+    assert f"反馈码：{code}" in first["markdown"]
+
+    # Second call with same notice should reuse the context
+    second = _notify_notice(notice, settings, dry_run=True, force=False, feedback_base_url=None)
+    assert f"反馈码：{code}" in second["markdown"]
+
+    # Verify the context was reused (only one context doc)
+    contexts = FeedbackContextStore(store)
+    active = contexts.get_active(code)
+    assert active is not None
+    assert active["code"] == code
+
+    # Verify Chinese content preserved
+    assert "张三" in first["markdown"]
+    assert "接口超时" not in first["markdown"]  # not garbled
