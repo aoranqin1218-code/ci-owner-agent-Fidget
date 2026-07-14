@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any
+import logging
 
 from ci_owner_agent.services.feedback_context_store import FeedbackContextStore
 from ci_owner_agent.services.feedback_store import FeedbackStore
@@ -72,28 +73,25 @@ class WeComFeedbackService:
         status, pending = self.pending.claim(code, message.sender_userid)
         if status != "claimed" or pending is None:
             return _pending_status_text(status)
-        context = pending["feedbackContext"]
         try:
-            current_context, current_item = self.contexts.resolve_item(
-                str(context.get("feedbackCode") or context.get("code") or ""), int(context.get("itemIndex") or 0)
-            )
-        except ValueError:
-            self.pending.mark_stale(pending, "责任项在确认前已更新")
-            return "该构建的责任项已经更新，本次确认未提交。请根据最新通知重新发起反馈。"
-        if not _same_failure(context, current_item):
-            self.pending.mark_stale(pending, "责任项在确认前已更新")
-            return "该构建的责任项已经更新，本次确认未提交。请根据最新通知重新发起反馈。"
-        context = current_context
-        item = current_item
-        intent = ParsedFeedbackIntent.model_validate(pending["intent"])
-        owner_name = intent.target_display_name
-        owner_email = None
-        if intent.target_userid:
-            matches = self.users.search_users(intent.target_userid, limit=1)
-            if matches and matches[0].get("wecomUserId") == intent.target_userid:
-                owner_name = matches[0].get("displayName") or owner_name
-                owner_email = matches[0].get("preferredEmail")
-        try:
+            context = pending["feedbackContext"]
+            try:
+                current_context, current_item = self.contexts.resolve_item(
+                    str(context.get("feedbackCode") or context.get("code") or ""), int(context.get("itemIndex") or 0)
+                )
+            except ValueError as exc:
+                raise StaleFeedbackError() from exc
+            if not _same_failure(context, current_item):
+                raise StaleFeedbackError()
+            context, item = current_context, current_item
+            intent = ParsedFeedbackIntent.model_validate(pending["intent"])
+            owner_name = intent.target_display_name
+            owner_email = None
+            if intent.target_userid:
+                matches = self.users.search_users(intent.target_userid, limit=1)
+                if matches and matches[0].get("wecomUserId") == intent.target_userid:
+                    owner_name = matches[0].get("displayName") or owner_name
+                    owner_email = matches[0].get("preferredEmail")
             self.feedback.apply_feedback(
                 repo=context["repo"],
                 job=context["job"],
@@ -111,10 +109,20 @@ class WeComFeedbackService:
                 note=intent.note,
                 source="wecom_bot",
             )
+        except StaleFeedbackError:
+            self.pending.mark_stale(pending, "责任项在确认前已更新")
+            return "该构建的责任项已经更新，本次确认未提交。请根据最新通知重新发起反馈。"
         except Exception as exc:
-            self.pending.mark_failed(pending, str(exc))
-            return f"反馈写入失败：{exc}"
-        self.pending.mark_applied(pending)
+            try:
+                self.pending.mark_failed(pending, str(exc))
+            except Exception:
+                logging.getLogger(__name__).exception("Failed to mark pending feedback failed")
+            return "反馈写入失败，请重新发起反馈。"
+        try:
+            self.pending.mark_applied(pending)
+        except Exception:
+            logging.getLogger(__name__).exception("Failed to mark pending feedback applied")
+            return "反馈状态保存失败，请勿重复提交并联系管理员。"
         return f"反馈已提交：{context['code']} 责任项 {item['itemIndex']}（{_action_label(intent.action)}）。"
 
     def _list(self, intent: ParsedFeedbackIntent) -> str:
@@ -180,3 +188,7 @@ def _canonical_signature(value: Any) -> str | None:
     if not raw:
         return None
     return build_responsibility_signature(failure_title=None, failure_summary=None, existing_signature=raw)
+
+
+class StaleFeedbackError(Exception):
+    pass

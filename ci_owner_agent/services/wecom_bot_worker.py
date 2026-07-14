@@ -87,6 +87,7 @@ class WeComBotWorker:
             self._stop_event.set()
 
     async def handle_frame(self, frame: Mapping[str, Any]) -> None:
+        claim_token: str | None = None
         try:
             message = normalize_wecom_text_frame(frame)
             claim_status, event = await asyncio.to_thread(self.events.claim, message)
@@ -97,16 +98,19 @@ class WeComBotWorker:
             elif claim_status != "claimed":
                 reply = "消息暂时无法处理，请稍后重试。"
             else:
+                claim_token = event["claimToken"]
                 reply = await asyncio.to_thread(self.service.handle, message)
                 try:
-                    await asyncio.to_thread(self.events.mark_completed, message.event_key, reply)
+                    completed = await asyncio.to_thread(self.events.mark_completed, message.event_key, claim_token, reply)
+                    if not completed:
+                        logging.getLogger(__name__).warning("Lost WeCom event claim before completion: %s", message.event_key)
                 except Exception:
                     logging.getLogger(__name__).exception("Failed to mark WeCom message event completed")
         except Exception as exc:
             logging.getLogger(__name__).exception("Failed to process WeCom text message")
-            if "message" in locals():
+            if "message" in locals() and claim_token:
                 try:
-                    await asyncio.to_thread(self.events.mark_failed, message.event_key, str(exc))
+                    await asyncio.to_thread(self.events.mark_failed, message.event_key, claim_token, str(exc))
                 except Exception:
                     logging.getLogger(__name__).exception("Failed to mark WeCom message event failed")
             reply = f"消息处理失败：{str(exc)[:200]}"

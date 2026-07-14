@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import pytest
 from dataclasses import replace
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 
 from ci_owner_agent.schemas import BuildInfo, CiResponsibilityNotice
 from ci_owner_agent.main import main
@@ -165,6 +167,34 @@ def test_apply_feedback_rejects_failure_not_present_in_notice():
             repo="repo-a", job="job", branch="dev", build_number=1,
             failure_id="missing", failure_signature=None, action="mark_flaky",
         )
+
+
+def test_id_and_signature_must_identify_same_notice_item():
+    store = make_store()
+    key = {"repo": "repo", "job": "job", "branch": "dev", "buildNumber": 1}
+    store.notices.update_one(key, {"$set": {**key, "notice": {"responsibilityItems": [{"failureId": "current", "failureSignature": "current-sig"}]}}}, upsert=True)
+    feedback = FeedbackStore(store)
+    with pytest.raises(ValueError, match="do not identify"):
+        feedback.apply_feedback(repo="repo", job="job", branch="dev", build_number=1, failure_id="old", failure_signature="current-sig", action="mark_flaky")
+    result = feedback.apply_feedback(repo="repo", job="job", branch="dev", build_number=1, failure_id="current", failure_signature="current-sig", action="mark_flaky")["feedback"]
+    assert (result["failureId"], result["failureSignature"], result["feedbackItemKey"]) == ("current", "current-sig", "id:current")
+
+
+def test_concurrent_feedback_keeps_one_active_audit_history():
+    store = make_store()
+    key = {"repo": "repo", "job": "job", "branch": "dev", "buildNumber": 1}
+    store.notices.update_one(key, {"$set": {**key, "notice": {"responsibilityItems": [{"failureId": "current", "failureSignature": "current-sig"}]}}}, upsert=True)
+    barrier = Barrier(2)
+
+    def submit(name):
+        barrier.wait()
+        return FeedbackStore(store).apply_feedback(repo="repo", job="job", branch="dev", build_number=1, failure_id="current", failure_signature=None, action="correct_owner", owner_name=name)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(submit, ("A", "B")))
+    assert all(result["ok"] for result in results)
+    assert len([doc for doc in store.feedback.docs if doc["isActive"]]) == 1
+    assert len(store.feedback.docs) == 2
 
 
 def test_history_overlay_correct_owner_changes_inherited_owner(repo_cache, sample_repo, logs):

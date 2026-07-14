@@ -146,6 +146,37 @@ def test_pending_confirmation_succeeds_when_context_refreshes_but_item_is_same()
     assert store.feedback.docs[0]["failureId"] == notice.responsibilityItems[0].failureId
 
 
+def test_context_lookup_exception_marks_pending_failed(monkeypatch):
+    store, _, context = _setup()
+    service = WeComFeedbackService(store)
+    service.handle(_message("msg:create", f"{context['code']} 1 判断正确"))
+    code = store.wecom_pending_feedback.docs[0]["confirmationCode"]
+    monkeypatch.setattr(service.contexts, "resolve_item", lambda *args: (_ for _ in ()).throw(RuntimeError("lookup failed")))
+    assert "反馈写入失败" in service.handle(_message("msg:confirm", f"确认 {code}"))
+    assert store.wecom_pending_feedback.docs[0]["status"] == "failed"
+    assert store.feedback.docs == []
+
+
+def test_corrupted_pending_intent_marks_pending_failed():
+    store, _, context = _setup()
+    service = WeComFeedbackService(store)
+    service.handle(_message("msg:create", f"{context['code']} 1 判断正确"))
+    pending = store.wecom_pending_feedback.docs[0]
+    pending["intent"] = {"intent_type": "create_feedback"}
+    assert "反馈写入失败" in service.handle(_message("msg:confirm", f"确认 {pending['confirmationCode']}"))
+    assert pending["status"] == "failed"
+
+
+def test_user_directory_exception_marks_pending_failed(monkeypatch):
+    store, _, context = _setup()
+    service = WeComFeedbackService(store)
+    service.handle(_message("msg:create", f"{context['code']} 1 责任人改为 @李四", mentions=(("lisi", "李四"),)))
+    code = store.wecom_pending_feedback.docs[0]["confirmationCode"]
+    monkeypatch.setattr(service.users, "search_users", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("directory failed")))
+    assert "反馈写入失败" in service.handle(_message("msg:confirm", f"确认 {code}"))
+    assert store.wecom_pending_feedback.docs[0]["status"] == "failed"
+
+
 def test_cancel_and_expired_pending_do_not_write():
     store, _, context = _setup()
     service = WeComFeedbackService(store)

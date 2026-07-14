@@ -109,6 +109,7 @@ class WeComEventStore:
 
     def claim(self, message: Any) -> tuple[str, dict[str, Any] | None]:
         now = _utcnow()
+        claim_token = secrets.token_urlsafe(24)
         doc = {
             "eventKey": message.event_key,
             "messageId": message.message_id,
@@ -117,6 +118,7 @@ class WeComEventStore:
             "senderUserId": message.sender_userid,
             "status": "processing",
             "attemptCount": 1,
+            "claimToken": claim_token,
             "leaseUntil": now + self.processing_lease,
             "replyText": None,
             "lastError": None,
@@ -156,7 +158,7 @@ class WeComEventStore:
             ],
         }
         retry_update = {
-            "$set": {"status": "processing", "leaseUntil": now + self.processing_lease, "updatedAt": now, "lastError": None},
+            "$set": {"status": "processing", "leaseUntil": now + self.processing_lease, "claimToken": secrets.token_urlsafe(24), "updatedAt": now, "lastError": None},
             "$inc": {"attemptCount": 1},
         }
         claimed = self.collection.find_one_and_update(
@@ -169,20 +171,22 @@ class WeComEventStore:
             return "completed", current
         return "processing", current
 
-    def mark_completed(self, event_key: str, reply_text: str) -> None:
+    def mark_completed(self, event_key: str, claim_token: str, reply_text: str) -> bool:
         now = _utcnow()
         self.collection.update_one(
-            {"eventKey": event_key, "status": "processing"},
+            {"eventKey": event_key, "status": "processing", "claimToken": claim_token},
             {"$set": {"status": "completed", "replyText": reply_text, "completedAt": now, "updatedAt": now, "leaseUntil": None}},
             upsert=False,
         )
+        return bool(self.collection.find_one({"eventKey": event_key, "status": "completed", "claimToken": claim_token}))
 
-    def mark_failed(self, event_key: str, error: str) -> None:
+    def mark_failed(self, event_key: str, claim_token: str, error: str) -> bool:
         self.collection.update_one(
-            {"eventKey": event_key, "status": "processing"},
+            {"eventKey": event_key, "status": "processing", "claimToken": claim_token},
             {"$set": {"status": "failed", "lastError": str(error)[:500], "updatedAt": _utcnow(), "leaseUntil": None}},
             upsert=False,
         )
+        return bool(self.collection.find_one({"eventKey": event_key, "status": "failed", "claimToken": claim_token}))
 
 
 def _safe_context(context: dict[str, Any], item: dict[str, Any]) -> dict[str, Any]:

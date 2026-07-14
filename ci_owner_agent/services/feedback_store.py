@@ -6,6 +6,10 @@ from typing import Any
 from ci_owner_agent.schemas import Owner
 from ci_owner_agent.services.history_store import MongoHistoryStore
 from ci_owner_agent.services.failure_identity import build_responsibility_signature
+try:
+    from pymongo.errors import DuplicateKeyError
+except ImportError:  # pragma: no cover
+    DuplicateKeyError = RuntimeError
 
 FEEDBACK_ACTIONS = {"confirm_owner", "correct_owner", "mark_flaky", "mark_no_owner"}
 CORRECT_OWNER_TYPES = {"high_confidence", "medium_confidence"}
@@ -58,8 +62,9 @@ class FeedbackStore:
             raise ValueError(f"notice not found for repo={repo}, job={job}, branch={branch}, build={build_number}")
         if item is None:
             raise ValueError("failure item no longer exists in the current notice")
-        failure_id = failure_id or item.get("failureId")
-        failure_signature = item.get("failureSignature") or failure_signature
+        failure_id = item.get("failureId")
+        failure_signature = item.get("failureSignature") or _canonical_signature(item.get("failureSignature"))
+        feedback_item_key = build_feedback_item_key(item)
         build_url = (notice_doc.get("notice") or {}).get("buildUrl")
         original_owner = (item.get("owner") if item else None) or ((notice_doc.get("notice") or {}).get("owner"))
         corrected_owner = None
@@ -72,17 +77,8 @@ class FeedbackStore:
                 confidence=1 if owner_type == "high_confidence" else 0.7,
             ).model_dump(mode="json")
 
-        now = dt.datetime.now(dt.timezone.utc)
         scope = {"repo": repo, "job": job, "branch": branch, "buildNumber": build_number}
-        deactivate_query = {**scope, "isActive": True}
-        existing = list(self.collection.find(deactivate_query))
-        for doc in existing:
-            same_id = failure_id and doc.get("failureId") == failure_id
-            same_sig = failure_signature and doc.get("failureSignature") == failure_signature
-            if same_id or same_sig:
-                self.collection.update_one({"repo": doc.get("repo"), "job": doc.get("job"), "branch": doc.get("branch"), "buildNumber": doc.get("buildNumber"), "failureId": doc.get("failureId"), "createdAt": doc.get("createdAt")}, {"$set": {"isActive": False, "updatedAt": now}}, upsert=False)
-
-        doc = {
+        base_doc = {
             "repo": repo,
             "job": job,
             "branch": branch,
@@ -90,6 +86,7 @@ class FeedbackStore:
             "buildUrl": build_url,
             "failureId": failure_id,
             "failureSignature": failure_signature,
+            "feedbackItemKey": feedback_item_key,
             "action": action,
             "originalOwner": original_owner,
             "correctedOwner": corrected_owner,
@@ -100,16 +97,18 @@ class FeedbackStore:
             "reviewer": reviewer,
             "reviewerWeComUserId": reviewer_wecom_userid,
             "source": source,
-            "isActive": True,
-            "createdAt": now,
-            "updatedAt": now,
         }
-        self.collection.update_one(
-            {**scope, "failureId": failure_id, "failureSignature": failure_signature, "createdAt": now},
-            {"$set": doc},
-            upsert=True,
-        )
-        return {"ok": True, "feedback": doc}
+        for attempt in range(4):
+            now = dt.datetime.now(dt.timezone.utc)
+            self._deactivate_active(scope, feedback_item_key, failure_id, failure_signature, now)
+            doc = {**base_doc, "isActive": True, "createdAt": now, "updatedAt": now}
+            try:
+                self.collection.insert_one(doc)
+                return {"ok": True, "feedback": doc}
+            except DuplicateKeyError:
+                if attempt == 3:
+                    raise
+        raise RuntimeError("unable to serialize feedback write")
 
     def list_feedback(self, *, repo: str, job: str, branch: str, build_number: int) -> list[dict[str, Any]]:
         repo = str(repo or "").strip()
@@ -125,25 +124,37 @@ class FeedbackStore:
         if not notice_doc:
             return None, None
         notice = notice_doc.get("notice") or {}
-        requested_signature = build_responsibility_signature(
-            failure_title=None,
-            failure_summary=None,
-            existing_signature=failure_signature,
-        ) if failure_signature else None
+        requested_signature = _canonical_signature(failure_signature)
+        if failure_id and requested_signature:
+            for item in notice.get("responsibilityItems") or []:
+                if item.get("failureId") == failure_id and _canonical_signature(item.get("failureSignature")) == requested_signature:
+                    return notice_doc, item
+            raise ValueError("failure id and signature do not identify the same current notice item")
         for item in notice.get("responsibilityItems") or []:
             if failure_id and item.get("failureId") == failure_id:
                 return notice_doc, item
-            if failure_signature:
-                if item.get("failureSignature") == failure_signature:
-                    return notice_doc, item
-                item_signature = build_responsibility_signature(
-                    failure_title=item.get("failureTitle"),
-                    failure_summary=item.get("failureSummary"),
-                    existing_signature=item.get("failureSignature"),
-                )
-                if item_signature == requested_signature:
-                    return notice_doc, item
+            if requested_signature and _canonical_signature(item.get("failureSignature")) == requested_signature:
+                return notice_doc, item
         return notice_doc, None
+
+    def _deactivate_active(self, scope, key, failure_id, failure_signature, now):
+        query = {**scope, "isActive": True, "$or": [{"feedbackItemKey": key}, {"failureId": failure_id}, {"failureSignature": failure_signature}]}
+        self.collection.update_many(query, {"$set": {"isActive": False, "updatedAt": now}})
+
+
+def _canonical_signature(value: Any) -> str | None:
+    raw = str(value or "").strip()
+    return build_responsibility_signature(failure_title=None, failure_summary=None, existing_signature=raw) if raw else None
+
+
+def build_feedback_item_key(item: dict[str, Any]) -> str:
+    failure_id = str(item.get("failureId") or "").strip()
+    if failure_id:
+        return f"id:{failure_id}"
+    signature = _canonical_signature(item.get("failureSignature"))
+    if signature:
+        return f"sig:{signature}"
+    raise ValueError("failure item has no stable identity")
 
 
 def _responsibility_type_for_action(action: str) -> str | None:

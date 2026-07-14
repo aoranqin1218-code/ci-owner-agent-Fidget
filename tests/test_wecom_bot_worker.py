@@ -58,8 +58,9 @@ def test_failed_event_can_be_reclaimed():
     store = make_store()
     events = WeComEventStore(store)
     message = _event_message()
-    assert events.claim(message)[0] == "claimed"
-    events.mark_failed(message.event_key, "temporary failure")
+    _, first = events.claim(message)
+    first = dict(first)
+    events.mark_failed(message.event_key, first["claimToken"], "temporary failure")
 
     status, event = events.claim(message)
 
@@ -91,6 +92,23 @@ def test_unexpired_processing_event_is_not_processed_twice():
 
     assert status == "processing"
     assert event["attemptCount"] == 1
+
+
+def test_old_claim_token_cannot_complete_or_fail_reclaimed_event():
+    store = make_store()
+    events = WeComEventStore(store)
+    message = _event_message()
+    _, first = events.claim(message)
+    first = dict(first)
+    store.wecom_bot_events.docs[0]["leaseUntil"] = dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=1)
+    _, second = events.claim(message)
+
+    assert first["claimToken"] != second["claimToken"]
+    assert events.mark_completed(message.event_key, first["claimToken"], "old") is False
+    assert events.mark_failed(message.event_key, first["claimToken"], "old") is False
+    assert store.wecom_bot_events.docs[0]["claimToken"] == second["claimToken"]
+    assert events.mark_completed(message.event_key, second["claimToken"], "new") is True
+    assert store.wecom_bot_events.docs[0]["replyText"] == "new"
 
 
 def test_completed_duplicate_event_replays_saved_reply():

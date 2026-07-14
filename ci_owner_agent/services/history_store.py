@@ -106,6 +106,12 @@ class MongoHistoryStore:
         )
         self.feedback.create_index([("repo", 1), ("job", 1), ("branch", 1), ("buildNumber", 1), ("failureId", 1)])
         self.feedback.create_index([("repo", 1), ("job", 1), ("branch", 1), ("failureSignature", 1), ("isActive", 1)])
+        _create_index(
+            self.feedback,
+            [("repo", 1), ("job", 1), ("branch", 1), ("buildNumber", 1), ("feedbackItemKey", 1)],
+            unique=True,
+            partialFilterExpression={"isActive": True, "feedbackItemKey": {"$exists": True}},
+        )
         self.wecom_users.create_index([("wecomUserId", 1)])
         self.wecom_users.create_index([("normalizedEmail", 1)])
         self.wecom_users.create_index([("authorName", 1)])

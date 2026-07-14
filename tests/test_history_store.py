@@ -23,8 +23,24 @@ class FakeCollection:
         self.docs = []
         self.indexes = []
 
-    def create_index(self, spec, unique=False):
-        self.indexes.append((tuple(spec), unique))
+    def create_index(self, spec, unique=False, **options):
+        self.indexes.append((tuple(spec), unique, options))
+
+    def insert_one(self, doc):
+        candidate = dict(doc)
+        for spec, unique, options in self.indexes:
+            partial = options.get("partialFilterExpression")
+            if unique and (not partial or _matches(candidate, partial)):
+                for existing in self.docs:
+                    if (not partial or _matches(existing, partial)) and all(existing.get(k) == candidate.get(k) for k, _ in spec):
+                        from pymongo.errors import DuplicateKeyError
+                        raise DuplicateKeyError("duplicate key")
+        self.docs.append(candidate)
+
+    def update_many(self, query, update):
+        for doc in self.docs:
+            if _matches(doc, query):
+                doc.update(update.get("$set", {}))
 
     def update_one(self, key, update, upsert=False):
         doc = self.find_one(key)
