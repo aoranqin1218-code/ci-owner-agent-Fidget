@@ -125,16 +125,19 @@ class WeComFeedbackService:
                 submitted_at=pending.get("operationSubmittedAt"),
             )
         except StaleFeedbackError:
-            self.pending.mark_stale(pending, pending.get("applyToken"), "责任项在确认前已更新")
-            return "该构建的责任项已经更新，本次确认未提交。请根据最新通知重新发起反馈。"
+            if self.pending.mark_stale(pending, pending.get("applyToken"), "责任项在确认前已更新"):
+                return "该构建的责任项已经更新，本次确认未提交。请根据最新通知重新发起反馈。"
+            return _pending_status_text((self.pending.collection.find_one({"confirmationCode": pending["confirmationCode"]}) or {}).get("status", "applying"))
         except Exception as exc:
             try:
-                self.pending.mark_failed(pending, pending.get("applyToken"), str(exc))
+                if not self.pending.mark_failed(pending, pending.get("applyToken"), str(exc)):
+                    return _pending_status_text((self.pending.collection.find_one({"confirmationCode": pending["confirmationCode"]}) or {}).get("status", "applying"))
             except Exception:
                 logging.getLogger(__name__).exception("Failed to mark pending feedback failed")
             return "反馈写入失败，请重新发起反馈。"
         try:
-            self.pending.mark_applied(pending, pending.get("applyToken"))
+            if not self.pending.mark_applied(pending, pending.get("applyToken")):
+                return _pending_status_text((self.pending.collection.find_one({"confirmationCode": pending["confirmationCode"]}) or {}).get("status", "applying"))
         except Exception:
             logging.getLogger(__name__).exception("Failed to mark pending feedback applied")
             return "反馈状态保存失败，请勿重复提交并联系管理员。"

@@ -101,16 +101,18 @@ class PendingFeedbackStore:
         return result.modified_count == 1
 
     def _terminal(self, doc, token, status, error):
+        if not isinstance(token, str) or not token:
+            return False
         result = self.collection.update_one({"confirmationCode": doc["confirmationCode"], "status": "applying", "applyToken": token}, {"$set": {"status": status, "error": str(error)[:500], "updatedAt": _utcnow(), "applyToken": None, "applyLeaseUntil": None}}, upsert=False)
         return result.modified_count == 1
 
     def _set_status(self, doc: dict[str, Any], status: str, apply_token: str | None = None) -> bool:
-        query = {"confirmationCode": doc["confirmationCode"]}
-        if apply_token:
-            query.update({"status": "applying", "applyToken": apply_token})
+        if not isinstance(apply_token, str) or not apply_token:
+            return False
+        query = {"confirmationCode": doc["confirmationCode"], "status": "applying", "applyToken": apply_token}
         result = self.collection.update_one(
             query,
-            {"$set": {"status": status, "updatedAt": _utcnow()}},
+            {"$set": {"status": status, "updatedAt": _utcnow(), "applyToken": None, "applyLeaseUntil": None}},
             upsert=False,
         )
         return result.modified_count == 1
