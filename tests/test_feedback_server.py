@@ -39,7 +39,7 @@ def test_health_returns_ok():
 def test_feedback_renders_notice_items():
     client, _, notice = _client_with_notice()
 
-    response = client.get("/feedback", params={"job": notice.job, "build": notice.buildNumber})
+    response = client.get("/feedback", params={"repo": notice.repo, "job": notice.job, "branch": notice.branch, "build": notice.buildNumber})
 
     assert response.status_code == 200
     assert "CI 反馈" in response.text
@@ -57,7 +57,9 @@ def test_feedback_post_correct_owner_writes_active_feedback():
     response = client.post(
         "/feedback",
         data={
+            "repo": notice.repo,
             "job": notice.job,
+            "branch": notice.branch,
             "build": str(notice.buildNumber),
             "failureId": notice.responsibilityItems[0].failureId,
             "action": "correct_owner",
@@ -82,7 +84,9 @@ def test_feedback_post_saves_wecom_userid():
     response = client.post(
         "/feedback",
         data={
+            "repo": notice.repo,
             "job": notice.job,
+            "branch": notice.branch,
             "build": str(notice.buildNumber),
             "failureId": notice.responsibilityItems[0].failureId,
             "action": "correct_owner",
@@ -102,9 +106,9 @@ def test_feedback_post_saves_wecom_userid():
 def test_feedback_token_required():
     client, _, notice = _client_with_notice(token="secret")
 
-    assert client.get("/feedback", params={"job": notice.job, "build": notice.buildNumber}).status_code == 403
-    assert client.get("/feedback", params={"job": notice.job, "build": notice.buildNumber, "token": "wrong"}).status_code == 403
-    assert client.get("/feedback", params={"job": notice.job, "build": notice.buildNumber, "token": "secret"}).status_code == 200
+    assert client.get("/feedback", params={"repo": notice.repo, "job": notice.job, "branch": notice.branch, "build": notice.buildNumber}).status_code == 403
+    assert client.get("/feedback", params={"repo": notice.repo, "job": notice.job, "branch": notice.branch, "build": notice.buildNumber, "token": "wrong"}).status_code == 403
+    assert client.get("/feedback", params={"repo": notice.repo, "job": notice.job, "branch": notice.branch, "build": notice.buildNumber, "token": "secret"}).status_code == 200
 
 
 def test_wecom_user_search_api_requires_token():
@@ -170,7 +174,9 @@ def test_feedback_post_requires_token():
     response = client.post(
         "/feedback",
         data={
+            "repo": notice.repo,
             "job": notice.job,
+            "branch": notice.branch,
             "build": str(notice.buildNumber),
             "failureId": notice.responsibilityItems[0].failureId,
             "action": "confirm_owner",
@@ -188,7 +194,9 @@ def test_feedback_post_accepts_valid_token():
     response = client.post(
         "/feedback",
         data={
+            "repo": notice.repo,
             "job": notice.job,
+            "branch": notice.branch,
             "build": str(notice.buildNumber),
             "failureId": notice.responsibilityItems[0].failureId,
             "action": "confirm_owner",
@@ -211,7 +219,7 @@ def test_feedback_html_escapes_notice_text():
     notice = CiResponsibilityNotice.model_validate(payload)
     client, _, _ = _client_with_notice(notice=notice)
 
-    response = client.get("/feedback", params={"job": notice.job, "build": notice.buildNumber})
+    response = client.get("/feedback", params={"repo": notice.repo, "job": notice.job, "branch": notice.branch, "build": notice.buildNumber})
 
     assert response.status_code == 200
     assert "<script>alert" not in response.text
@@ -221,7 +229,15 @@ def test_feedback_html_escapes_notice_text():
 def test_feedback_notice_not_found():
     client = TestClient(create_app(settings=replace(load_settings(), history_enabled=True, feedback_shared_token=None), history_store=make_store()))
 
-    response = client.get("/feedback", params={"job": "missing", "build": 1})
+    response = client.get("/feedback", params={"repo": "missing-repo", "job": "missing", "branch": "dev", "build": 1})
 
     assert response.status_code == 404
     assert "notice not found" in response.text
+
+
+def test_feedback_page_and_post_require_branch():
+    client, _, notice = _client_with_notice()
+    assert client.get("/feedback", params={"repo": notice.repo, "job": notice.job, "build": notice.buildNumber}).status_code == 422
+    response = client.post("/feedback", data={"repo": notice.repo, "job": notice.job, "build": str(notice.buildNumber), "failureId": notice.responsibilityItems[0].failureId, "action": "confirm_owner"})
+    assert response.status_code == 400
+    assert "branch is required" in response.text

@@ -11,11 +11,7 @@ BLOCKING_FEEDBACK_ACTIONS = {"mark_flaky", "mark_no_owner"}
 
 
 def active_feedback_docs(store: Any, repo: str, job: str, branch: str | None) -> list[dict]:
-    query: dict[str, Any] = {"repo": repo, "job": job, "isActive": True}
-    docs = list(store.feedback.find(query))
-    if branch is not None:
-        docs = [doc for doc in docs if doc.get("branch") in {branch, None}]
-    return sort_feedback_docs(docs)
+    return sort_feedback_docs(list(store.feedback.find({"repo": repo, "job": job, "branch": branch, "isActive": True})))
 
 
 def sort_feedback_docs(docs: list[dict]) -> list[dict]:
@@ -74,7 +70,7 @@ def find_feedback_override(
     for doc in feedback_docs:
         if doc.get("job") != job:
             continue
-        if branch is not None and doc.get("branch") not in {branch, None}:
+        if doc.get("branch") != branch:
             continue
         if doc.get("failureSignature") and doc.get("failureSignature") in possible_signatures:
             return doc

@@ -1114,7 +1114,7 @@ def test_find_historical_failure_facts_filters_branch(repo_cache, sample_repo, l
         last_successful_build_number=None,
     )
 
-    assert [item["buildNumber"] for item in facts] == [7, 6]
+    assert [item["buildNumber"] for item in facts] == [7]
 
 
 def test_find_historical_failure_facts_limits_max_facts(repo_cache, sample_repo, logs):
@@ -1189,7 +1189,7 @@ def test_history_store_find_previous_build(repo_cache, sample_repo, logs):
     assert result["headCommit"] == "previous"
 
 
-def test_history_store_find_previous_build_matches_branch_none(repo_cache, sample_repo, logs):
+def test_history_store_find_previous_build_does_not_match_other_branch(repo_cache, sample_repo, logs):
     context = make_lc_context(repo_cache, sample_repo, logs)
     store = make_store()
 
@@ -1206,16 +1206,14 @@ def test_history_store_find_previous_build_matches_branch_none(repo_cache, sampl
     )
     store.save_analysis(build_5086, notice, "base", "previous", 5068, "base", [])
 
-    # branch="dev" query should match branch=None builds
+    # branch="dev" must not cross the branch=None scope.
     result = store.find_previous_build(
         repo=context.repo,
         job=context.job,
         branch="dev",
         current_build_number=5087,
     )
-    assert result is not None
-    assert result["buildNumber"] == 5086
-    assert result["headCommit"] == "previous"
+    assert result is None
 
 
 def test_history_store_find_previous_build_skips_missing_head_commit(repo_cache, sample_repo, logs):

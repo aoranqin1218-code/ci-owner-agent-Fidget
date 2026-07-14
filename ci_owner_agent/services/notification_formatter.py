@@ -331,9 +331,9 @@ def format_suggestions(suggestions: list[str], max_items: int = 3) -> list[str]:
 
 
 def build_feedback_url(base_url: str | None, notice: CiResponsibilityNotice, token: str | None = None) -> str | None:
-    if not base_url:
+    if not base_url or not str(notice.repo or "").strip() or not str(notice.branch or "").strip():
         return None
-    query_params = {"job": notice.job, "build": notice.buildNumber}
+    query_params = {"repo": notice.repo, "job": notice.job, "branch": notice.branch, "build": notice.buildNumber}
     if token:
         query_params["token"] = token
     query = urlencode(query_params)

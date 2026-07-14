@@ -249,6 +249,7 @@ def test_build_and_feedback_links():
     assert "🏗️ [查看 Jenkins 构建]" in markdown
     assert "📝 [提交反馈]" in markdown
     assert "job=services%2Ffx-code-unittest" in markdown
+    assert "branch=dev" in markdown
     assert "build=5099" in markdown
     assert "📝 反馈：未配置" in format_wecom_markdown_notice(notice, feedback_base_url=None)
 

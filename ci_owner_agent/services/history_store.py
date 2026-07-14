@@ -93,8 +93,8 @@ class MongoHistoryStore:
             ],
             unique=True,
         )
-        self.feedback.create_index([("job", 1), ("branch", 1), ("buildNumber", 1), ("failureId", 1)])
-        self.feedback.create_index([("job", 1), ("branch", 1), ("failureSignature", 1), ("isActive", 1)])
+        self.feedback.create_index([("repo", 1), ("job", 1), ("branch", 1), ("buildNumber", 1), ("failureId", 1)])
+        self.feedback.create_index([("repo", 1), ("job", 1), ("branch", 1), ("failureSignature", 1), ("isActive", 1)])
         self.wecom_users.create_index([("wecomUserId", 1)])
         self.wecom_users.create_index([("normalizedEmail", 1)])
         self.wecom_users.create_index([("authorName", 1)])
@@ -289,8 +289,7 @@ class MongoHistoryStore:
             "buildNumber": {"$lt": current_build_number},
             "result": {"$in": ["FAILURE", "UNSTABLE", "UNKNOWN"]},
         }
-        if branch is not None:
-            build_query["branch"] = {"$in": [branch, None]}
+        build_query["branch"] = branch
         if last_successful_build_number is not None:
             build_query["buildNumber"]["$gt"] = last_successful_build_number
 
@@ -306,12 +305,10 @@ class MongoHistoryStore:
             "schemaVersion": {"$gte": HISTORY_CHUNK_SCHEMA_VERSION},
             "chunkSource": {"$in": sorted(ALLOWED_HISTORY_CHUNK_SOURCES)},
         }
-        if branch is not None:
-            chunk_query["branch"] = {"$in": [branch, None]}
+        chunk_query["branch"] = branch
         chunks = list(self.failure_chunks.find(chunk_query))
         notice_query: dict[str, Any] = {"repo": repo, "job": job, "buildNumber": {"$in": build_numbers}}
-        if branch is not None:
-            notice_query["branch"] = {"$in": [branch, None]}
+        notice_query["branch"] = branch
         notices = {item.get("buildNumber"): item for item in self.notices.find(notice_query)}
         build_by_number = {item.get("buildNumber"): item for item in builds}
         feedback_docs = _active_feedback_docs(self, repo, job, branch)
@@ -344,8 +341,7 @@ class MongoHistoryStore:
             "buildNumber": {"$lt": current_build_number},
             "headCommit": {"$exists": True, "$ne": None},
         }
-        if branch is not None:
-            query["branch"] = {"$in": [branch, None]}
+        query["branch"] = branch
         docs = list(self.builds.find(query).sort("buildNumber", -1).limit(1))
         return docs[0] if docs else None
 
@@ -387,8 +383,7 @@ class MongoHistoryStore:
             "buildNumber": {"$lt": current_build_number},
             "result": {"$in": ["FAILURE", "UNSTABLE", "UNKNOWN"]},
         }
-        if branch is not None:
-            build_query["branch"] = {"$in": [branch, None]}
+        build_query["branch"] = branch
         if last_successful_build_number is not None:
             build_query["buildNumber"]["$gt"] = last_successful_build_number
 
@@ -412,8 +407,7 @@ class MongoHistoryStore:
             "historyEligible": True,
             "isGenericWrapper": False,
         }
-        if branch is not None:
-            fact_query["branch"] = {"$in": [branch, None]}
+        fact_query["branch"] = branch
         facts = list(self.failure_facts.find(fact_query))
         facts.sort(key=lambda item: (item.get("buildNumber") or 0, item.get("factIndex") or 0), reverse=True)
         diagnostics["factQuery"] = fact_query

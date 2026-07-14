@@ -504,7 +504,9 @@ python -m ci_owner_agent notify-notice `
 
 ```powershell
 python -m ci_owner_agent feedback apply `
+  --repo fx-code `
   --job services/fx-code-unittest `
+  --branch dev `
   --build 5064 `
   --failure-id F1 `
   --action correct_owner `
@@ -518,7 +520,9 @@ python -m ci_owner_agent feedback apply `
 
 ```powershell
 python -m ci_owner_agent feedback list `
+  --repo fx-code `
   --job services/fx-code-unittest `
+  --branch dev `
   --build 5064
 ```
 
@@ -542,9 +546,11 @@ python -m ci_owner_agent serve-feedback --host 0.0.0.0 --port 8765
 | 路径 | 说明 |
 | --- | --- |
 | `GET /health` | 健康检查。 |
-| `GET /feedback?job=...&build=...&token=...` | 反馈页面。 |
+| `GET /feedback?repo=...&job=...&branch=...&build=...&token=...` | 反馈页面；`repo`、`job`、`branch`、`build` 必填，配置共享 token 时才需要 `token`。 |
 | `POST /feedback` | 提交反馈。 |
 | `GET /api/wecom-users/search?q=...` | 搜索企业微信用户映射。 |
+
+反馈页面示例：`/feedback?repo=fx-code&job=services%2Ffx-code-unittest&branch=dev&build=5064`。
 
 如果配置了 `CI_AGENT_FEEDBACK_SHARED_TOKEN`，访问反馈页和用户搜索接口时需要带 `token`。
 

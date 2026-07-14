@@ -20,7 +20,9 @@ class FeedbackStore:
     def apply_feedback(
         self,
         *,
+        repo: str,
         job: str,
+        branch: str,
         build_number: int,
         failure_id: str | None,
         failure_signature: str | None,
@@ -35,6 +37,12 @@ class FeedbackStore:
         note: str | None = None,
         source: str = "cli",
     ) -> dict[str, Any]:
+        repo = str(repo or "").strip()
+        branch = str(branch or "").strip()
+        if not repo:
+            raise ValueError("repo is required")
+        if not branch:
+            raise ValueError("branch is required")
         if action not in FEEDBACK_ACTIONS:
             raise ValueError(f"unsupported feedback action: {action}")
         if not failure_id and not failure_signature:
@@ -50,14 +58,14 @@ class FeedbackStore:
             existing_signature=failure_signature,
         ) if failure_signature else None
 
-        notice_doc, item = self._find_notice_item(job, build_number, failure_id, failure_signature)
+        notice_doc, item = self._find_notice_item(repo, job, branch, build_number, failure_id, failure_signature)
+        if not notice_doc:
+            raise ValueError(f"notice not found for repo={repo}, job={job}, branch={branch}, build={build_number}")
         if item:
             failure_id = failure_id or item.get("failureId")
             failure_signature = failure_signature or item.get("failureSignature")
-        branch = notice_doc.get("branch") if notice_doc else None
-        repo = notice_doc.get("repo") if notice_doc else None
-        build_url = (notice_doc.get("notice") or {}).get("buildUrl") if notice_doc else None
-        original_owner = (item.get("owner") if item else None) or ((notice_doc.get("notice") or {}).get("owner") if notice_doc else None)
+        build_url = (notice_doc.get("notice") or {}).get("buildUrl")
+        original_owner = (item.get("owner") if item else None) or ((notice_doc.get("notice") or {}).get("owner"))
         corrected_owner = None
         if action == "correct_owner":
             corrected_owner = Owner(
@@ -69,13 +77,14 @@ class FeedbackStore:
             ).model_dump(mode="json")
 
         now = dt.datetime.now(dt.timezone.utc)
-        deactivate_query = {"repo": repo, "job": job, "buildNumber": build_number, "isActive": True}
+        scope = {"repo": repo, "job": job, "branch": branch, "buildNumber": build_number}
+        deactivate_query = {**scope, "isActive": True}
         existing = list(self.collection.find(deactivate_query))
         for doc in existing:
             same_id = failure_id and doc.get("failureId") == failure_id
             same_sig = failure_signature and doc.get("failureSignature") == failure_signature
             if same_id or same_sig:
-                self.collection.update_one({"repo": doc.get("repo"), "job": doc.get("job"), "buildNumber": doc.get("buildNumber"), "failureId": doc.get("failureId"), "createdAt": doc.get("createdAt")}, {"$set": {"isActive": False, "updatedAt": now}}, upsert=False)
+                self.collection.update_one({"repo": doc.get("repo"), "job": doc.get("job"), "branch": doc.get("branch"), "buildNumber": doc.get("buildNumber"), "failureId": doc.get("failureId"), "createdAt": doc.get("createdAt")}, {"$set": {"isActive": False, "updatedAt": now}}, upsert=False)
 
         doc = {
             "repo": repo,
@@ -99,17 +108,23 @@ class FeedbackStore:
             "updatedAt": now,
         }
         self.collection.update_one(
-            {"repo": repo, "job": job, "buildNumber": build_number, "failureId": failure_id, "failureSignature": failure_signature, "createdAt": now},
+            {**scope, "failureId": failure_id, "failureSignature": failure_signature, "createdAt": now},
             {"$set": doc},
             upsert=True,
         )
         return {"ok": True, "feedback": doc}
 
-    def list_feedback(self, *, job: str, build_number: int) -> list[dict[str, Any]]:
-        return list(self.collection.find({"job": job, "buildNumber": build_number, "isActive": True}))
+    def list_feedback(self, *, repo: str, job: str, branch: str, build_number: int) -> list[dict[str, Any]]:
+        repo = str(repo or "").strip()
+        branch = str(branch or "").strip()
+        if not repo:
+            raise ValueError("repo is required")
+        if not branch:
+            raise ValueError("branch is required")
+        return list(self.collection.find({"repo": repo, "job": job, "branch": branch, "buildNumber": build_number, "isActive": True}))
 
-    def _find_notice_item(self, job: str, build_number: int, failure_id: str | None, failure_signature: str | None) -> tuple[dict | None, dict | None]:
-        notice_doc = self.notices.find_one({"job": job, "buildNumber": build_number})
+    def _find_notice_item(self, repo: str, job: str, branch: str, build_number: int, failure_id: str | None, failure_signature: str | None) -> tuple[dict | None, dict | None]:
+        notice_doc = self.notices.find_one({"repo": repo, "job": job, "branch": branch, "buildNumber": build_number})
         if not notice_doc:
             return None, None
         notice = notice_doc.get("notice") or {}

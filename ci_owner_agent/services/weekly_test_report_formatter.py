@@ -33,7 +33,7 @@ def format_weekly_test_report(
     config: WeeklyTestReportConfig, maintainers: dict[tuple, tuple[TestMaintainer, ...]] | None = None,
     repo: str | None = None, jobs: list[str] | None = None, branches: list[str] | None = None,
     unidentified_item_count: int = 0, missing_timestamp_count: int = 0, top_n: int | None = None,
-    failed_build_count: int = 0, mention_mode: str = "userid",
+    failed_build_count: int = 0, completed_build_count: int = 0, mention_mode: str = "userid",
 ) -> str:
     maintainers = maintainers or {}
     limit = top_n or config.topN
@@ -43,8 +43,7 @@ def format_weekly_test_report(
     remaining = max(0, limit - len(selected_important))
     selected_normal = normal[:remaining] if config.normal.includeBelowThreshold else []
     omitted = max(0, len(important) - len(selected_important)) + max(0, len(normal) - len(selected_normal))
-    scopes = sorted({(s.repo, s.job, s.branch) for s in stats})
-    completed = sum(max((s.periodCompletedBuildCount for s in stats if (s.repo, s.job, s.branch) == scope), default=0) for scope in scopes)
+    completed = completed_build_count
     lines = [
         "### 📊 CI 高频失败测试周报",
         f"统计周期：{period_start.astimezone(ZoneInfo(config.timezone)):%Y-%m-%d %H:%M} ～ {period_end.astimezone(ZoneInfo(config.timezone)):%Y-%m-%d %H:%M} ({config.timezone})",

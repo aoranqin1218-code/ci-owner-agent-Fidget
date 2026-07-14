@@ -324,7 +324,7 @@ def test_ai_history_feedback_mark_flaky_blocks_inheritance(monkeypatch, repo_cac
     store = make_store()
     fact = make_fact()
     _save_fact(store, context, build=7, fact=fact)
-    FeedbackStore(store).apply_feedback(job=context.job, build_number=7, failure_id=None, failure_signature=fact.signatureKey, action="mark_flaky")
+    FeedbackStore(store).apply_feedback(repo=context.repo, job=context.job, branch=context.branch, build_number=7, failure_id=None, failure_signature=fact.signatureKey, action="mark_flaky")
     result = history_search_similar_failure_facts(_context(context, facts=[fact]), store=store)
     assert result["candidates"] == []
     assert "mark_flaky" in result["currentFacts"][0]["blockedReason"]
@@ -339,7 +339,7 @@ def test_ai_history_feedback_mark_no_owner_blocks_inheritance(monkeypatch, repo_
     store = make_store()
     fact = make_fact()
     _save_fact(store, context, build=7, fact=fact)
-    FeedbackStore(store).apply_feedback(job=context.job, build_number=7, failure_id=None, failure_signature=fact.signatureKey, action="mark_no_owner")
+    FeedbackStore(store).apply_feedback(repo=context.repo, job=context.job, branch=context.branch, build_number=7, failure_id=None, failure_signature=fact.signatureKey, action="mark_no_owner")
     result = history_search_similar_failure_facts(_context(context, facts=[fact]), store=store)
     assert result["candidates"] == []
     assert "mark_no_owner" in result["currentFacts"][0]["blockedReason"]
@@ -352,7 +352,9 @@ def test_ai_history_feedback_correct_owner_overrides_owner(monkeypatch, repo_cac
     fact = make_fact()
     _save_fact(store, context, build=7, fact=fact, owner_name="test")
     FeedbackStore(store).apply_feedback(
+        repo=context.repo,
         job=context.job,
+        branch=context.branch,
         build_number=7,
         failure_id=None,
         failure_signature=fact.signatureKey,
@@ -374,7 +376,9 @@ def test_ai_history_feedback_correct_owner_medium_confidence_can_inherit(monkeyp
     fact = make_fact()
     _save_fact(store, context, build=7, fact=fact, owner_name="test")
     FeedbackStore(store).apply_feedback(
+        repo=context.repo,
         job=context.job,
+        branch=context.branch,
         build_number=7,
         failure_id=None,
         failure_signature=fact.signatureKey,
@@ -398,7 +402,7 @@ def test_ai_history_feedback_confirm_owner_marks_verified(monkeypatch, repo_cach
     store = make_store()
     fact = make_fact()
     _save_fact(store, context, build=7, fact=fact, owner_name="test")
-    FeedbackStore(store).apply_feedback(job=context.job, build_number=7, failure_id=None, failure_signature=fact.signatureKey, action="confirm_owner")
+    FeedbackStore(store).apply_feedback(repo=context.repo, job=context.job, branch=context.branch, build_number=7, failure_id=None, failure_signature=fact.signatureKey, action="confirm_owner")
     result = history_search_similar_failure_facts(_context(context, facts=[fact]), store=store)
     inherited = result["currentFacts"][0]["inheritedOwner"]
     assert inherited["ownerName"] == "test"
