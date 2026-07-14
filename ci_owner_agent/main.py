@@ -352,6 +352,9 @@ def main(argv: list[str] | None = None) -> int:
         if not settings.history_enabled:
             print("ERROR: MongoDB history storage must be enabled for serve-wecom-bot", file=sys.stderr)
             return 2
+        if not settings.wecom_bot_enabled:
+            print("ERROR: CI_AGENT_WECOM_BOT_ENABLED must be enabled for serve-wecom-bot", file=sys.stderr)
+            return 2
         if not bot_id:
             print("ERROR: Bot ID is required (--bot-id or CI_AGENT_WECOM_BOT_ID)", file=sys.stderr)
             return 2

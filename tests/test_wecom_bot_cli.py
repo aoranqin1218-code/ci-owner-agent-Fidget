@@ -14,6 +14,7 @@ def test_serve_wecom_bot_requires_mongodb(monkeypatch, capsys):
 
 def test_serve_wecom_bot_requires_credentials(monkeypatch, capsys):
     monkeypatch.setenv("CI_AGENT_HISTORY_ENABLED", "true")
+    monkeypatch.setenv("CI_AGENT_WECOM_BOT_ENABLED", "true")
     monkeypatch.delenv("CI_AGENT_WECOM_BOT_ID", raising=False)
     monkeypatch.delenv("CI_AGENT_WECOM_BOT_SECRET", raising=False)
     assert main(["serve-wecom-bot"]) == 2
@@ -22,6 +23,7 @@ def test_serve_wecom_bot_requires_credentials(monkeypatch, capsys):
 
 def test_serve_wecom_bot_missing_optional_sdk_is_clear(monkeypatch, capsys):
     monkeypatch.setenv("CI_AGENT_HISTORY_ENABLED", "true")
+    monkeypatch.setenv("CI_AGENT_WECOM_BOT_ENABLED", "true")
     monkeypatch.setattr("ci_owner_agent.main.get_history_store", lambda settings: make_store())
     monkeypatch.setitem(sys.modules, "aibot", None)
     result = main(["serve-wecom-bot", "--bot-id", "placeholder", "--secret", "placeholder"])
@@ -31,6 +33,7 @@ def test_serve_wecom_bot_missing_optional_sdk_is_clear(monkeypatch, capsys):
 
 def test_cli_returns_nonzero_after_fatal_bot_error(monkeypatch, capsys):
     monkeypatch.setenv("CI_AGENT_HISTORY_ENABLED", "true")
+    monkeypatch.setenv("CI_AGENT_WECOM_BOT_ENABLED", "true")
     monkeypatch.setattr("ci_owner_agent.main.get_history_store", lambda settings: make_store())
 
     class FakeSdkAdapter:
@@ -51,3 +54,11 @@ def test_cli_returns_nonzero_after_fatal_bot_error(monkeypatch, capsys):
 
     assert result == 2
     assert "fatal error" in capsys.readouterr().err
+
+
+def test_serve_wecom_bot_requires_explicit_enablement(monkeypatch, capsys):
+    monkeypatch.setenv("CI_AGENT_HISTORY_ENABLED", "true")
+    monkeypatch.setenv("CI_AGENT_WECOM_BOT_ENABLED", "false")
+
+    assert main(["serve-wecom-bot", "--bot-id", "placeholder", "--secret", "placeholder"]) == 2
+    assert "CI_AGENT_WECOM_BOT_ENABLED must be enabled" in capsys.readouterr().err
