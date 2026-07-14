@@ -316,7 +316,17 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
             return 0
         if args.feedback_command == "list":
-            print(json.dumps(feedback_store.list_feedback(repo=args.repo, job=args.job, branch=args.branch, build_number=args.build), ensure_ascii=False, indent=2, default=str))
+            try:
+                result = feedback_store.list_feedback(
+                    repo=args.repo,
+                    job=args.job,
+                    branch=args.branch,
+                    build_number=args.build,
+                )
+            except ValueError as exc:
+                print(f"ERROR: {exc}", file=sys.stderr)
+                return 2
+            print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
             return 0
     if args.command == "serve-feedback":
         try:

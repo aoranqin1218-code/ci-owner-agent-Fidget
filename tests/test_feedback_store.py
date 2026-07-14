@@ -97,7 +97,7 @@ def test_feedback_isolated_by_repo_and_requires_repo():
     assert feedback.list_feedback(repo="repo-b", job="job", branch="dev", build_number=1) == []
 
 
-def test_feedback_store_isolated_by_branch_and_update_does_not_deactivate_other_branch():
+def test_feedback_update_with_same_failure_id_does_not_deactivate_other_branch():
     store = make_store()
     for branch in ("dev", "release"):
         store.notices.update_one(
@@ -106,11 +106,31 @@ def test_feedback_store_isolated_by_branch_and_update_does_not_deactivate_other_
             upsert=True,
         )
     feedback = FeedbackStore(store)
-    feedback.apply_feedback(repo="repo-a", job="job-x", branch="dev", build_number=100, failure_id="dev", failure_signature=None, action="mark_flaky")
-    feedback.apply_feedback(repo="repo-a", job="job-x", branch="release", build_number=100, failure_id="release", failure_signature=None, action="mark_flaky")
-    feedback.apply_feedback(repo="repo-a", job="job-x", branch="dev", build_number=100, failure_id="dev", failure_signature=None, action="confirm_owner")
-    assert [doc["failureId"] for doc in feedback.list_feedback(repo="repo-a", job="job-x", branch="dev", build_number=100)] == ["dev"]
-    assert [doc["failureId"] for doc in feedback.list_feedback(repo="repo-a", job="job-x", branch="release", build_number=100)] == ["release"]
+    feedback.apply_feedback(repo="repo-a", job="job-x", branch="dev", build_number=100, failure_id="same-id", failure_signature=None, action="mark_flaky")
+    feedback.apply_feedback(repo="repo-a", job="job-x", branch="release", build_number=100, failure_id="same-id", failure_signature=None, action="mark_flaky")
+    feedback.apply_feedback(repo="repo-a", job="job-x", branch="dev", build_number=100, failure_id="same-id", failure_signature=None, action="confirm_owner")
+    assert feedback.list_feedback(repo="repo-a", job="job-x", branch="dev", build_number=100)[0]["action"] == "confirm_owner"
+    assert feedback.list_feedback(repo="repo-a", job="job-x", branch="release", build_number=100)[0]["action"] == "mark_flaky"
+    inactive_dev = [doc for doc in store.feedback.docs if doc["branch"] == "dev" and not doc["isActive"]]
+    assert len(inactive_dev) == 1
+    assert all(doc["isActive"] for doc in store.feedback.docs if doc["branch"] == "release")
+
+
+def test_feedback_update_with_same_signature_does_not_deactivate_other_branch():
+    store = make_store()
+    for branch in ("dev", "release"):
+        store.notices.update_one(
+            {"repo": "repo-a", "job": "job-x", "branch": branch, "buildNumber": 100},
+            {"$set": {"repo": "repo-a", "job": "job-x", "branch": branch, "buildNumber": 100, "notice": {"responsibilityItems": []}}},
+            upsert=True,
+        )
+    feedback = FeedbackStore(store)
+    for branch in ("dev", "release"):
+        feedback.apply_feedback(repo="repo-a", job="job-x", branch=branch, build_number=100, failure_id=None, failure_signature="same-signature", action="mark_flaky")
+    feedback.apply_feedback(repo="repo-a", job="job-x", branch="dev", build_number=100, failure_id=None, failure_signature="same-signature", action="confirm_owner")
+    assert feedback.list_feedback(repo="repo-a", job="job-x", branch="dev", build_number=100)[0]["action"] == "confirm_owner"
+    assert feedback.list_feedback(repo="repo-a", job="job-x", branch="release", build_number=100)[0]["action"] == "mark_flaky"
+    assert all(doc["isActive"] for doc in store.feedback.docs if doc["branch"] == "release")
 
 
 def test_feedback_fills_original_owner_and_signature_from_notice(repo_cache, sample_repo, logs):
@@ -250,4 +270,26 @@ def test_feedback_apply_cli_rejects_bad_owner_type(monkeypatch, capsys):
     captured = capsys.readouterr()
     assert rc == 2
     assert "invalid choice" in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_feedback_list_cli_handles_blank_repo_without_traceback(monkeypatch, capsys):
+    store = make_store()
+    monkeypatch.setenv("CI_AGENT_MODEL_PROVIDER", "fake")
+    monkeypatch.setattr("ci_owner_agent.main.get_history_store", lambda settings: store)
+    rc = main(["feedback", "list", "--repo", " ", "--job", "job-x", "--branch", "dev", "--build", "100"])
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "ERROR: repo is required" in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_feedback_list_cli_handles_blank_branch_without_traceback(monkeypatch, capsys):
+    store = make_store()
+    monkeypatch.setenv("CI_AGENT_MODEL_PROVIDER", "fake")
+    monkeypatch.setattr("ci_owner_agent.main.get_history_store", lambda settings: store)
+    rc = main(["feedback", "list", "--repo", "repo-a", "--job", "job-x", "--branch", " ", "--build", "100"])
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "ERROR: branch is required" in captured.err
     assert "Traceback" not in captured.err
