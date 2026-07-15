@@ -107,6 +107,18 @@ def test_create_feedback_returns_template_card():
     pending = store.wecom_pending_feedback.docs[0]
     assert pending["cardTaskId"] == card["task_id"]
     assert pending["confirmationCode"] is not None
+    # Card must have horizontal_content_list
+    assert "horizontal_content_list" in card
+    assert card["main_title"]["desc"] == "操作：判断正确"
+    assert len(card["button_list"]) == 2
+    rows = {r["keyname"]: r["value"] for r in card["horizontal_content_list"]}
+    assert "原责任人" in rows
+    assert "责任项" in rows
+    assert "构建" in rows
+    assert "任务" in rows
+    assert "有效期" in rows
+    assert len(card["horizontal_content_list"]) <= 6
+    assert "新责任人" not in rows
 
 
 def test_help_returns_text():
@@ -853,3 +865,145 @@ def test_confirmed_ai_feedback_persists_note():
     assert op.get("note") == "\u4ec5\u5728 Windows \u73af\u5883\u51fa\u73b0"
     assert op.get("isCommitted") is True
     assert card.get("card_action", {}).get("url") == "https://work.weixin.qq.com/"
+
+def test_correct_owner_confirmation_card_prioritizes_change():
+    store, _, context = _setup()
+    parser = _RecordingAiParser()
+    parser.return_value = ParsedFeedbackIntent(
+        intent_type="create_feedback",
+        action="correct_owner",
+        feedback_code=context["code"],
+        item_index=1,
+        target_userid="aoranqin",
+        target_display_name="AoranQin-秦奥然",
+    )
+    service = WeComFeedbackService(store, ai_parser=parser)
+    reply = service.handle_text(_message("msg:correct", context["code"] + " 随便说说"))
+    card = reply.template_card
+    assert card["card_type"] == "button_interaction"
+    assert card["main_title"]["desc"] == "操作：修正责任人"
+    rows = {r["keyname"]: r["value"] for r in card["horizontal_content_list"]}
+    assert rows["原责任人"] is not None
+    assert rows["新责任人"] == "AoranQin-秦奥然"
+    assert rows["责任项"] == "1"
+    assert "构建" in rows
+    assert "任务" in rows
+    assert "有效期" in rows
+    assert len(card["horizontal_content_list"]) == 6
+
+
+def test_confirm_owner_card_shows_action_and_owner():
+    store, _, context = _setup()
+    service = WeComFeedbackService(store)
+    reply = service.handle_text(_message("msg:confirm_owner", context["code"] + " 1 判断正确"))
+    card = reply.template_card
+    assert card["main_title"]["desc"] == "操作：判断正确"
+    rows = {r["keyname"]: r["value"] for r in card["horizontal_content_list"]}
+    assert "原责任人" in rows
+    assert "责任项" in rows
+    assert "构建" in rows
+    assert "任务" in rows
+    assert "有效期" in rows
+    assert "新责任人" not in rows
+    assert len(card["horizontal_content_list"]) <= 6
+
+
+def test_flaky_confirmation_card_shows_action():
+    store, _, context = _setup()
+    parser = _RecordingAiParser()
+    parser.return_value = ParsedFeedbackIntent(
+        intent_type="create_feedback",
+        action="mark_flaky",
+        feedback_code=context["code"],
+        item_index=1,
+    )
+    service = WeComFeedbackService(store, ai_parser=parser)
+    reply = service.handle_text(_message("msg:flaky", context["code"] + " 随便说说"))
+    card = reply.template_card
+    assert card["main_title"]["desc"] == "操作：标记偶发"
+
+
+def test_long_failure_title_does_not_hide_owner_change():
+    store, notice, context = _setup()
+    notice.responsibilityItems[0].failureTitle = "A" * 500
+    notice.responsibilityItems[0].failureSignature = "long-sig"
+    context = FeedbackContextStore(store).get_or_create_for_notice(notice)
+    parser = _RecordingAiParser()
+    parser.return_value = ParsedFeedbackIntent(
+        intent_type="create_feedback",
+        action="correct_owner",
+        feedback_code=context["code"],
+        item_index=1,
+        target_userid="aoranqin",
+        target_display_name="AoranQin-秦奥然",
+    )
+    service = WeComFeedbackService(store, ai_parser=parser)
+    reply = service.handle_text(_message("msg:long_title", context["code"] + " 随便说说"))
+    card = reply.template_card
+    rows = {r["keyname"]: r["value"] for r in card["horizontal_content_list"]}
+    assert rows["新责任人"] == "AoranQin-秦奥然"
+    assert len(card["horizontal_content_list"]) <= 6
+    sub = card.get("sub_title_text", "")
+    assert len(sub) <= 112
+    assert "…" in sub
+
+
+def test_confirmation_card_shortens_remote_branch():
+    store, notice, context = _setup()
+    notice.branch = "refs/remotes/origin/dev"
+    context = FeedbackContextStore(store).get_or_create_for_notice(notice)
+    service = WeComFeedbackService(store)
+    reply = service.handle_text(_message("msg:branch", context["code"] + " 1 判断正确"))
+    sub = reply.template_card.get("sub_title_text", "")
+    assert "分支：dev" in sub
+    assert "refs/remotes/origin/" not in sub
+
+
+def test_confirmation_card_displays_truncated_note():
+    store, _, context = _setup()
+    parser = _RecordingAiParser()
+    parser.return_value = ParsedFeedbackIntent(
+        intent_type="create_feedback",
+        action="mark_flaky",
+        feedback_code=context["code"],
+        item_index=1,
+        note="仅在 Windows 环境出现，重试后恢复",
+    )
+    service = WeComFeedbackService(store, ai_parser=parser)
+    reply = service.handle_text(_message("msg:note_display", context["code"] + " 随便说说"))
+    sub = reply.template_card.get("sub_title_text", "")
+    assert "备注：" in sub
+    assert len(sub) <= 112
+
+
+def test_truncate_card_text_preserves_short_text():
+    from ci_owner_agent.services.wecom_feedback_service import _truncate_card_text
+    result = _truncate_card_text("hello", 10)
+    assert result == "hello"
+
+
+def test_truncate_card_text_adds_ellipsis():
+    from ci_owner_agent.services.wecom_feedback_service import _truncate_card_text
+    result = _truncate_card_text("hello world", 6)
+    assert result == "hello…"
+    assert len(result) == 6
+
+
+def test_truncate_card_text_normalizes_whitespace():
+    from ci_owner_agent.services.wecom_feedback_service import _truncate_card_text
+    result = _truncate_card_text("  hello   world  ", 20)
+    assert result == "hello world"
+
+
+def test_short_branch_removes_known_prefixes():
+    from ci_owner_agent.services.wecom_feedback_service import _short_branch
+    assert _short_branch("refs/remotes/origin/dev") == "dev"
+    assert _short_branch("refs/heads/feature/test") == "feature/test"
+    assert _short_branch("origin/release") == "release"
+    assert _short_branch("main") == "main"
+
+
+def test_confirmation_subtitle_respects_total_limit():
+    from ci_owner_agent.services.wecom_feedback_service import _build_confirmation_subtitle
+    result = _build_confirmation_subtitle(["x" * 100, "y" * 100, "z" * 100])
+    assert len(result) <= 112

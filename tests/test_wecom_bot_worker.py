@@ -305,6 +305,7 @@ def test_completed_text_event_replays_template_card():
     first_card = adapter.card_replies[0]
     assert first_card["card_type"] == "button_interaction"
     task_id = first_card["task_id"]
+    assert "horizontal_content_list" in first_card
 
     # Second call: same frame -> completed replay, same card, no service call
     asyncio.run(worker.handle_text_frame(frame))

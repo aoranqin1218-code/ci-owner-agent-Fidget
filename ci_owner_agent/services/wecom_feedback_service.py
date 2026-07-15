@@ -128,25 +128,39 @@ class WeComFeedbackService:
             return WeComBotReply(reply_type="text", text=str(exc))
         pending = self.pending.create(message=message, context=context, item=item, intent=intent)
         owner = item.get("owner") or {}
+        original_owner = owner.get("name") or "未识别"
         minutes = max(1, self.confirm_ttl_seconds // 60)
-        action_lines = _action_lines(intent, owner)
+        # Build horizontal content list (max 6 items)
+        horizontal_content = []
+        if intent.action == "correct_owner":
+            horizontal_content.append({"type": 0, "keyname": "原责任人", "value": _truncate_card_text(original_owner, 26)})
+            horizontal_content.append({"type": 0, "keyname": "新责任人", "value": _truncate_card_text(intent.target_display_name or intent.target_userid or "未指定", 26)})
+        else:
+            horizontal_content.append({"type": 0, "keyname": "原责任人", "value": _truncate_card_text(original_owner, 26)})
+        horizontal_content.append({"type": 0, "keyname": "责任项", "value": str(item["itemIndex"])})
+        horizontal_content.append({"type": 0, "keyname": "构建", "value": _truncate_card_text(f"{context['repo']} #{context['buildNumber']}", 26)})
+        horizontal_content.append({"type": 0, "keyname": "任务", "value": _truncate_card_text(context["job"], 26)})
+        horizontal_content.append({"type": 0, "keyname": "有效期", "value": f"{minutes} 分钟"})
+        if len(horizontal_content) > 6:
+            raise ValueError("horizontal content exceeds WeCom limit")
+        action_label = _action_label(intent.action)
         desc_lines = [
-            f"构建：{context['repo']} / {context['branch']} / {context['job']} #{context['buildNumber']}",
-            f"责任项：{item['itemIndex']}. {item.get('failureTitle') or '-'}",
-            *action_lines,
-            f"发起人：{message.sender_name or message.sender_userid}",
-            f"有效期：{minutes} 分钟",
+            "异常：" + _truncate_card_text(item.get("failureTitle") or "-", 72),
+            "分支：" + _truncate_card_text(_short_branch(context["branch"]), 30),
+            "发起人：" + _truncate_card_text(message.sender_name or message.sender_userid, 20),
         ]
+        if intent.note:
+            desc_lines.append("备注：" + _truncate_card_text(intent.note, 40))
         return WeComBotReply(
             reply_type="template_card",
             template_card=_build_button_card(
                 title="确认 CI 反馈",
-                desc="请核对以下反馈内容",
+                desc="操作：" + _truncate_card_text(action_label, 24),
                 desc_lines=desc_lines,
+                horizontal_content_list=horizontal_content,
                 task_id=pending["cardTaskId"],
             ),
         )
-
     def _confirm_by_card(self, pending: dict[str, Any], event: WeComTemplateCardEvent) -> WeComBotReply:
         if pending.get("senderUserId") != event.sender_userid:
             return WeComBotReply(
@@ -679,20 +693,29 @@ class WeComFeedbackService:
         return "\n".join(lines)
 
 
-def _build_button_card(*, title: str, desc: str, desc_lines: list[str], task_id: str) -> dict[str, Any]:
-    return {
+def _build_button_card(
+    *,
+    title: str,
+    desc: str,
+    desc_lines: list[str],
+    task_id: str,
+    horizontal_content_list: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    card: dict[str, Any] = {
         "card_type": "button_interaction",
         "main_title": {"title": title, "desc": desc},
-        "sub_title_text": "\n".join(desc_lines),
+        "sub_title_text": _build_confirmation_subtitle(desc_lines),
         "button_list": [
             {"text": "确认提交", "style": 1, "key": "confirm"},
             {"text": "取消", "style": 2, "key": "cancel"},
         ],
         "task_id": task_id,
     }
-
-
-
+    if horizontal_content_list:
+        if len(horizontal_content_list) > 6:
+            raise ValueError("horizontal content exceeds WeCom limit")
+        card["horizontal_content_list"] = horizontal_content_list
+    return card
 def _card_status_title(status: str, default: str = "操作失败") -> str:
     return {
         "cancelled": "反馈已取消",
@@ -723,13 +746,51 @@ def _card_status_desc(status: str, default: str = "请稍后重试。") -> str:
     }.get(status, default)
 
 
-def _action_lines(intent: ParsedFeedbackIntent, owner: dict[str, Any]) -> list[str]:
-    original = owner.get("name") or "未识别"
-    if intent.action == "correct_owner":
-        return [f"原责任人：{original}", f"新责任人：{intent.target_display_name or intent.target_userid}"]
-    return [f"原责任人：{original}", f"操作：{_action_label(intent.action)}"]
+
+def _truncate_card_text(value: Any, max_chars: int) -> str:
+    """Truncate text with ellipsis for WeCom card fields."""
+    text = " ".join(str(value or "").split()).strip()
+    if max_chars <= 0:
+        return ""
+    if len(text) <= max_chars:
+        return text
+    if max_chars == 1:
+        return "…"
+    return text[: max_chars - 1] + "…"
 
 
+def _short_branch(value: Any) -> str:
+    """Strip common Git branch prefixes."""
+    branch = str(value or "").strip()
+    for prefix in (
+        "refs/remotes/origin/",
+        "refs/heads/",
+        "origin/",
+    ):
+        if branch.startswith(prefix):
+            return branch[len(prefix):]
+    return branch
+
+
+_MAX_CONFIRM_SUBTITLE_CHARS = 112
+
+
+def _build_confirmation_subtitle(lines: list[str]) -> str:
+    """Build sub_title_text respecting total character limit."""
+    result: list[str] = []
+    remaining = _MAX_CONFIRM_SUBTITLE_CHARS
+    for line in lines:
+        normalized = " ".join(str(line or "").split()).strip()
+        if not normalized:
+            continue
+        separator_size = 1 if result else 0
+        available = remaining - separator_size
+        if available <= 0:
+            break
+        value = _truncate_card_text(normalized, available)
+        result.append(value)
+        remaining -= len(value) + separator_size
+    return "\n".join(result)
 def _action_label(action: str | None) -> str:
     return {
         "confirm_owner": "判断正确",
