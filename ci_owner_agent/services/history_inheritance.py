@@ -11,7 +11,8 @@ BLOCKING_FEEDBACK_ACTIONS = {"mark_flaky", "mark_no_owner"}
 
 
 def active_feedback_docs(store: Any, repo: str, job: str, branch: str | None) -> list[dict]:
-    return sort_feedback_docs(list(store.feedback.find({"repo": repo, "job": job, "branch": branch, "isActive": True})))
+    from ci_owner_agent.services.feedback_store import current_feedback_operations
+    return current_feedback_operations(store.feedback, repo=repo, job=job, branch=branch)
 
 
 def sort_feedback_docs(docs: list[dict]) -> list[dict]:

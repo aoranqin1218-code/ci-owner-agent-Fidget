@@ -72,6 +72,9 @@ Jenkins / 本地日志
 - `ci_feedback`：人工反馈。
 - `ci_notifications`：通知发送记录。
 - `ci_wecom_users`：企业微信用户映射。
+- `ci_feedback_contexts`：构建反馈码及责任项上下文（默认 30 天 TTL）。
+- `ci_wecom_pending_feedback`：等待二次确认的群内反馈（默认 5 分钟 TTL）。
+- `ci_wecom_bot_events`：智能机器人消息幂等记录（默认 7 天 TTL）。
 
 人工反馈会影响后续继承：
 
@@ -449,6 +452,7 @@ python -m ci_owner_agent analyze-local `
 | `--notify` | 否 | 本次分析后发送通知。 |
 | `--notify-dry-run` | 否 | 只预览通知，不发送。 |
 | `--force-notify` | 否 | 忽略通知去重，强制发送。 |
+| `--output-file` | 否 | 将 notice JSON 直接写入文件（UTF-8 无 BOM），避免 PowerShell 管道转码。 |
 
 `analyze-local` 会检查日志中的 `Checking out Revision <sha>` 或 `git checkout -f <sha>`。如果日志实际 checkout commit 和 `--head-commit` 不一致，会直接失败，避免对错误 commit 做定责。
 
@@ -478,6 +482,7 @@ python -m ci_owner_agent analyze `
 | `--notify` | 否 | 本次分析后发送通知。 |
 | `--notify-dry-run` | 否 | 通知 dry-run。 |
 | `--force-notify` | 否 | 忽略通知去重。 |
+| `--output-file` | 否 | 将 notice JSON 直接写入文件（UTF-8 无 BOM），避免 PowerShell 管道转码。 |
 
 `analyze` 会读取当前构建和 `lastSuccessfulBuild`，用上次成功 commit 作为 base commit，再进入正式分析流程。
 
@@ -497,6 +502,23 @@ python -m ci_owner_agent notify-notice `
 | `--dry-run` | 只打印 Markdown，不发送。 |
 | `--force` | 忽略通知去重。 |
 | `--feedback-base-url` | 覆盖配置中的反馈页基础 URL。 |
+
+> **Windows 用户注意**：PowerShell 5.1 的 `Set-Content -Encoding utf8` 会在文件头写入 UTF-8 BOM，且通过管道传递 Python stdout 可能导致中文乱码。推荐使用 `--output-file` 直接保存 notice JSON：
+>
+> ```powershell
+> python -m ci_owner_agent analyze `
+>   --job services/fx-code-unittest `
+>   --build 5154 `
+>   --repo fx-code `
+>   --output-file .\\runs\\5154.notice.json
+>
+> python -m ci_owner_agent notify-notice `
+>   --notice-file .\\runs\\5154.notice.json `
+>   --dry-run `
+>   --force
+> ```
+>
+> `notify-notice` 已兼容带 BOM 和不带 BOM 的 UTF-8 JSON 文件。如果文件已经出现中文乱码，必须重新执行分析生成，不能用 `utf-8-sig` 恢复。
 
 ### 5.4 人工反馈：`feedback`
 
@@ -834,3 +856,43 @@ steps {
 
 - `ci_test_file_failures`：构建/测试文件唯一索引、文件历史统计索引、`buildTimestamp` 周期索引。
 - `ci_report_notifications`：通知类型、范围、周期和渠道的唯一索引。
+# 企业微信群内反馈（智能机器人长连接）
+
+本项目保留现有企业微信群机器人 Webhook 通知链路，并可选启用企业微信 API 模式智能机器人，通过 WebSocket 长连接接收群内反馈。两条链路彼此独立：Webhook 继续负责 CI 通知，智能机器人负责接收和回复反馈。
+
+1. 在企业微信后台创建 API 模式智能机器人，接入方式选择“长连接”，获取 Bot ID 和 Secret，并将机器人加入研发群。
+2. 安装可选依赖：
+
+   ```bash
+   pip install -e ".[dev,wecom-bot]"
+   ```
+
+3. 启用 MongoDB 历史存储，并配置机器人：
+
+   ```dotenv
+   CI_AGENT_HISTORY_ENABLED=true
+   CI_AGENT_HISTORY_MONGO_URI=mongodb://localhost:27017
+   CI_AGENT_HISTORY_MONGO_DB=ci_owner_agent
+   CI_AGENT_WECOM_BOT_ENABLED=true
+   CI_AGENT_WECOM_BOT_ID=your-bot-id
+   CI_AGENT_WECOM_BOT_SECRET=your-bot-secret
+   ```
+
+4. 以常驻进程启动（不能放在每次 Jenkins 构建结束即退出的临时分析进程中）：
+
+   ```bash
+   ci-owner-agent serve-wecom-bot
+   ```
+
+命令行的 `--bot-id` 和 `--secret` 优先于环境变量。CI 通知出现反馈码后，群成员可发送：
+
+```text
+@CI机器人 CI-7K3M9Q 1 判断正确
+@CI机器人 CI-7K3M9Q 1 责任人改为 @李四
+@CI机器人 CI-7K3M9Q 2 标记偶发
+@CI机器人 CI-7K3M9Q 2 无法定责
+@CI机器人 查看 CI-7K3M9Q
+@CI机器人 帮助
+```
+
+所有会修改数据的命令都需要在 5 分钟内回复确认码。群内所有成员均可提交和覆盖反馈，不设置管理员或责任人白名单；系统会记录提交人的企业微信 userid、可获得的显示名称和操作时间用于审计。只有待确认操作的发起人能确认或取消该次操作，这是防误操作措施，不是业务权限控制。

@@ -29,6 +29,14 @@ ALLOWED_HISTORY_CHUNK_SOURCES = {
 DEFAULT_EXCLUDED_CHUNK_SOURCES = {"local_console_tail_fallback"}
 
 
+def _create_index(collection: Any, spec: list[tuple[str, int]], **options: Any) -> Any:
+    """Keep lightweight test doubles compatible while preserving real Mongo options."""
+    try:
+        return collection.create_index(spec, **options)
+    except TypeError:
+        return collection.create_index(spec, unique=bool(options.get("unique", False)))
+
+
 def _canonical_history_chunk(chunk: dict) -> dict:
     result = dict(chunk)
     signature = dict(chunk.get("signature") or {})
@@ -48,7 +56,7 @@ class MongoHistoryStore:
                 from pymongo import MongoClient
             except Exception as exc:
                 raise RuntimeError(f"pymongo is not installed: {exc}") from exc
-            client = MongoClient(uri, serverSelectionTimeoutMS=2000)
+            client = MongoClient(uri, serverSelectionTimeoutMS=2000, tz_aware=True, tzinfo=dt.timezone.utc)
         self.client = client
         self.db = client[db_name]
         self.builds = self.db["ci_builds"]
@@ -60,6 +68,9 @@ class MongoHistoryStore:
         self.report_notifications = self.db["ci_report_notifications"]
         self.feedback = self.db["ci_feedback"]
         self.wecom_users = self.db["ci_wecom_users"]
+        self.feedback_contexts = self.db["ci_feedback_contexts"]
+        self.wecom_pending_feedback = self.db["ci_wecom_pending_feedback"]
+        self.wecom_bot_events = self.db["ci_wecom_bot_events"]
         self.ensure_indexes()
 
     @classmethod
@@ -94,12 +105,35 @@ class MongoHistoryStore:
             unique=True,
         )
         self.feedback.create_index([("repo", 1), ("job", 1), ("branch", 1), ("buildNumber", 1), ("failureId", 1)])
-        self.feedback.create_index([("repo", 1), ("job", 1), ("branch", 1), ("failureSignature", 1), ("isActive", 1)])
+        _create_index(self.feedback, [("operationId", 1)], unique=True)
+        _create_index(self.feedback, [("recordType", 1), ("repo", 1), ("job", 1), ("branch", 1), ("buildNumber", 1), ("feedbackItemKey", 1), ("submittedAt", -1), ("operationId", -1)])
         self.wecom_users.create_index([("wecomUserId", 1)])
         self.wecom_users.create_index([("normalizedEmail", 1)])
         self.wecom_users.create_index([("authorName", 1)])
         self.wecom_users.create_index([("emailDomain", 1)])
         self.wecom_users.create_index([("searchText", 1)])
+        self.feedback_contexts.create_index([("code", 1)], unique=True)
+        self.feedback_contexts.create_index(
+            [("repo", 1), ("job", 1), ("branch", 1), ("buildNumber", 1)], unique=True
+        )
+        _create_index(self.feedback_contexts, [("expiresAt", 1)], expireAfterSeconds=0)
+        self.wecom_pending_feedback.create_index([("confirmationCode", 1)], unique=True)
+        self.wecom_pending_feedback.create_index([("cardTaskId", 1)], unique=True)
+        self.wecom_pending_feedback.create_index([("eventKey", 1)], unique=True)
+        _create_index(self.wecom_pending_feedback, [("status", 1), ("applyLeaseUntil", 1)])
+        _create_index(self.wecom_pending_feedback, [("expiresAt", 1)], expireAfterSeconds=0)
+        self.wecom_bot_events.create_index([("eventKey", 1)], unique=True)
+        self.wecom_bot_events.create_index([("status", 1), ("leaseUntil", 1)])
+        _create_index(self.wecom_bot_events, [("expiresAt", 1)], expireAfterSeconds=0)
+
+    def upsert_notice_snapshot(self, notice: CiResponsibilityNotice, *, source: str | None = None) -> dict[str, Any]:
+        """Persist the minimum notice state required for feedback without analysis side effects."""
+        now = dt.datetime.now(dt.timezone.utc)
+        repo = _required_repo(notice)
+        key = {"repo": repo, "job": notice.job, "branch": notice.branch, "buildNumber": notice.buildNumber}
+        doc = {**key, "notice": notice.model_dump(mode="json"), "source": source, "updatedAt": now}
+        self.notices.update_one(key, {"$set": doc, "$setOnInsert": {"createdAt": now}}, upsert=True)
+        return self.notices.find_one(key) or {**doc, "createdAt": now}
 
     def save_analysis(
         self,

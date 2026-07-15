@@ -23,18 +23,65 @@ class FakeCollection:
         self.docs = []
         self.indexes = []
 
-    def create_index(self, spec, unique=False):
-        self.indexes.append((tuple(spec), unique))
+    def create_index(self, spec, unique=False, **options):
+        self.indexes.append((tuple(spec), unique, options))
+
+    def insert_one(self, doc):
+        candidate = dict(doc)
+        for spec, unique, options in self.indexes:
+            partial = options.get("partialFilterExpression")
+            if unique and (not partial or _matches(candidate, partial)):
+                for existing in self.docs:
+                    if (not partial or _matches(existing, partial)) and all(existing.get(k) == candidate.get(k) for k, _ in spec):
+                        from pymongo.errors import DuplicateKeyError
+                        raise DuplicateKeyError("duplicate key")
+        self.docs.append(candidate)
+
+    def update_many(self, query, update):
+        for doc in self.docs:
+            if _matches(doc, query):
+                doc.update(update.get("$set", {}))
 
     def update_one(self, key, update, upsert=False):
         doc = self.find_one(key)
         is_insert = doc is None
         if doc is None:
+            if not upsert:
+                return type("Result", (), {"modified_count": 0})()
             doc = dict(key)
             self.docs.append(doc)
         if is_insert:
             doc.update(update.get("$setOnInsert", {}))
         doc.update(update.get("$set", {}))
+        for field, increment in update.get("$inc", {}).items():
+            doc[field] = (doc.get(field) or 0) + increment
+        return type("Result", (), {"modified_count": 1})()
+
+    def find_one_and_update(self, query, update, upsert=False, return_document=False):
+        doc = self.find_one(query)
+        before = dict(doc) if doc is not None else None
+        if doc is None and upsert:
+            doc = {key: value for key, value in query.items() if not key.startswith("$")}
+            self.docs.append(doc)
+            doc.update(update.get("$setOnInsert", {}))
+        if doc is None:
+            return None
+        doc.update(update.get("$set", {}))
+        for field, increment in update.get("$inc", {}).items():
+            doc[field] = (doc.get(field) or 0) + increment
+        return doc if bool(return_document) else before
+
+    def find_one_and_replace(self, query, replacement, upsert=False, return_document=False):
+        doc = self.find_one(query)
+        before = dict(doc) if doc else None
+        if doc is None:
+            if not upsert:
+                return None
+            self.insert_one(replacement)
+            return replacement if bool(return_document) else None
+        index = self.docs.index(doc)
+        self.docs[index] = dict(replacement)
+        return self.docs[index] if bool(return_document) else before
 
     def find_one(self, query):
         for doc in self.docs:
@@ -69,9 +116,15 @@ class FakeClient:
 
 def _matches(doc, query):
     for key, expected in query.items():
+        if key == "$or":
+            if not any(_matches(doc, branch) for branch in expected):
+                return False
+            continue
         value = doc.get(key)
         if isinstance(expected, dict):
             if "$lt" in expected and not (value < expected["$lt"]):
+                return False
+            if "$lte" in expected and not (value <= expected["$lte"]):
                 return False
             if "$gt" in expected and not (value > expected["$gt"]):
                 return False
@@ -685,7 +738,12 @@ def test_mark_flaky_blocks_owner_and_returns_no_owner_decision(repo_cache, sampl
                 "job": context.job,
             "branch": context.branch,
             "buildNumber": 5088,
-            "failureSignature": signature,
+                "failureSignature": signature,
+                "feedbackItemKey": "sig:" + signature,
+                "recordType": "operation",
+                "isCommitted": True,
+                "operationId": "op-flaky",
+                "submittedAt": "2026-01-02T00:00:00",
             "action": "mark_flaky",
             "isActive": True,
             "updatedAt": "2026-01-02T00:00:00",
@@ -722,7 +780,12 @@ def test_correct_owner_has_priority_over_no_owner(repo_cache, sample_repo, logs)
                 "job": context.job,
             "branch": context.branch,
             "buildNumber": 5088,
-            "failureSignature": signature,
+                "failureSignature": signature,
+                "feedbackItemKey": "sig:" + signature,
+                "recordType": "operation",
+                "isCommitted": True,
+                "operationId": "op-owner",
+                "submittedAt": "2026-01-02T00:00:00",
             "action": "correct_owner",
             "correctedOwner": {"type": "high_confidence", "name": "Alice", "email": "alice@example.com", "commit": "abc", "confidence": 1},
             "sourceBuildNumber": 5088,
@@ -969,7 +1032,8 @@ def test_active_feedback_prefers_newer_update_for_same_signature():
                 "job": "services/fx-code-unittest",
                 "branch": "dev",
                 "buildNumber": 1,
-                "failureSignature": "sig-1",
+                    "failureSignature": "sig-1",
+                    "feedbackItemKey": "sig:sig-1", "recordType": "operation", "operationId": "op-old", "submittedAt": "2026-01-01T00:00:00", "isCommitted": True,
                 "action": "correct_owner",
                 "correctedOwner": {"name": "Old Owner", "type": "high_confidence", "confidence": 1},
                 "isActive": True,
@@ -981,8 +1045,9 @@ def test_active_feedback_prefers_newer_update_for_same_signature():
                 "job": "services/fx-code-unittest",
                 "branch": "dev",
                 "buildNumber": 1,
-                "failureSignature": "sig-1",
-                "action": "correct_owner",
+                    "failureSignature": "sig-1",
+                    "feedbackItemKey": "sig:sig-1", "recordType": "operation", "operationId": "op-new", "submittedAt": "2026-01-02T00:00:00", "isCommitted": True,
+                "isCommitted": True,
                 "correctedOwner": {"name": "New Owner", "type": "high_confidence", "confidence": 1},
                 "isActive": True,
                 "createdAt": "2026-01-01T00:00:00",
@@ -1275,3 +1340,141 @@ def test_history_store_find_previous_build_returns_none_when_no_match(repo_cache
         current_build_number=5088,
     )
     assert result is None
+
+
+# --- MongoClient configuration regression ---
+
+def test_mongo_history_store_enables_utc_timezone_aware_decoding(monkeypatch):
+    import datetime as dt
+
+    mongo_client_calls = []
+
+    class FakeMongoClient:
+        def __init__(self, uri, **kwargs):
+            mongo_client_calls.append(dict(uri=uri, kwargs=kwargs))
+
+        def __getitem__(self, name):
+            from tests.test_history_store import FakeDb
+            return FakeDb()
+
+    monkeypatch.setattr("pymongo.MongoClient", FakeMongoClient)
+
+    MongoHistoryStore("mongodb://localhost:27017", "test_db")
+
+    assert len(mongo_client_calls) == 1
+    kwargs = mongo_client_calls[0]["kwargs"]
+    assert kwargs.get("serverSelectionTimeoutMS") == 2000
+    assert kwargs.get("tz_aware") is True
+    assert kwargs.get("tzinfo") == dt.timezone.utc
+
+
+def test_mongo_history_store_does_not_replace_injected_client(monkeypatch):
+    mongo_client_created = []
+
+    class FakeMongoClient:
+        def __init__(self, uri, **kwargs):
+            mongo_client_created.append(1)
+
+        def __getitem__(self, name):
+            from tests.test_history_store import FakeDb
+            return FakeDb()
+
+    monkeypatch.setattr("pymongo.MongoClient", FakeMongoClient)
+
+    injected = FakeMongoClient("ignored")
+    calls_before_store = len(mongo_client_created)
+    store = MongoHistoryStore("mongodb://ignored", "test_db", client=injected)
+    assert len(mongo_client_created) == calls_before_store
+    assert store.client is injected
+
+
+# --- Feedback context UTC-aware expiry regression ---
+
+def test_existing_feedback_context_is_reused_with_utc_aware_expiry():
+    import datetime as dt
+    from ci_owner_agent.services.feedback_context_store import FeedbackContextStore
+    from ci_owner_agent.schemas import CiResponsibilityNotice
+    from tests.test_notification_formatter import item, notice_payload
+
+    store = make_store()
+    notice = CiResponsibilityNotice.model_validate(notice_payload([item("张三")]))
+    key = {"repo": notice.repo, "job": notice.job, "branch": notice.branch, "buildNumber": notice.buildNumber}
+    store.notices.update_one(key, {"$set": {**key, "notice": notice.model_dump(mode="json")}}, upsert=True)
+
+    contexts = FeedbackContextStore(store)
+    first = contexts.get_or_create_for_notice(notice)
+    first_code = first["code"]
+    first_created = first["createdAt"]
+
+    # Verify expiresAt is timezone-aware
+    expires = first.get("expiresAt")
+    assert expires is not None
+    assert expires.tzinfo is not None, "expiresAt must be timezone-aware"
+    assert expires.tzinfo == dt.timezone.utc
+
+    # Second call should reuse
+    second = contexts.get_or_create_for_notice(notice)
+    assert second["code"] == first_code
+    assert second["createdAt"] == first_created
+    assert second["expiresAt"].tzinfo is not None
+
+    # Verify no TypeError on datetime comparison
+    # get_active should work without exception
+    active = contexts.get_active(first_code)
+    assert active is not None
+    assert active["code"] == first_code
+
+
+def test_existing_feedback_context_refresh_keeps_feedback_code():
+    import datetime as dt
+    from ci_owner_agent.services.feedback_context_store import FeedbackContextStore
+    from ci_owner_agent.schemas import CiResponsibilityNotice
+    from tests.test_notification_formatter import item, notice_payload
+
+    store = make_store()
+    notice = CiResponsibilityNotice.model_validate(notice_payload([item("张三")]))
+    key = {"repo": notice.repo, "job": notice.job, "branch": notice.branch, "buildNumber": notice.buildNumber}
+    store.notices.update_one(key, {"$set": {**key, "notice": notice.model_dump(mode="json")}}, upsert=True)
+
+    contexts = FeedbackContextStore(store)
+    first = contexts.get_or_create_for_notice(notice)
+    first_code = first["code"]
+    old_updated = first.get("updatedAt")
+
+    # Change the notice's responsibility item slightly
+    new_notice = CiResponsibilityNotice.model_validate(notice_payload([item("张三")]))
+    new_notice.responsibilityItems[0].failureTitle = "更新后的失败"
+    store.notices.update_one(key, {"$set": {**key, "notice": new_notice.model_dump(mode="json")}}, upsert=True)
+
+    # Reuse should update items but keep code
+    second = contexts.get_or_create_for_notice(new_notice)
+    assert second["code"] == first_code
+    assert second["updatedAt"] != old_updated
+    assert second["responsibilityItems"][0]["failureTitle"] == "更新后的失败"
+    assert second["expiresAt"].tzinfo is not None
+
+
+def test_feedback_context_compares_utc_aware_expiry():
+    import datetime as dt
+    from ci_owner_agent.services.feedback_context_store import FeedbackContextStore
+    from ci_owner_agent.schemas import CiResponsibilityNotice
+    from tests.test_notification_formatter import item, notice_payload
+
+    store = make_store()
+    notice = CiResponsibilityNotice.model_validate(notice_payload([item("张三")]))
+    key = {"repo": notice.repo, "job": notice.job, "branch": notice.branch, "buildNumber": notice.buildNumber}
+    store.notices.update_one(key, {"$set": {**key, "notice": notice.model_dump(mode="json")}}, upsert=True)
+
+    contexts = FeedbackContextStore(store)
+    first = contexts.get_or_create_for_notice(notice)
+    first_code = first["code"]
+
+    # Active context should be found (not expired)
+    active = contexts.get_active(first_code)
+    assert active is not None
+    assert active["code"] == first_code
+
+    # Expire the context
+    store.feedback_contexts.docs[0]["expiresAt"] = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=1)
+    expired = contexts.get_active(first_code)
+    assert expired is None, "Expired context must not be returned"

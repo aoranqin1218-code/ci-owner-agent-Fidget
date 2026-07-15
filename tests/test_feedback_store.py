@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import pytest
 from dataclasses import replace
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 
 from ci_owner_agent.schemas import BuildInfo, CiResponsibilityNotice
 from ci_owner_agent.main import main
@@ -48,11 +50,10 @@ def test_correct_owner_writes_feedback_and_deactivates_old(repo_cache, sample_re
     second = feedback.apply_feedback(repo=context.repo, job=context.job, branch=context.branch, build_number=5099, failure_id=notice.responsibilityItems[0].failureId, failure_signature=None, action="correct_owner", owner_name="Wang Wu")
     assert first["ok"] is True
     assert second["ok"] is True
-    active = [doc for doc in store.feedback.docs if doc.get("isActive")]
-    inactive = [doc for doc in store.feedback.docs if not doc.get("isActive")]
+    active = feedback.list_feedback(repo=context.repo, job=context.job, branch=context.branch, build_number=5099)
     assert len(active) == 1
     assert active[0]["correctedOwner"]["name"] == "Wang Wu"
-    assert inactive
+    assert len(store.feedback.docs) == 2
 
 
 def test_correct_owner_requires_owner_name(repo_cache, sample_repo, logs):
@@ -86,7 +87,7 @@ def test_feedback_isolated_by_repo_and_requires_repo():
     store = make_store()
     store.notices.update_one(
         {"repo": "repo-a", "job": "job", "branch": "dev", "buildNumber": 1},
-        {"$set": {"repo": "repo-a", "job": "job", "branch": "dev", "buildNumber": 1, "notice": {"responsibilityItems": []}}},
+        {"$set": {"repo": "repo-a", "job": "job", "branch": "dev", "buildNumber": 1, "notice": {"responsibilityItems": [{"failureId": "failure-x"}]}}},
         upsert=True,
     )
     feedback = FeedbackStore(store)
@@ -102,7 +103,7 @@ def test_feedback_update_with_same_failure_id_does_not_deactivate_other_branch()
     for branch in ("dev", "release"):
         store.notices.update_one(
             {"repo": "repo-a", "job": "job-x", "branch": branch, "buildNumber": 100},
-            {"$set": {"repo": "repo-a", "job": "job-x", "branch": branch, "buildNumber": 100, "notice": {"responsibilityItems": []}}},
+            {"$set": {"repo": "repo-a", "job": "job-x", "branch": branch, "buildNumber": 100, "notice": {"responsibilityItems": [{"failureId": "same-id"}]}}},
             upsert=True,
         )
     feedback = FeedbackStore(store)
@@ -111,9 +112,9 @@ def test_feedback_update_with_same_failure_id_does_not_deactivate_other_branch()
     feedback.apply_feedback(repo="repo-a", job="job-x", branch="dev", build_number=100, failure_id="same-id", failure_signature=None, action="confirm_owner")
     assert feedback.list_feedback(repo="repo-a", job="job-x", branch="dev", build_number=100)[0]["action"] == "confirm_owner"
     assert feedback.list_feedback(repo="repo-a", job="job-x", branch="release", build_number=100)[0]["action"] == "mark_flaky"
-    inactive_dev = [doc for doc in store.feedback.docs if doc["branch"] == "dev" and not doc["isActive"]]
-    assert len(inactive_dev) == 1
-    assert all(doc["isActive"] for doc in store.feedback.docs if doc["branch"] == "release")
+    inactive_dev = [doc for doc in store.feedback.docs if doc["branch"] == "dev" and doc.get("recordType") == "operation"]
+    assert len(inactive_dev) == 2
+    assert len(feedback.list_feedback(repo="repo-a", job="job-x", branch="release", build_number=100)) == 1
 
 
 def test_feedback_update_with_same_signature_does_not_deactivate_other_branch():
@@ -121,7 +122,7 @@ def test_feedback_update_with_same_signature_does_not_deactivate_other_branch():
     for branch in ("dev", "release"):
         store.notices.update_one(
             {"repo": "repo-a", "job": "job-x", "branch": branch, "buildNumber": 100},
-            {"$set": {"repo": "repo-a", "job": "job-x", "branch": branch, "buildNumber": 100, "notice": {"responsibilityItems": []}}},
+            {"$set": {"repo": "repo-a", "job": "job-x", "branch": branch, "buildNumber": 100, "notice": {"responsibilityItems": [{"failureId": "signature-item", "failureSignature": "same-signature"}]}}},
             upsert=True,
         )
     feedback = FeedbackStore(store)
@@ -130,7 +131,7 @@ def test_feedback_update_with_same_signature_does_not_deactivate_other_branch():
     feedback.apply_feedback(repo="repo-a", job="job-x", branch="dev", build_number=100, failure_id=None, failure_signature="same-signature", action="confirm_owner")
     assert feedback.list_feedback(repo="repo-a", job="job-x", branch="dev", build_number=100)[0]["action"] == "confirm_owner"
     assert feedback.list_feedback(repo="repo-a", job="job-x", branch="release", build_number=100)[0]["action"] == "mark_flaky"
-    assert all(doc["isActive"] for doc in store.feedback.docs if doc["branch"] == "release")
+    assert len(feedback.list_feedback(repo="repo-a", job="job-x", branch="release", build_number=100)) == 1
 
 
 def test_feedback_fills_original_owner_and_signature_from_notice(repo_cache, sample_repo, logs):
@@ -150,6 +151,63 @@ def test_feedback_fills_original_owner_and_signature_from_notice(repo_cache, sam
     )
     assert result["feedback"]["failureSignature"] == "sig-same"
     assert result["feedback"]["originalOwner"]["name"] == "Zhang San"
+
+
+def test_apply_feedback_rejects_failure_not_present_in_notice():
+    store = make_store()
+    store.notices.update_one(
+        {"repo": "repo-a", "job": "job", "branch": "dev", "buildNumber": 1},
+        {"$set": {"notice": {"responsibilityItems": [{"failureId": "present", "failureSignature": "present-sig"}]}}},
+        upsert=True,
+    )
+
+    with pytest.raises(ValueError, match="failure item no longer exists"):
+        FeedbackStore(store).apply_feedback(
+            repo="repo-a", job="job", branch="dev", build_number=1,
+            failure_id="missing", failure_signature=None, action="mark_flaky",
+        )
+
+
+def test_id_and_signature_must_identify_same_notice_item():
+    store = make_store()
+    key = {"repo": "repo", "job": "job", "branch": "dev", "buildNumber": 1}
+    store.notices.update_one(key, {"$set": {**key, "notice": {"responsibilityItems": [{"failureId": "current", "failureSignature": "current-sig"}]}}}, upsert=True)
+    feedback = FeedbackStore(store)
+    with pytest.raises(ValueError, match="do not identify"):
+        feedback.apply_feedback(repo="repo", job="job", branch="dev", build_number=1, failure_id="old", failure_signature="current-sig", action="mark_flaky")
+    result = feedback.apply_feedback(repo="repo", job="job", branch="dev", build_number=1, failure_id="current", failure_signature="current-sig", action="mark_flaky")["feedback"]
+    assert (result["failureId"], result["failureSignature"], result["feedbackItemKey"]) == ("current", "current-sig", "id:current")
+
+
+def test_feedback_for_two_items_without_signatures_remains_independent():
+    store = make_store()
+    key = {"repo": "repo", "job": "job", "branch": "dev", "buildNumber": 1}
+    items = [{"failureId": "A", "failureSignature": None}, {"failureId": "B", "failureSignature": None}]
+    store.notices.update_one(key, {"$set": {**key, "notice": {"responsibilityItems": items}}}, upsert=True)
+    feedback = FeedbackStore(store)
+    feedback.apply_feedback(repo="repo", job="job", branch="dev", build_number=1, failure_id="A", failure_signature=None, action="mark_flaky")
+    feedback.apply_feedback(repo="repo", job="job", branch="dev", build_number=1, failure_id="B", failure_signature=None, action="mark_no_owner")
+    feedback.apply_feedback(repo="repo", job="job", branch="dev", build_number=1, failure_id="A", failure_signature=None, action="confirm_owner")
+    active = {doc["failureId"]: doc for doc in feedback.list_feedback(repo="repo", job="job", branch="dev", build_number=1)}
+    assert set(active) == {"A", "B"}
+    assert active["A"]["action"] == "confirm_owner"
+
+
+def test_concurrent_feedback_keeps_one_active_audit_history():
+    store = make_store()
+    key = {"repo": "repo", "job": "job", "branch": "dev", "buildNumber": 1}
+    store.notices.update_one(key, {"$set": {**key, "notice": {"responsibilityItems": [{"failureId": "current", "failureSignature": "current-sig"}]}}}, upsert=True)
+    barrier = Barrier(2)
+
+    def submit(name):
+        barrier.wait()
+        return FeedbackStore(store).apply_feedback(repo="repo", job="job", branch="dev", build_number=1, failure_id="current", failure_signature=None, action="correct_owner", owner_name=name)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(submit, ("A", "B")))
+    assert all(result["ok"] for result in results)
+    assert len(FeedbackStore(store).list_feedback(repo="repo", job="job", branch="dev", build_number=1)) == 1
+    assert len([doc for doc in store.feedback.docs if doc.get("recordType") == "operation"]) == 2
 
 
 def test_history_overlay_correct_owner_changes_inherited_owner(repo_cache, sample_repo, logs):

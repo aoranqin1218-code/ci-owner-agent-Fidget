@@ -35,7 +35,7 @@ def create_app(settings: Settings | None = None, history_store: MongoHistoryStor
         notice_doc = store.notices.find_one({"repo": repo, "job": job, "branch": branch, "buildNumber": build})
         if not notice_doc:
             return _html_error("notice not found", 404)
-        feedback_docs = list(store.feedback.find({"repo": repo, "job": job, "branch": branch, "buildNumber": build, "isActive": True}))
+        feedback_docs = FeedbackStore(store).list_feedback(repo=repo, job=job, branch=branch, build_number=build)
         return HTMLResponse(_render_feedback_page(notice_doc, feedback_docs, token))
 
     @app.post("/feedback", response_class=HTMLResponse)

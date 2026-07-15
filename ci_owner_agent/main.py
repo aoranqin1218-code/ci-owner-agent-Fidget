@@ -13,6 +13,7 @@ from ci_owner_agent.config import load_settings
 from ci_owner_agent.orchestrator import analyze_jenkins, analyze_local, failure_without_context
 from ci_owner_agent.schemas import BuildInfo, CiResponsibilityNotice, TestFileFailureStat
 from ci_owner_agent.services.feedback_store import FeedbackStore
+from ci_owner_agent.services.feedback_context_store import FeedbackContextStore
 from ci_owner_agent.services.git_client import GitClient
 from ci_owner_agent.services.history_store import get_history_store
 from ci_owner_agent.services.jenkins_client import JenkinsClient
@@ -31,14 +32,31 @@ if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 
-def _print_json(model) -> None:
+def _serialize_json(model) -> str:
+    return json.dumps(model.model_dump(mode="json"), ensure_ascii=False, indent=2) + "\n"
 
-    text = json.dumps(model.model_dump(), ensure_ascii=False, indent=2)
 
+def _emit_json(model, output_file=None) -> None:
+    text = _serialize_json(model)
+    if output_file:
+        path = Path(output_file)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            print(f"ERROR: unable to create output directory: {exc}", file=sys.stderr)
+            raise SystemExit(2) from exc
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        try:
+            tmp.write_text(text, encoding="utf-8")
+            tmp.replace(path)
+        except OSError as exc:
+            print(f"ERROR: unable to write notice file: {exc}", file=sys.stderr)
+            raise SystemExit(2) from exc
+        return
     try:
-        sys.stdout.write(text + "\n")
+        sys.stdout.write(text)
     except UnicodeEncodeError:
-        sys.stdout.buffer.write((text + "\n").encode("utf-8", errors="replace"))
+        sys.stdout.buffer.write(text.encode("utf-8", errors="replace"))
         sys.stdout.buffer.flush()
 
 
@@ -54,6 +72,7 @@ def build_parser() -> argparse.ArgumentParser:
     analyze.add_argument("--notify", action="store_true")
     analyze.add_argument("--notify-dry-run", action="store_true")
     analyze.add_argument("--force-notify", action="store_true")
+    analyze.add_argument("--output-file", default=None)
 
     local = subparsers.add_parser("analyze-local", help="Analyze a local console log and local Git cache")
     local.add_argument("--repo", required=True)
@@ -67,6 +86,7 @@ def build_parser() -> argparse.ArgumentParser:
     local.add_argument("--log-tail-lines", type=int, default=None)
     local.add_argument("--result", choices=["SUCCESS", "FAILURE", "UNSTABLE", "ABORTED", "UNKNOWN"], default=None)
     local.add_argument("--ignore-checkout-commit-mismatch", action="store_true")
+    local.add_argument("--output-file", default=None)
     local.add_argument("--last-success-build", type=int, default=None)
     local.add_argument("--previous-build", type=int, default=None)
     local.add_argument("--previous-commit", default=None)
@@ -95,6 +115,10 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--host", default=None)
     serve.add_argument("--port", type=int, default=None)
     serve.add_argument("--reload", action="store_true")
+
+    wecom_bot = subparsers.add_parser("serve-wecom-bot", help="Start the WeCom AI bot long-running worker")
+    wecom_bot.add_argument("--bot-id", default=None)
+    wecom_bot.add_argument("--secret", default=None)
 
     feedback = subparsers.add_parser("feedback", help="Manage manual feedback")
     feedback_sub = feedback.add_subparsers(dest="feedback_command", required=True)
@@ -165,7 +189,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"ERROR: {exc}", file=sys.stderr)
             return 2
         recorder.record_notice(notice)
-        _print_json(notice)
+        _emit_json(notice, args.output_file)
         with use_metrics_recorder(recorder):
             _maybe_notify_notice(notice, settings, args.notify, args.notify_dry_run, args.force_notify)
         _finish_metrics(recorder, settings)
@@ -226,7 +250,7 @@ def main(argv: list[str] | None = None) -> int:
                 repo=args.repo,
             )
             recorder.record_notice(notice)
-            _print_json(notice)
+            _emit_json(notice, args.output_file)
             with use_metrics_recorder(recorder):
                 _maybe_notify_notice(notice, settings, args.notify, args.notify_dry_run, args.force_notify)
             _finish_metrics(recorder, settings)
@@ -249,7 +273,7 @@ def main(argv: list[str] | None = None) -> int:
                 settings=settings,
             )
         recorder.record_notice(notice)
-        _print_json(notice)
+        _emit_json(notice, args.output_file)
         with use_metrics_recorder(recorder):
             _maybe_notify_notice(notice, settings, args.notify, args.notify_dry_run, args.force_notify)
         _finish_metrics(recorder, settings)
@@ -260,7 +284,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"ERROR: notice file not found: {notice_path}", file=sys.stderr)
             return 2
         try:
-            data = json.loads(notice_path.read_text(encoding="utf-8"))
+            data = json.loads(notice_path.read_text(encoding="utf-8-sig"))
         except Exception as exc:
             print(f"ERROR: invalid notice json: {exc}", file=sys.stderr)
             return 2
@@ -341,8 +365,93 @@ def main(argv: list[str] | None = None) -> int:
             reload=args.reload,
         )
         return 0
+    if args.command == "serve-wecom-bot":
+        bot_id = str(args.bot_id or settings.wecom_bot_id or "").strip()
+        secret = str(args.secret or settings.wecom_bot_secret or "").strip()
+        if not settings.history_enabled:
+            print("ERROR: MongoDB history storage must be enabled for serve-wecom-bot", file=sys.stderr)
+            return 2
+        if not settings.wecom_bot_enabled:
+            print("ERROR: CI_AGENT_WECOM_BOT_ENABLED must be enabled for serve-wecom-bot", file=sys.stderr)
+            return 2
+        if not bot_id:
+            print("ERROR: Bot ID is required (--bot-id or CI_AGENT_WECOM_BOT_ID)", file=sys.stderr)
+            return 2
+        if not secret:
+            print("ERROR: Secret is required (--secret or CI_AGENT_WECOM_BOT_SECRET)", file=sys.stderr)
+            return 2
+        store = get_history_store(settings)
+        if store is None:
+            print("ERROR: MongoDB history storage is unavailable", file=sys.stderr)
+            return 2
+        try:
+            admin = getattr(store.client, "admin", None)
+            if admin is not None:
+                admin.command("ping")
+        except Exception as exc:
+            print(f"ERROR: MongoDB history storage is unavailable: {exc}", file=sys.stderr)
+            return 2
+        try:
+            from ci_owner_agent.services.wecom_bot_adapter import WeComSdkAdapter
+            from ci_owner_agent.services.wecom_bot_worker import WeComBotWorker
+
+            adapter = WeComSdkAdapter(bot_id, secret)
+        except RuntimeError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            return 2
+        ai_parser = _build_wecom_feedback_ai_parser(settings)
+        card_action_url = (
+            settings.feedback_base_url
+            or "https://work.weixin.qq.com/"
+        )
+        worker = WeComBotWorker(
+            adapter,
+            store,
+            confirm_ttl_seconds=settings.wecom_bot_confirm_ttl_seconds,
+            feedback_code_ttl_days=settings.wecom_feedback_code_ttl_days,
+            event_ttl_days=settings.wecom_bot_event_ttl_days,
+            ai_parser=ai_parser,
+            card_action_url=card_action_url,
+        )
+        try:
+            worker.run()
+        except Exception as exc:
+            print(f"ERROR: WeCom bot stopped because of a fatal error: {exc}", file=sys.stderr)
+            return 2
+        return 0
     parser.print_help()
     return 2
+
+def _build_wecom_feedback_ai_parser(
+    settings: Any,
+) -> Any:
+    """Build AI parser for WeCom feedback, or None if disabled/invalid."""
+    if not settings.wecom_bot_llm_enabled:
+        return None
+    provider = settings.model_provider.strip().lower()
+    if provider == "fake":
+        from ci_owner_agent.services.wecom_feedback_ai_parser import FakeWeComFeedbackAiParser
+        return FakeWeComFeedbackAiParser()
+    from ci_owner_agent.config import validate_model_settings
+    validation_error = validate_model_settings(settings)
+    if validation_error:
+        print(
+            f"WARNING: WeCom bot AI parser disabled: {validation_error}",
+            file=sys.stderr,
+        )
+        return None
+    try:
+        from ci_owner_agent.services.wecom_feedback_ai_parser import WeComFeedbackAiParser
+        return WeComFeedbackAiParser(
+            settings,
+            max_input_chars=settings.wecom_bot_llm_max_input_chars,
+        )
+    except Exception as exc:
+        print(
+            f"WARNING: WeCom bot AI parser init failed: {exc}",
+            file=sys.stderr,
+        )
+        return None
 
 
 def _maybe_notify_notice(notice: CiResponsibilityNotice, settings, cli_notify: bool, cli_dry_run: bool, force: bool) -> None:
@@ -399,6 +508,14 @@ def _notify_notice(notice: CiResponsibilityNotice, settings, *, dry_run: bool, f
         maintainer_resolver = TestMaintainerResolver.from_yaml(settings.test_maintainer_mapping_file)
         for warning in maintainer_resolver.warnings:
             print(f"WARNING: {warning}", file=sys.stderr)
+        feedback_code = None
+        if store:
+            try:
+                store.upsert_notice_snapshot(notice, source="notification")
+                context = FeedbackContextStore(store, settings.wecom_feedback_code_ttl_days).get_or_create_for_notice(notice)
+                feedback_code = context.get("code") if context else None
+            except Exception as exc:
+                print(f"WARNING: feedback context unavailable: {exc}", file=sys.stderr)
         markdown = format_wecom_markdown_notice(
             notice,
             feedback_base_url=feedback_base_url,
@@ -408,6 +525,7 @@ def _notify_notice(notice: CiResponsibilityNotice, settings, *, dry_run: bool, f
             fallback_userids=settings.wecom_fallback_userids,
             maintainer_resolver=maintainer_resolver,
             repo=notice.repo,
+            feedback_code=feedback_code,
         )
         digest = notification_digest(
             notice,
