@@ -365,6 +365,39 @@ def main(argv: list[str] | None = None) -> int:
             reload=args.reload,
         )
         return 0
+
+def _build_wecom_feedback_ai_parser(
+    settings: Any,
+) -> Any:
+    """Build AI parser for WeCom feedback, or None if disabled/invalid."""
+    if not settings.wecom_bot_llm_enabled:
+        return None
+    provider = settings.model_provider.strip().lower()
+    if provider == "fake":
+        from ci_owner_agent.services.wecom_feedback_ai_parser import FakeWeComFeedbackAiParser
+        return FakeWeComFeedbackAiParser()
+    from ci_owner_agent.config import validate_model_settings
+    validation_error = validate_model_settings(settings)
+    if validation_error:
+        print(
+            f"WARNING: WeCom bot AI parser disabled: {validation_error}",
+            file=sys.stderr,
+        )
+        return None
+    try:
+        from ci_owner_agent.services.wecom_feedback_ai_parser import WeComFeedbackAiParser
+        return WeComFeedbackAiParser(
+            settings,
+            max_input_chars=settings.wecom_bot_llm_max_input_chars,
+        )
+    except Exception as exc:
+        print(
+            f"WARNING: WeCom bot AI parser init failed: {exc}",
+            file=sys.stderr,
+        )
+        return None
+
+
     if args.command == "serve-wecom-bot":
         bot_id = str(args.bot_id or settings.wecom_bot_id or "").strip()
         secret = str(args.secret or settings.wecom_bot_secret or "").strip()
@@ -399,26 +432,7 @@ def main(argv: list[str] | None = None) -> int:
         except RuntimeError as exc:
             print(f"ERROR: {exc}", file=sys.stderr)
             return 2
-        ai_parser = None
-        if settings.wecom_bot_llm_enabled:
-            provider = settings.model_provider.strip().lower()
-            if provider == "fake":
-                from ci_owner_agent.services.wecom_feedback_ai_parser import FakeWeComFeedbackAiParser
-                ai_parser = FakeWeComFeedbackAiParser()
-            else:
-                from ci_owner_agent.config import validate_model_settings
-                validation_error = validate_model_settings(settings)
-                if validation_error:
-                    print(f"WARNING: WeCom bot AI parser disabled: {validation_error}", file=sys.stderr)
-                else:
-                    try:
-                        from ci_owner_agent.services.wecom_feedback_ai_parser import WeComFeedbackAiParser
-                        ai_parser = WeComFeedbackAiParser(
-                            settings,
-                            max_input_chars=settings.wecom_bot_llm_max_input_chars,
-                        )
-                    except Exception as exc:
-                        print(f"WARNING: WeCom bot AI parser init failed: {exc}", file=sys.stderr)
+        ai_parser = _build_wecom_feedback_ai_parser(settings)
         worker = WeComBotWorker(
             adapter,
             store,

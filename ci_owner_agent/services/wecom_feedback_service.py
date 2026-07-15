@@ -174,7 +174,29 @@ class WeComFeedbackService:
                 ),
             )
         if status == "applied":
-            return self._recover_and_finalize(pending, event)
+            return self._recover_applied_operation(pending, event)
+        # Active applying lease: another handler owns this pending
+        if status == "applying":
+            return WeComBotReply(
+                reply_type="template_card",
+                template_card=_build_updated_card(
+                    title="\u5904\u7406\u4e2d",
+                    desc="\u53cd\u9988\u6b63\u5728\u63d0\u4ea4\uff0c\u8bf7\u52ff\u91cd\u590d\u64cd\u4f5c\u3002",
+                    task_id=event.task_id,
+                    status="applying",
+                ),
+            )
+        # Only "claimed" requests may proceed to stale check and operation
+        if status != "claimed":
+            return WeComBotReply(
+                reply_type="template_card",
+                template_card=_build_updated_card(
+                    title=_card_status_title(status, default="\u64cd\u4f5c\u5931\u8d25"),
+                    desc=_card_status_desc(status, default="\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002"),
+                    task_id=event.task_id,
+                    status=status,
+                ),
+            )
 
         # Stale check before operation write
         resolve_result = self._safe_resolve_current_item(pending)
@@ -265,58 +287,19 @@ class WeComFeedbackService:
                         status="applying",
                     ),
                 )
-            # Prepared operation - re-check stale before finalizing
-            prepped_resolve = self._safe_resolve_current_item(pending)
-            if prepped_resolve[0] == "error":
-                return WeComBotReply(
-                    reply_type="template_card",
-                    template_card=_build_updated_card(
-                        title="确认中",
-                        desc="反馈结果正在确认，请勿重复提交。",
-                        task_id=event.task_id,
-                        status="applying",
-                    ),
-                )
-            if prepped_resolve[0] == "stale":
-                stale_ok = self._safe_mark_stale(pending, "责任项在确认前已更新")
-                if stale_ok is True:
-                    return WeComBotReply(
-                        reply_type="template_card",
-                        template_card=_build_updated_card(
-                            title="反馈已失效",
-                            desc="该责任项已经更新，请重新发起反馈。",
-                            task_id=event.task_id,
-                            status="stale",
-                        ),
-                    )
-                return WeComBotReply(
-                    reply_type="template_card",
-                    template_card=_build_updated_card(
-                        title=_card_status_title(
-                            self._safe_read_pending(pending).get("status", "applying")
-                        ),
-                        desc=_card_status_desc(
-                            self._safe_read_pending(pending).get("status", "applying")
-                        ),
-                        task_id=event.task_id,
-                        status="applying",
-                    ),
-                )
-            _current_context, _current_item = prepped_resolve[1], prepped_resolve[2]
             return self._finalize_card(pending, event)
-        context = pending.get("feedbackContext") or {}
         try:
             intent = ParsedFeedbackIntent.model_validate(pending["intent"])
             owner_name = intent.target_display_name
             owner_email = None
 
             self.feedback.apply_feedback(
-                repo=context["repo"],
-                job=context["job"],
-                branch=context["branch"],
-                build_number=context["buildNumber"],
-                failure_id=context.get("failureId"),
-                failure_signature=context.get("failureSignature"),
+                repo=_current_context["repo"],
+                job=_current_context["job"],
+                branch=_current_context["branch"],
+                build_number=_current_context["buildNumber"],
+                failure_id=_current_item.get("failureId"),
+                failure_signature=_current_item.get("failureSignature"),
                 action=intent.action or "",
                 owner_name=owner_name,
                 owner_email=owner_email,
@@ -509,120 +492,70 @@ class WeComFeedbackService:
             ),
         )
 
-    def _recover_and_finalize(self, pending: dict[str, Any], event: WeComTemplateCardEvent) -> WeComBotReply:
+
+    def _recover_applied_operation(self, pending: dict[str, Any], event: WeComTemplateCardEvent) -> WeComBotReply:
+        """Recover an already-applied pending.
+
+        applied means the confirm CAS was accepted.  This method
+        must NOT re-check stale, call mark_stale, call mark_failed,
+        or call mark_applied.  It only looks up the prepared
+        operation and activates it if needed.
+        """
         operation = self._safe_find_operation(pending)
         if operation is _OPERATION_LOOKUP_FAILED:
             return WeComBotReply(
                 reply_type="template_card",
                 template_card=_build_updated_card(
-                    title="确认中",
-                    desc="反馈结果正在确认，请勿重复提交。",
+                    title="\u7ed3\u679c\u6b63\u5728\u540c\u6b65",
+                    desc="\u53cd\u9988\u5df2\u63a5\u53d7\uff0c\u7ed3\u679c\u6b63\u5728\u540c\u6b65\u3002",
                     task_id=event.task_id,
-                    status="applying",
+                    status="applied",
                 ),
             )
         if operation is None:
-            try:
-                if not self.pending.mark_failed(pending, pending.get("applyToken"), "recovery: operation not found"):
-                    return WeComBotReply(
-                        reply_type="template_card",
-                        template_card=_build_updated_card(
-                            title=_card_status_title(
-                                self._safe_read_pending(pending).get("status", "applying")
-                            ),
-                            desc=_card_status_desc(
-                                self._safe_read_pending(pending).get("status", "applying")
-                            ),
-                            task_id=event.task_id,
-                            status="applying",
-                        ),
-                    )
-            except Exception:
-                logging.getLogger(__name__).exception("Failed to mark pending feedback failed")
-                return WeComBotReply(
-                    reply_type="template_card",
-                    template_card=_build_updated_card(
-                        title="确认中",
-                        desc="反馈结果正在确认，请勿重复提交。",
-                        task_id=event.task_id,
-                        status="applying",
-                    ),
-                )
+            logging.getLogger(__name__).error(
+                "Applied pending without operation: confirmationCode=%s",
+                pending.get("confirmationCode", "?"),
+            )
             return WeComBotReply(
                 reply_type="template_card",
                 template_card=_build_updated_card(
-                    title="反馈写入失败",
-                    desc="请重新发起反馈。",
+                    title="\u7ed3\u679c\u6b63\u5728\u540c\u6b65",
+                    desc="\u53cd\u9988\u5df2\u63a5\u53d7\uff0c\u7ed3\u679c\u6b63\u5728\u540c\u6b65\u3002",
                     task_id=event.task_id,
-                    status="failed",
+                    status="applied",
                 ),
             )
         if operation.get("isCommitted"):
-            result = self._safe_reconcile_applied(pending)
-            if result is True:
-                return self._finalize_card(pending, event)
-            if result is False:
-                return WeComBotReply(
-                    reply_type="template_card",
-                    template_card=_build_updated_card(
-                        title=_card_status_title(
-                            self._safe_read_pending(pending).get("status", "applying")
-                        ),
-                        desc=_card_status_desc(
-                            self._safe_read_pending(pending).get("status", "applying")
-                        ),
-                        task_id=event.task_id,
-                        status="applying",
-                    ),
-                )
             return WeComBotReply(
                 reply_type="template_card",
                 template_card=_build_updated_card(
-                    title="确认中",
-                    desc="反馈结果正在确认，请勿重复提交。",
+                    title="\u53cd\u9988\u5df2\u63d0\u4ea4",
+                    desc="\u8be5\u53cd\u9988\u5df2\u6210\u529f\u5199\u5165\u3002",
                     task_id=event.task_id,
-                    status="applying",
+                    status="completed",
                 ),
             )
-        # Prepared operation in recover - re-check stale before finalizing
-        rec_resolve = self._safe_resolve_current_item(pending)
-        if rec_resolve[0] == "error":
+        activation = self._safe_activate_operation(pending)
+        if activation in ("committed", "already_committed"):
             return WeComBotReply(
                 reply_type="template_card",
                 template_card=_build_updated_card(
-                    title="确认中",
-                    desc="反馈结果正在确认，请勿重复提交。",
+                    title="\u53cd\u9988\u5df2\u63d0\u4ea4",
+                    desc="\u8be5\u53cd\u9988\u5df2\u6210\u529f\u5199\u5165\u3002",
                     task_id=event.task_id,
-                    status="applying",
+                    status="completed",
                 ),
             )
-        if rec_resolve[0] == "stale":
-            stale_ok = self._safe_mark_stale(pending, "责任项在确认前已更新")
-            if stale_ok is True:
-                return WeComBotReply(
-                    reply_type="template_card",
-                    template_card=_build_updated_card(
-                        title="反馈已失效",
-                        desc="该责任项已经更新，请重新发起反馈。",
-                        task_id=event.task_id,
-                        status="stale",
-                    ),
-                )
-            return WeComBotReply(
-                reply_type="template_card",
-                template_card=_build_updated_card(
-                    title=_card_status_title(
-                        self._safe_read_pending(pending).get("status", "applying")
-                    ),
-                    desc=_card_status_desc(
-                        self._safe_read_pending(pending).get("status", "applying")
-                    ),
-                    task_id=event.task_id,
-                    status="applying",
-                ),
-            )
-        _current_context, _current_item = rec_resolve[1], rec_resolve[2]
-        return self._finalize_card(pending, event)
+        return WeComBotReply(
+            reply_type="template_card",
+            template_card=_build_updated_card(
+                title="\u7ed3\u679c\u6b63\u5728\u540c\u6b65",
+                desc="\u53cd\u9988\u5df2\u63a5\u53d7\uff0c\u7ed3\u679c\u6b63\u5728\u540c\u6b65\u3002",
+                task_id=event.task_id,
+                status="applied",
+            ),
+        )
 
     # ---- internal helpers ----
 

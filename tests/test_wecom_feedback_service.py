@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import datetime as dt
 from ci_owner_agent.schemas import CiResponsibilityNotice
 from ci_owner_agent.services.feedback_context_store import FeedbackContextStore
 from ci_owner_agent.services.wecom_bot_models import (
@@ -14,6 +13,7 @@ from ci_owner_agent.services.wecom_feedback_service import WeComFeedbackService
 from ci_owner_agent.services.wecom_feedback_ai_parser import WeComFeedbackAiParserProtocol
 from tests.test_history_store import make_store
 from tests.test_notification_formatter import item, notice_payload
+import datetime as dt
 
 
 class _RecordingAiParser:
@@ -301,6 +301,7 @@ def test_confirmation_code_not_in_reply():
 def test_card_confirmation_is_rejected_when_item_changed():
     """Stale responsibility item should prevent confirmation."""
     import copy
+    import datetime as dt
     store, notice, context = _setup()
     service = WeComFeedbackService(store)
     reply = service.handle_text(_message("msg:stale1", f"{context['code']} 1 判断正确"))
@@ -427,7 +428,7 @@ def test_mark_stale_uses_claim_apply_token():
     service.pending.mark_stale = original_mark_stale
 
 
-def test_prepared_operation_stale_check():
+def test_expired_lease_reclaim_rechecks_prepared_operation_stale():
     """Existing prepared operation should be rejected when item changed."""
     store, notice, context = _setup()
     service = WeComFeedbackService(store)
@@ -447,6 +448,10 @@ def test_prepared_operation_stale_check():
     # Claim to get applying status with prepared operation
     status, claimed = service.pending.claim(pending["confirmationCode"], "wangwu")
     pending = claimed  # use claimed doc
+
+    # Expire the lease so second click can reclaim
+    pending_doc = store.wecom_pending_feedback.docs[0]
+    pending_doc["applyLeaseUntil"] = dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=1)
 
     # Change the responsibility item
     ctx_doc = store.feedback_contexts.docs[0]
@@ -507,3 +512,141 @@ def test_confirm_claim_uses_fresh_pending():
     pending_after = store.wecom_pending_feedback.docs[0]
     assert pending_after["status"] in ("completed", "applied")
     service.pending.claim = original_claim
+
+
+
+def test_applied_uncommitted_operation_activates_without_stale_recheck():
+    """Applied pending should activate operation without stale re-check."""
+    import copy
+    store, notice, context = _setup()
+    service = WeComFeedbackService(store)
+    reply = service.handle_text(_message("msg:applied1", f"{context['code']} 1 \u5224\u65ad\u6b63\u786e"))
+    task_id = reply.template_card["task_id"]
+
+    # First claim
+    pending = store.wecom_pending_feedback.docs[0]
+    status, claimed = service.pending.claim(pending["confirmationCode"], "wangwu")
+    assert status == "claimed"
+    pending = claimed
+
+    # Create prepared operation
+    operation_id = pending["operationId"]
+    operation_doc = {
+        "_id": f"operation:{operation_id}",
+        "recordType": "operation",
+        "operationId": operation_id,
+        "isCommitted": False,
+        "action": "confirm_owner",
+        "failureId": context["responsibilityItems"][0]["failureId"],
+    }
+    store.feedback.docs.append(operation_doc)
+
+    # Manually mark applied using the applyToken
+    mark_ok = service.pending.mark_applied(pending, pending["applyToken"])
+    assert mark_ok
+    pending_after_mark = store.wecom_pending_feedback.docs[0]
+    assert pending_after_mark["status"] == "applied"
+    assert pending_after_mark.get("applyToken") is None
+
+    # Change responsibility item (should not block recovery)
+    ctx_doc = store.feedback_contexts.docs[0]
+    old_item = copy.deepcopy(ctx_doc["responsibilityItems"][0])
+    old_item["failureId"] = "post-applied-change"
+    ctx_doc["responsibilityItems"] = [old_item]
+
+    # Monkey-patch _safe_mark_stale to raise if called
+    original_safe_mark = service._safe_mark_stale
+    def _raise_on_stale(*args, **kwargs):
+        raise AssertionError("applied recovery must not call _safe_mark_stale")
+    service._safe_mark_stale = _raise_on_stale
+
+    event = WeComTemplateCardEvent(
+        event_key="wecom-card:applied1",
+        message_id="applied1",
+        sender_userid="wangwu",
+        chat_id="chat",
+        task_id=task_id,
+        button_key="confirm",
+    )
+    confirm_reply = service.handle_template_card_event(event)
+    assert confirm_reply.reply_type == "template_card"
+    title = confirm_reply.template_card.get("main_title", {}).get("title", "")
+    assert "\u63d0\u4ea4" in title
+    # Operation should now be committed
+    op = store.feedback.docs[0]
+    assert op["isCommitted"] is True
+    service._safe_mark_stale = original_safe_mark
+
+
+def test_applied_missing_operation_stays_applied():
+    """Applied pending without operation should stay applied."""
+    store, _, context = _setup()
+    service = WeComFeedbackService(store)
+    reply = service.handle_text(_message("msg:missingop1", f"{context['code']} 1 \u5224\u65ad\u6b63\u786e"))
+    task_id = reply.template_card["task_id"]
+
+    # Claim and mark applied without creating operation
+    pending = store.wecom_pending_feedback.docs[0]
+    status, claimed = service.pending.claim(pending["confirmationCode"], "wangwu")
+    assert status == "claimed"
+    mark_ok = service.pending.mark_applied(claimed, claimed["applyToken"])
+    assert mark_ok
+
+    event = WeComTemplateCardEvent(
+        event_key="wecom-card:missingop1",
+        message_id="missingop1",
+        sender_userid="wangwu",
+        chat_id="chat",
+        task_id=task_id,
+        button_key="confirm",
+    )
+    confirm_reply = service.handle_template_card_event(event)
+    assert confirm_reply.reply_type == "template_card"
+    title = confirm_reply.template_card.get("main_title", {}).get("title", "")
+    # Should show "\u7ed3\u679c\u6b63\u5728\u540c\u6b65" not "\u5931\u8d25"
+    assert "\u540c\u6b65" in title
+    # Pending should still be applied
+    pending_after = store.wecom_pending_feedback.docs[0]
+    assert pending_after["status"] == "applied"
+
+
+def test_card_confirmation_uses_current_signature_when_failure_id_is_same():
+    """Same failureId but different signature should use new signature for operation."""
+    import copy
+    store, notice, context = _setup()
+    service = WeComFeedbackService(store)
+    reply = service.handle_text(_message("msg:sig1", f"{context['code']} 1 \u5224\u65ad\u6b63\u786e"))
+    task_id = reply.template_card["task_id"]
+
+    # Update the context's responsibility item with new signature but same failureId
+    ctx_doc = store.feedback_contexts.docs[0]
+    old_item = copy.deepcopy(ctx_doc["responsibilityItems"][0])
+    old_item["failureSignature"] = "new-signature-v2"
+    ctx_doc["responsibilityItems"] = [old_item]
+    ctx_doc["updatedAt"] = dt.datetime.now(dt.timezone.utc)
+
+    # Also update the notice snapshot for FeedbackStore validation
+    notice_doc = store.notices.find_one({"repo": notice.repo, "job": notice.job, "branch": notice.branch, "buildNumber": notice.buildNumber})
+    if notice_doc:
+        notice_items = notice_doc.get("notice", {}).get("responsibilityItems", [])
+        for ni in notice_items:
+            if ni.get("failureId") == context["responsibilityItems"][0]["failureId"]:
+                ni["failureSignature"] = "new-signature-v2"
+
+    event = WeComTemplateCardEvent(
+        event_key="wecom-card:sig1",
+        message_id="sig1",
+        sender_userid="wangwu",
+        chat_id="chat",
+        task_id=task_id,
+        button_key="confirm",
+    )
+    confirm_reply = service.handle_template_card_event(event)
+    assert confirm_reply.reply_type == "template_card"
+    title = confirm_reply.template_card.get("main_title", {}).get("title", "")
+    assert "\u63d0\u4ea4" in title or "\u6210\u529f" in title
+    # Operation should use new signature
+    assert len(store.feedback.docs) >= 1
+    op = store.feedback.docs[0]
+    assert op["failureSignature"] == "new-signature-v2"
+    assert op["isCommitted"] is True
