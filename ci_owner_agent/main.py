@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import argparse
 import csv
@@ -399,6 +399,16 @@ def main(argv: list[str] | None = None) -> int:
         except RuntimeError as exc:
             print(f"ERROR: {exc}", file=sys.stderr)
             return 2
+        ai_parser = None
+        if settings.wecom_bot_llm_enabled:
+            try:
+                from ci_owner_agent.services.wecom_feedback_ai_parser import WeComFeedbackAiParser
+                ai_parser = WeComFeedbackAiParser(
+                    settings,
+                    max_input_chars=settings.wecom_bot_llm_max_input_chars,
+                )
+            except Exception as exc:
+                print(f"WARNING: WeCom bot AI parser init failed: {exc}", file=sys.stderr)
         worker = WeComBotWorker(
             adapter,
             store,

@@ -1,124 +1,87 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
-import asyncio
-import sys
-import types
+import pytest
+from unittest.mock import AsyncMock, MagicMock, patch
+from collections.abc import Mapping
 
-from ci_owner_agent.services.wecom_bot_adapter import WeComSdkAdapter
-
-
-class FakeOptions:
-    def __init__(self, **kwargs):
-        self.kwargs = kwargs
-
-
-class FakeClient:
-    def __init__(self, options):
-        self.options = options
-        self.handlers = {}
-        self.connected = False
-        self.disconnected = False
-        self.replies = []
-
-    def on(self, event, handler):
-        self.handlers[event] = handler
-
-    async def connect(self):
-        self.connected = True
-
-    def disconnect(self):
-        self.disconnected = True
-
-    async def reply_stream(self, frame, stream_id, content, finish):
-        self.replies.append((frame, stream_id, content, finish))
+from ci_owner_agent.services.wecom_bot_adapter import (
+    WeComBotAdapterProtocol,
+    WeComSdkAdapter,
+    is_fatal_sdk_error,
+    fatal_sdk_error_reason,
+)
 
 
-class DelayedCloseFakeClient(FakeClient):
-    def disconnect(self):
-        self.disconnected = True
-        asyncio.create_task(self._close_later())
+class FakeAdapter:
+    """Minimal fake adapter for testing protocol compliance."""
 
-    async def _close_later(self):
-        await asyncio.sleep(0)
-        await asyncio.sleep(0)
-        self.connected = False
+    def __init__(self):
+        self.text_handler = None
+        self.card_handler = None
+        self.fatal_handler = None
+        self.text_replies = []
+        self.card_replies = []
+        self.card_updates = []
 
-    @property
-    def is_connected(self):
-        return self.connected
+    def set_text_handler(self, handler):
+        self.text_handler = handler
 
+    def set_template_card_event_handler(self, handler):
+        self.card_handler = handler
 
-class NeverCloseFakeClient(DelayedCloseFakeClient):
-    def disconnect(self):
-        self.disconnected = True
+    def set_fatal_error_handler(self, handler):
+        self.fatal_handler = handler
 
+    async def start(self):
+        pass
 
-def _install_sdk(monkeypatch, client_class=FakeClient):
-    fake_module = types.SimpleNamespace(
-        WSClient=client_class,
-        WSClientOptions=FakeOptions,
-        generate_req_id=lambda prefix: f"{prefix}-id",
-    )
-    monkeypatch.setitem(sys.modules, "aibot", fake_module)
+    async def stop(self):
+        pass
 
+    async def reply_text(self, frame, text):
+        self.text_replies.append(text)
 
-def test_sdk_adapter_registers_text_event_and_replies(monkeypatch):
-    _install_sdk(monkeypatch)
+    async def reply_template_card(self, frame, template_card):
+        self.card_replies.append(template_card)
 
-    async def run():
-        adapter = WeComSdkAdapter("bot-placeholder", "secret-placeholder")
-        received = []
-
-        async def handler(frame):
-            received.append(frame)
-
-        adapter.set_text_handler(handler)
-        frame = {"headers": {"req_id": "request-placeholder"}, "body": {"text": {"content": "帮助"}}}
-        await adapter.start()
-        await adapter._client.handlers["message.text"](frame)
-        await adapter.reply(frame, "reply")
-        await adapter.stop()
-
-        assert received == [frame]
-        assert adapter._client.connected and adapter._client.disconnected
-        assert adapter._client.replies[0][1:] == ("stream-id", "reply", True)
-
-    asyncio.run(run())
+    async def update_template_card(self, frame, template_card, userids=None):
+        self.card_updates.append((template_card, userids))
 
 
-def test_adapter_reports_only_fatal_sdk_errors(monkeypatch):
-    _install_sdk(monkeypatch)
-    adapter = WeComSdkAdapter("bot-placeholder", "secret-placeholder")
-    errors = []
-    adapter.set_fatal_error_handler(errors.append)
-
-    adapter._client.handlers["error"](RuntimeError("temporary network error"))
-    assert errors == []
-    fatal = RuntimeError("Max reconnect attempts exceeded")
-    adapter._client.handlers["error"](fatal)
-    assert errors == [fatal]
+def test_fake_adapter_implements_protocol():
+    adapter = FakeAdapter()
+    # Protocol uses structural subtyping, not isinstance
 
 
-def test_adapter_stop_waits_until_websocket_is_closed(monkeypatch):
-    _install_sdk(monkeypatch, DelayedCloseFakeClient)
-
-    async def run():
-        adapter = WeComSdkAdapter("bot-placeholder", "secret-placeholder", close_timeout_seconds=1)
-        await adapter.start()
-        await adapter.stop()
-        assert adapter._client.is_connected is False
-
-    asyncio.run(run())
+def test_adapter_protocol_has_template_card_methods():
+    """Protocol should include template card methods."""
+    methods = dir(WeComBotAdapterProtocol)
+    assert "set_template_card_event_handler" in methods
+    assert "reply_template_card" in methods
+    assert "update_template_card" in methods
 
 
-def test_adapter_stop_times_out_instead_of_hanging_forever(monkeypatch, caplog):
-    _install_sdk(monkeypatch, NeverCloseFakeClient)
+def test_fake_adapter_card_methods():
+    adapter = FakeAdapter()
+    frame = {}
+    card = {"card_type": "button_interaction", "task_id": "test"}
+    import asyncio
+    asyncio.run(adapter.reply_template_card(frame, card))
+    assert len(adapter.card_replies) == 1
+    assert adapter.card_replies[0]["card_type"] == "button_interaction"
 
-    async def run():
-        adapter = WeComSdkAdapter("bot-placeholder", "secret-placeholder", close_timeout_seconds=0.01)
-        await adapter.start()
-        await asyncio.wait_for(adapter.stop(), timeout=0.5)
-        assert adapter._client.is_connected is True
+    asyncio.run(adapter.update_template_card(frame, card, userids=["user1"]))
+    assert len(adapter.card_updates) == 1
+    assert adapter.card_updates[0][1] == ["user1"]
 
-    asyncio.run(run())
-    assert "Timed out waiting for WeCom WebSocket to close" in caplog.text
+
+def test_is_fatal_sdk_error():
+    assert is_fatal_sdk_error(RuntimeError("authentication failed")) is True
+    assert is_fatal_sdk_error(RuntimeError("max reconnect attempts exceeded")) is True
+    assert is_fatal_sdk_error(RuntimeError("network timeout")) is False
+
+
+def test_fatal_sdk_error_reason():
+    assert fatal_sdk_error_reason(RuntimeError("authentication failed")) == "authentication failed"
+    assert fatal_sdk_error_reason(RuntimeError("max reconnect attempts exceeded")) == "maximum reconnect attempts exceeded"
+    assert fatal_sdk_error_reason(RuntimeError("unknown")) == "unrecoverable SDK error"

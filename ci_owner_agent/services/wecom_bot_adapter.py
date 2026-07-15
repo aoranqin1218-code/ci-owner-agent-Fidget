@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 import inspect
@@ -7,6 +7,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, Protocol
 
 FrameHandler = Callable[[Mapping[str, Any]], Awaitable[None]]
+TemplateCardEventHandler = Callable[[Mapping[str, Any]], Awaitable[None]]
 FatalErrorHandler = Callable[[BaseException], None]
 
 _AUTH_FAILURE_MARKER = "authentication failed"
@@ -15,10 +16,15 @@ _RECONNECT_EXHAUSTED_MARKER = "max reconnect attempts exceeded"
 
 class WeComBotAdapterProtocol(Protocol):
     def set_text_handler(self, handler: FrameHandler) -> None: ...
+    def set_template_card_event_handler(self, handler: TemplateCardEventHandler) -> None: ...
     def set_fatal_error_handler(self, handler: FatalErrorHandler) -> None: ...
     async def start(self) -> None: ...
     async def stop(self) -> None: ...
-    async def reply(self, frame: Mapping[str, Any], text: str) -> None: ...
+    async def reply_text(self, frame: Mapping[str, Any], text: str) -> None: ...
+    async def reply_template_card(self, frame: Mapping[str, Any], template_card: dict[str, Any]) -> None: ...
+    async def update_template_card(
+        self, frame: Mapping[str, Any], template_card: dict[str, Any], userids: list[str] | None = None
+    ) -> None: ...
 
 
 class WeComSdkAdapter:
@@ -33,10 +39,12 @@ class WeComSdkAdapter:
             ) from exc
         self._generate_req_id = generate_req_id
         self._client = WSClient(WSClientOptions(bot_id=bot_id, secret=secret, logger=_SdkLogger()))
-        self._handler: FrameHandler | None = None
+        self._text_handler: FrameHandler | None = None
+        self._card_handler: TemplateCardEventHandler | None = None
         self._fatal_error_handler: FatalErrorHandler | None = None
         self._close_timeout_seconds = max(0.0, float(close_timeout_seconds))
         self._client.on("message.text", self._on_text)
+        self._client.on("event.template_card_event", self._on_template_card_event)
         self._client.on("connected", lambda: logging.getLogger(__name__).info("WeCom bot connected"))
         self._client.on("authenticated", lambda: logging.getLogger(__name__).info("WeCom bot authenticated"))
         self._client.on("disconnected", lambda reason: logging.getLogger(__name__).warning("WeCom bot disconnected: %s", reason))
@@ -44,7 +52,10 @@ class WeComSdkAdapter:
         self._client.on("error", self._on_sdk_error)
 
     def set_text_handler(self, handler: FrameHandler) -> None:
-        self._handler = handler
+        self._text_handler = handler
+
+    def set_template_card_event_handler(self, handler: TemplateCardEventHandler) -> None:
+        self._card_handler = handler
 
     def set_fatal_error_handler(self, handler: FatalErrorHandler) -> None:
         self._fatal_error_handler = handler
@@ -59,8 +70,12 @@ class WeComSdkAdapter:
         logger.warning("WeCom bot recoverable SDK error: %s", error)
 
     async def _on_text(self, frame: Mapping[str, Any]) -> None:
-        if self._handler is not None:
-            await self._handler(frame)
+        if self._text_handler is not None:
+            await self._text_handler(frame)
+
+    async def _on_template_card_event(self, frame: Mapping[str, Any]) -> None:
+        if self._card_handler is not None:
+            await self._card_handler(frame)
 
     async def start(self) -> None:
         await self._client.connect()
@@ -80,9 +95,23 @@ class WeComSdkAdapter:
         except TimeoutError:
             logging.getLogger(__name__).warning("Timed out waiting for WeCom WebSocket to close")
 
-    async def reply(self, frame: Mapping[str, Any], text: str) -> None:
+    async def reply_text(self, frame: Mapping[str, Any], text: str) -> None:
         stream_id = self._generate_req_id("stream")
         await self._client.reply_stream(frame, stream_id, text, True)
+
+    async def reply_template_card(self, frame: Mapping[str, Any], template_card: dict[str, Any]) -> None:
+        await self._client.reply_template_card(frame, template_card)
+
+    async def update_template_card(
+        self, frame: Mapping[str, Any], template_card: dict[str, Any], userids: list[str] | None = None
+    ) -> None:
+        kwargs: dict[str, Any] = {"frame": frame, "card": template_card}
+        if userids is not None:
+            kwargs["userids"] = userids
+        await self._client.update_template_card(**kwargs)
+
+    # Compatibility alias
+    reply = reply_text
 
 
 def is_fatal_sdk_error(error: BaseException) -> bool:

@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 import logging
@@ -8,8 +8,9 @@ from typing import Any
 
 from ci_owner_agent.services.pending_feedback_store import WeComEventStore
 from ci_owner_agent.services.wecom_bot_adapter import WeComBotAdapterProtocol, fatal_sdk_error_reason
+from ci_owner_agent.services.wecom_feedback_ai_parser import WeComFeedbackAiParserProtocol
 from ci_owner_agent.services.wecom_feedback_service import WeComFeedbackService
-from ci_owner_agent.services.wecom_message_normalizer import normalize_wecom_text_frame
+from ci_owner_agent.services.wecom_message_normalizer import normalize_wecom_text_frame, normalize_wecom_template_card_event
 
 
 class WeComBotWorker:
@@ -21,6 +22,7 @@ class WeComBotWorker:
         confirm_ttl_seconds: int = 300,
         feedback_code_ttl_days: int = 30,
         event_ttl_days: int = 7,
+        ai_parser: WeComFeedbackAiParserProtocol | None = None,
     ) -> None:
         self.adapter = adapter
         self.events = WeComEventStore(history_store, event_ttl_days)
@@ -28,10 +30,12 @@ class WeComBotWorker:
             history_store,
             context_ttl_days=feedback_code_ttl_days,
             confirm_ttl_seconds=confirm_ttl_seconds,
+            ai_parser=ai_parser,
         )
         self._stop_event: asyncio.Event | None = None
         self._fatal_error: BaseException | None = None
-        adapter.set_text_handler(self.handle_frame)
+        adapter.set_text_handler(self.handle_text_frame)
+        adapter.set_template_card_event_handler(self.handle_template_card_event_frame)
         adapter.set_fatal_error_handler(self._handle_fatal_error)
 
     def run(self) -> None:
@@ -86,7 +90,7 @@ class WeComBotWorker:
         if self._stop_event is not None:
             self._stop_event.set()
 
-    async def handle_frame(self, frame: Mapping[str, Any]) -> None:
+    async def handle_text_frame(self, frame: Mapping[str, Any]) -> None:
         claim_token: str | None = None
         logger = logging.getLogger(__name__)
 
@@ -99,37 +103,68 @@ class WeComBotWorker:
             )
 
             if claim_status == "completed":
+                reply_type = (event or {}).get("responseType") or "text"
+                if reply_type == "template_card":
+                    payload = (event or {}).get("responsePayload") or {}
+                    await self.adapter.reply_template_card(frame, payload.get("template_card", {}))
+                    return
                 reply = str(
                     (event or {}).get("replyText")
                     or "消息已处理完成。"
                 )
+                await self.adapter.reply_text(frame, reply)
+                return
             elif claim_status == "processing":
                 reply = "相同消息正在处理中，请稍后。"
+                await self.adapter.reply_text(frame, reply)
+                return
             elif claim_status != "claimed":
                 reply = "消息暂时无法处理，请稍后重试。"
+                await self.adapter.reply_text(frame, reply)
+                return
             else:
                 claim_token = event["claimToken"]
-                reply = await asyncio.to_thread(
-                    self.service.handle,
+                bot_reply = await asyncio.to_thread(
+                    self.service.handle_text,
                     message,
                 )
 
-                try:
-                    completed = await asyncio.to_thread(
-                        self.events.mark_completed,
-                        message.event_key,
-                        claim_token,
-                        reply,
-                    )
-                    if not completed:
-                        logger.warning(
-                            "Lost WeCom event claim before completion: %s",
+                if bot_reply.reply_type == "template_card":
+                    try:
+                        completed = await asyncio.to_thread(
+                            self.events.mark_completed_with_response,
                             message.event_key,
+                            claim_token,
+                            "template_card",
+                            {"template_card": bot_reply.template_card},
                         )
-                except Exception:
-                    logger.exception(
-                        "Failed to mark WeCom message event completed"
-                    )
+                        if not completed:
+                            logger.warning(
+                                "Lost WeCom event claim before completion: %s",
+                                message.event_key,
+                            )
+                    except Exception:
+                        logger.exception("Failed to mark WeCom message event completed")
+                    await self.adapter.reply_template_card(frame, bot_reply.template_card or {})
+                    return
+                else:
+                    reply = bot_reply.text or ""
+                    try:
+                        completed = await asyncio.to_thread(
+                            self.events.mark_completed,
+                            message.event_key,
+                            claim_token,
+                            reply,
+                        )
+                        if not completed:
+                            logger.warning(
+                                "Lost WeCom event claim before completion: %s",
+                                message.event_key,
+                            )
+                    except Exception:
+                        logger.exception("Failed to mark WeCom message event completed")
+                    await self.adapter.reply_text(frame, reply)
+                    return
 
         except Exception as exc:
             logger.exception("Failed to process WeCom text message")
@@ -143,13 +178,73 @@ class WeComBotWorker:
                         str(exc),
                     )
                 except Exception:
-                    logger.exception(
-                        "Failed to mark WeCom message event failed"
-                    )
+                    logger.exception("Failed to mark WeCom message event failed")
 
             reply = f"消息处理失败：{str(exc)[:200]}"
 
         try:
-            await self.adapter.reply(frame, reply)
+            await self.adapter.reply_text(frame, reply)
         except Exception:
             logger.exception("Failed to reply to WeCom message")
+
+    async def handle_template_card_event_frame(self, frame: Mapping[str, Any]) -> None:
+        claim_token: str | None = None
+        logger = logging.getLogger(__name__)
+
+        try:
+            event = normalize_wecom_template_card_event(frame)
+
+            claim_status, ev = await asyncio.to_thread(
+                self.events.claim,
+                event,
+            )
+
+            if claim_status == "completed":
+                payload = (ev or {}).get("responsePayload") or {}
+                await self.adapter.update_template_card(frame, payload.get("template_card", {}))
+                return
+            elif claim_status == "processing":
+                return
+            elif claim_status != "claimed":
+                return
+            else:
+                claim_token = ev["claimToken"]
+                bot_reply = await asyncio.to_thread(
+                    self.service.handle_template_card_event,
+                    event,
+                )
+
+                card = (bot_reply.template_card or {})
+                userids = card.pop("userids", None) if card else None
+
+                try:
+                    completed = await asyncio.to_thread(
+                        self.events.mark_completed_with_response,
+                        event.event_key,
+                        claim_token,
+                        "update_template_card",
+                        {"template_card": card},
+                    )
+                    if not completed:
+                        logger.warning(
+                            "Lost WeCom template card event claim before completion: %s",
+                            event.event_key,
+                        )
+                except Exception:
+                    logger.exception("Failed to mark template card event completed")
+
+                await self.adapter.update_template_card(frame, card, userids)
+                return
+
+        except Exception as exc:
+            logger.exception("Failed to process WeCom template card event")
+            if "event" in locals() and claim_token:
+                try:
+                    await asyncio.to_thread(
+                        self.events.mark_failed,
+                        event.event_key,
+                        claim_token,
+                        str(exc),
+                    )
+                except Exception:
+                    logger.exception("Failed to mark template card event failed")

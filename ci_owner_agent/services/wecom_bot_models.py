@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -30,6 +30,17 @@ class WeComInboundMessage(_StrictModel):
     quoted_content: str | None = None
 
 
+class WeComTemplateCardEvent(_StrictModel):
+    event_key: str
+    request_id: str | None = None
+    message_id: str | None = None
+    sender_userid: str
+    chat_id: str | None = None
+    chat_type: str | None = None
+    task_id: str
+    button_key: Literal["confirm", "cancel"]
+
+
 class ParsedFeedbackIntent(_StrictModel):
     intent_type: Literal[
         "create_feedback", "confirm_pending", "cancel_pending", "list_feedback", "help", "unknown"
@@ -43,3 +54,30 @@ class ParsedFeedbackIntent(_StrictModel):
     note: str | None = None
     error: str | None = None
 
+
+class WeComFeedbackAiDecision(_StrictModel):
+    model_config = ConfigDict(extra="forbid")
+
+    intent_type: Literal[
+        "create_feedback",
+        "list_feedback",
+        "help",
+        "unknown",
+    ]
+    action: Literal[
+        "confirm_owner",
+        "correct_owner",
+        "mark_flaky",
+        "mark_no_owner",
+    ] | None = None
+    feedback_code: str | None = None
+    item_index: int | None = None
+    target_display_name: str | None = None
+    note: str | None = None
+    error: str | None = None
+
+
+class WeComBotReply(_StrictModel):
+    reply_type: Literal["text", "template_card"]
+    text: str | None = None
+    template_card: dict[str, Any] | None = None

@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import datetime as dt
 import hashlib
@@ -118,6 +118,7 @@ class MongoHistoryStore:
         )
         _create_index(self.feedback_contexts, [("expiresAt", 1)], expireAfterSeconds=0)
         self.wecom_pending_feedback.create_index([("confirmationCode", 1)], unique=True)
+        self.wecom_pending_feedback.create_index([("cardTaskId", 1)], unique=True)
         self.wecom_pending_feedback.create_index([("eventKey", 1)], unique=True)
         _create_index(self.wecom_pending_feedback, [("status", 1), ("applyLeaseUntil", 1)])
         _create_index(self.wecom_pending_feedback, [("expiresAt", 1)], expireAfterSeconds=0)

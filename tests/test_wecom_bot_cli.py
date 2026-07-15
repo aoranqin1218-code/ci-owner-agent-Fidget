@@ -1,64 +1,81 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
+import json
+import os
+import subprocess
 import sys
+from pathlib import Path
 
-from ci_owner_agent.main import main
+import pytest
+
+from ci_owner_agent.services.wecom_bot_models import WeComBotReply
 from tests.test_history_store import make_store
 
 
-def test_serve_wecom_bot_requires_mongodb(monkeypatch, capsys):
-    monkeypatch.setenv("CI_AGENT_HISTORY_ENABLED", "false")
-    assert main(["serve-wecom-bot", "--bot-id", "placeholder", "--secret", "placeholder"]) == 2
-    assert "MongoDB history storage must be enabled" in capsys.readouterr().err
+def _isolated_subprocess_env(extra_env: dict[str, str] | None = None) -> dict[str, str]:
+    """Minimal env for subprocess tests, isolating from user .env and real config."""
+    env = {
+        "CI_AGENT_MODEL_PROVIDER": "fake",
+        "CI_AGENT_WECOM_BOT_ENABLED": "false",
+        "CI_AGENT_WECOM_BOT_LLM_ENABLED": "false",
+        "CI_AGENT_WECOM_BOT_LLM_MAX_INPUT_CHARS": "2000",
+    }
+    if extra_env:
+        env.update(extra_env)
+    return env
 
 
-def test_serve_wecom_bot_requires_credentials(monkeypatch, capsys):
-    monkeypatch.setenv("CI_AGENT_HISTORY_ENABLED", "true")
-    monkeypatch.setenv("CI_AGENT_WECOM_BOT_ENABLED", "true")
-    monkeypatch.delenv("CI_AGENT_WECOM_BOT_ID", raising=False)
-    monkeypatch.delenv("CI_AGENT_WECOM_BOT_SECRET", raising=False)
-    assert main(["serve-wecom-bot"]) == 2
-    assert "Bot ID is required" in capsys.readouterr().err
+def test_serve_wecom_bot_missing_mongo():
+    """serve-wecom-bot should fail when history is disabled."""
+    result = subprocess.run(
+        [sys.executable, "-m", "ci_owner_agent", "serve-wecom-bot", "--bot-id", "test", "--secret", "test"],
+        capture_output=True,
+        text=True,
+        timeout=15,
+        env={**_isolated_subprocess_env(), "CI_AGENT_HISTORY_ENABLED": "false"},
+    )
+    assert result.returncode == 2
+    assert "MongoDB history storage must be enabled" in result.stderr
 
 
-def test_serve_wecom_bot_missing_optional_sdk_is_clear(monkeypatch, capsys):
-    monkeypatch.setenv("CI_AGENT_HISTORY_ENABLED", "true")
-    monkeypatch.setenv("CI_AGENT_WECOM_BOT_ENABLED", "true")
-    monkeypatch.setattr("ci_owner_agent.main.get_history_store", lambda settings: make_store())
-    monkeypatch.setitem(sys.modules, "aibot", None)
-    result = main(["serve-wecom-bot", "--bot-id", "placeholder", "--secret", "placeholder"])
-    assert result == 2
-    assert "wecom-aibot-python-sdk is required" in capsys.readouterr().err
+def test_serve_wecom_bot_disabled():
+    result = subprocess.run(
+        [sys.executable, "-m", "ci_owner_agent", "serve-wecom-bot", "--bot-id", "test", "--secret", "test"],
+        capture_output=True,
+        text=True,
+        timeout=15,
+        env={**_isolated_subprocess_env(), "CI_AGENT_HISTORY_ENABLED": "true"},
+    )
+    assert result.returncode == 2
+    assert "must be enabled" in result.stderr
 
 
-def test_cli_returns_nonzero_after_fatal_bot_error(monkeypatch, capsys):
-    monkeypatch.setenv("CI_AGENT_HISTORY_ENABLED", "true")
-    monkeypatch.setenv("CI_AGENT_WECOM_BOT_ENABLED", "true")
-    monkeypatch.setattr("ci_owner_agent.main.get_history_store", lambda settings: make_store())
-
-    class FakeSdkAdapter:
-        def __init__(self, bot_id, secret):
-            pass
-
-    class FatalWorker:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def run(self):
-            raise RuntimeError("authentication failed")
-
-    monkeypatch.setattr("ci_owner_agent.services.wecom_bot_adapter.WeComSdkAdapter", FakeSdkAdapter)
-    monkeypatch.setattr("ci_owner_agent.services.wecom_bot_worker.WeComBotWorker", FatalWorker)
-
-    result = main(["serve-wecom-bot", "--bot-id", "placeholder", "--secret", "placeholder"])
-
-    assert result == 2
-    assert "fatal error" in capsys.readouterr().err
+def test_serve_wecom_bot_missing_bot_id():
+    result = subprocess.run(
+        [sys.executable, "-m", "ci_owner_agent", "serve-wecom-bot", "--secret", "test"],
+        capture_output=True,
+        text=True,
+        timeout=15,
+        env={
+            **_isolated_subprocess_env(),
+            "CI_AGENT_HISTORY_ENABLED": "true",
+            "CI_AGENT_WECOM_BOT_ENABLED": "true",
+            "CI_AGENT_WECOM_BOT_ID": "",
+        },
+    )
+    assert result.returncode == 2
+    assert "Bot ID is required" in result.stderr
 
 
-def test_serve_wecom_bot_requires_explicit_enablement(monkeypatch, capsys):
-    monkeypatch.setenv("CI_AGENT_HISTORY_ENABLED", "true")
-    monkeypatch.setenv("CI_AGENT_WECOM_BOT_ENABLED", "false")
+def test_wecom_bot_reply_model():
+    """Verify WeComBotReply model."""
+    text_reply = WeComBotReply(reply_type="text", text="hello")
+    assert text_reply.reply_type == "text"
+    assert text_reply.text == "hello"
 
-    assert main(["serve-wecom-bot", "--bot-id", "placeholder", "--secret", "placeholder"]) == 2
-    assert "CI_AGENT_WECOM_BOT_ENABLED must be enabled" in capsys.readouterr().err
+    card_reply = WeComBotReply(
+        reply_type="template_card",
+        template_card={"card_type": "button_interaction", "task_id": "test"},
+    )
+    assert card_reply.reply_type == "template_card"
+    assert card_reply.template_card["card_type"] == "button_interaction"

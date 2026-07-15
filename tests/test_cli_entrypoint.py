@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import os
@@ -22,6 +22,8 @@ def _isolated_subprocess_env() -> dict[str, str]:
             "CI_AGENT_WECOM_NOTIFY_ENABLED": "false",
             "CI_AGENT_WECOM_WEBHOOK_URL": "",
             "CI_AGENT_WECOM_BOT_ENABLED": "false",
+    "CI_AGENT_WECOM_BOT_LLM_ENABLED": "false",
+    "CI_AGENT_WECOM_BOT_LLM_MAX_INPUT_CHARS": "2000",
             "CI_AGENT_WECOM_BOT_ID": "",
             "CI_AGENT_WECOM_BOT_SECRET": "",
             "CI_AGENT_METRICS_ENABLED": "false",

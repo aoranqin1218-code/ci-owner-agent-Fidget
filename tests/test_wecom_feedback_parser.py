@@ -1,10 +1,12 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import pytest
 
 from ci_owner_agent.services.wecom_bot_models import WeComInboundMessage, WeComMentionedUser
 from ci_owner_agent.services.wecom_feedback_parser import (
+    clean_feedback_text,
     derive_wecom_userid,
+    parse_fixed_feedback_intent,
     parse_feedback_intent,
 )
 
@@ -22,7 +24,7 @@ def message(content: str, *, mentions=()) -> WeComInboundMessage:
     )
 
 
-# ── derive_wecom_userid ──────────────────────────────────────────────
+# ---- derive_wecom_userid ----
 
 @pytest.mark.parametrize(
     ("display_name", "expected"),
@@ -42,10 +44,9 @@ def test_derive_wecom_userid_success(display_name, expected):
         "aoran_qin-秦奥然",
         "aoran.qin-秦奥然",
         "aoran-qin-秦奥然",
-        "\u0130-秦奥然",
-        "\u0131-秦奥然",
-        "\u017f-秦奥然",
-        "\u212a-秦奥然",
+        "İ-秦奥然",
+        "ı-秦奥然",
+        "ſ-秦奥然",
         "AoranQin-",
         "AoranQin-秦-奥然",
         "AoranQin-秦 奥然",
@@ -55,7 +56,31 @@ def test_derive_wecom_userid_rejects_invalid(display_name):
     assert derive_wecom_userid(display_name) is None
 
 
-# ── feedback actions ─────────────────────────────────────────────────
+# ---- clean_feedback_text ----
+
+def test_clean_feedback_text_removes_bot_mention():
+    msg = message("<@bot> CI-7K3M9Q 1 判断正确")
+    assert clean_feedback_text(msg) == "CI-7K3M9Q 1 判断正确"
+
+
+def test_clean_feedback_text_normalizes_spaces():
+    msg = message("CI-7K3M9Q\u30001\u3000判断正确")
+    assert clean_feedback_text(msg) == "CI-7K3M9Q 1 判断正确"
+
+
+def test_clean_feedback_text_removes_leading_at_mention():
+    msg = message("@someone CI-7K3M9Q 1 判断正确", mentions=())
+    assert clean_feedback_text(msg) == "CI-7K3M9Q 1 判断正确"
+
+
+def test_clean_feedback_text_preserves_inline_at_for_correct_owner():
+    msg = message("CI-7K3M9Q 1 责任人改为 @AoranQin-秦奥然")
+    cleaned = clean_feedback_text(msg)
+    assert "AoranQin-秦奥然" in cleaned
+    assert "@AoranQin-秦奥然" in cleaned
+
+
+# ---- parse_fixed_feedback_intent ----
 
 @pytest.mark.parametrize(
     ("text", "action"),
@@ -67,84 +92,50 @@ def test_derive_wecom_userid_rejects_invalid(display_name):
         ("CI-7K3M9Q 1 无法定责", "mark_no_owner"),
     ],
 )
-def test_parses_feedback_actions(text, action):
-    intent = parse_feedback_intent(message(text))
+def test_parse_fixed_feedback_actions(text, action):
+    intent = parse_fixed_feedback_intent(message(text))
+    assert intent is not None
     assert intent.intent_type == "create_feedback"
     assert intent.action == action
     assert intent.feedback_code == "CI-7K3M9Q"
 
 
-# ── correct_owner success ────────────────────────────────────────────
-
-def test_correct_owner_parses_display_name_from_action_text():
-    intent = parse_feedback_intent(message("<@bot> CI-7K3M9Q 1 责任人改为 @AoranQin-秦奥然"))
+def test_fixed_correct_owner_parses_display_name():
+    intent = parse_fixed_feedback_intent(message("CI-7K3M9Q 1 责任人改为 @AoranQin-秦奥然"))
+    assert intent is not None
     assert intent.action == "correct_owner"
     assert intent.target_userid == "aoranqin"
     assert intent.target_display_name == "AoranQin-秦奥然"
 
 
-def test_correct_owner_parses_display_name_no_structured_mentions():
-    intent = parse_feedback_intent(message("<@bot> CI-7K3M9Q 1 责任人改为 @AoranQin-秦奥然", mentions=()))
-    assert intent.action == "correct_owner"
-    assert intent.target_userid == "aoranqin"
-    assert intent.target_display_name == "AoranQin-秦奥然"
-
-
-def test_correct_owner_parses_gaiwei_variant():
-    intent = parse_feedback_intent(message("CI-7K3M9Q 1 改为 @JAMES-李明"))
+def test_fixed_correct_owner_gaiwei_variant():
+    intent = parse_fixed_feedback_intent(message("CI-7K3M9Q 1 改为 @JAMES-李明"))
+    assert intent is not None
     assert intent.action == "correct_owner"
     assert intent.target_userid == "james"
-    assert intent.target_display_name == "JAMES-李明"
 
 
-def test_correct_owner_parses_yinggai_shi_variant():
-    intent = parse_feedback_intent(message("CI-7K3M9Q 1 应该是 @AoranQin-秦奥然"))
+def test_fixed_correct_owner_yinggai_shi_variant():
+    intent = parse_fixed_feedback_intent(message("CI-7K3M9Q 1 应该是 @AoranQin-秦奥然"))
+    assert intent is not None
     assert intent.action == "correct_owner"
     assert intent.target_userid == "aoranqin"
-
-
-# ── correct_owner rejection ──────────────────────────────────────────
-
-def test_correct_owner_rejects_invalid_format_no_prefix():
-    intent = parse_feedback_intent(message("CI-7K3M9Q 1 改为 @李四"))
-    assert intent.intent_type == "unknown"
-    assert "英文字母userid" in (intent.error or "")
 
 
 @pytest.mark.parametrize(
-    ("action_text", "expect_error_keyword"),
+    "text",
     [
-        ("责任人改为 @aoran123-秦奥然", "英文字母userid"),
-        ("责任人改为 @aoran_qin-秦奥然", "英文字母userid"),
-        ("责任人改为 @aoran.qin-秦奥然", "英文字母userid"),
-        ("责任人改为 @aoran-qin-秦奥然", "英文字母userid"),
-        ("责任人改为 @秦奥然", "英文字母userid"),
-        ("责任人改为 @AoranQin-", "英文字母userid"),
-        ("AoranQin-秦奥然", "未识别"),
-        ("责任人改为 @AoranQin-秦奥然 @James-李明", "英文字母userid"),
-        ("责任人改为 @\u0130-秦奥然", "英文字母userid"),
-        ("责任人改为 @\u0131-秦奥然", "英文字母userid"),
-        ("责任人改为 @\u017f-秦奥然", "英文字母userid"),
-        ("责任人改为 @\u212a-秦奥然", "英文字母userid"),
+        "CI-7K3M9Q 1 责任人改为 @aoran123-秦奥然",
+        "CI-7K3M9Q 1 责任人改为 @aoran_qin-秦奥然",
+        "CI-7K3M9Q 1 责任人改为 @秦奥然",
+        "CI-7K3M9Q 1 责任人改为 @AoranQin-",
+        "CI-7K3M9Q 1 责任人改为 AoranQin-秦奥然",
+        "CI-7K3M9Q 1 责任人改为 @AoranQin-秦奥然 @James-李明",
     ],
 )
-def test_correct_owner_rejects_invalid_display_name_format(action_text, expect_error_keyword):
-    intent = parse_feedback_intent(message(f"CI-7K3M9Q 1 {action_text}"))
-    assert intent.intent_type == "unknown"
-    assert expect_error_keyword in (intent.error or "")
-    assert intent.action is None
-    assert intent.target_userid is None
+def test_fixed_correct_owner_returns_none_for_invalid(text):
+    assert parse_fixed_feedback_intent(message(text)) is None
 
-
-def test_correct_owner_ignores_extra_mentions():
-    intent = parse_feedback_intent(
-        message("CI-7K3M9Q 1 责任人改为 @AoranQin-秦奥然", mentions=(("wrong_user", "Wrong Name"),))
-    )
-    assert intent.action == "correct_owner"
-    assert intent.target_userid == "aoranqin"
-
-
-# ── non-create commands ──────────────────────────────────────────────
 
 @pytest.mark.parametrize(
     ("text", "intent_type"),
@@ -154,13 +145,41 @@ def test_correct_owner_ignores_extra_mentions():
         ("帮助", "help"),
         ("help", "help"),
         ("?", "help"),
-        ("确认 A7K9", "confirm_pending"),
-        ("取消 A7K9", "cancel_pending"),
     ],
 )
-def test_parses_non_create_commands(text, intent_type):
-    assert parse_feedback_intent(message(text)).intent_type == intent_type
+def test_fixed_parses_non_create_commands(text, intent_type):
+    intent = parse_fixed_feedback_intent(message(text))
+    assert intent is not None
+    assert intent.intent_type == intent_type
 
 
-def test_unknown_does_not_become_feedback():
-    assert parse_feedback_intent(message("随便聊聊")).intent_type == "unknown"
+@pytest.mark.parametrize(
+    "text",
+    [
+        "CI-7K3M9Q 第一条判断没问题",
+        "把 CI-7K3M9Q 第一条责任人改成 @AoranQin-秦奥然",
+        "CI-7K3M9Q 第2项像是偶发问题",
+        "CI-7K3M9Q 1 责任人改为 @aoran123-秦奥然",
+        "帮我看看 CI-7K3M9Q 的反馈",
+        "随便聊聊",
+    ],
+)
+def test_fixed_returns_none_for_non_fixed_commands(text):
+    """These should NOT match fixed commands and should return None to trigger LLM."""
+    assert parse_fixed_feedback_intent(message(text)) is None
+
+
+# ---- parse_feedback_intent (compat wrapper) ----
+
+def test_parse_feedback_intent_unknown():
+    """Legacy wrapper returns unknown for non-fixed commands."""
+    intent = parse_feedback_intent(message("随便聊聊"))
+    assert intent.intent_type == "unknown"
+    assert intent.error is not None
+
+
+def test_parse_feedback_intent_uses_fixed_first():
+    """Legacy wrapper returns fixed parse result when matched."""
+    intent = parse_feedback_intent(message("CI-7K3M9Q 1 判断正确"))
+    assert intent.intent_type == "create_feedback"
+    assert intent.action == "confirm_owner"

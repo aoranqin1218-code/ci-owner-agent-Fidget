@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import hashlib
 import json
@@ -6,7 +6,7 @@ import re
 from collections.abc import Mapping
 from typing import Any
 
-from ci_owner_agent.services.wecom_bot_models import WeComInboundMessage, WeComMentionedUser
+from ci_owner_agent.services.wecom_bot_models import WeComInboundMessage, WeComMentionedUser, WeComTemplateCardEvent
 
 _MENTION_RE = re.compile(r"<@([^>]+)>")
 
@@ -29,8 +29,6 @@ def normalize_wecom_text_frame(
         or ""
     ).strip()
 
-
-
     userid = str(
         sender.get("userid")
         or sender.get("user_id")
@@ -47,8 +45,6 @@ def normalize_wecom_text_frame(
     )
 
     mentioned = _mentioned_users(text, body, content)
-
-
 
     request_id = _string(
         headers.get("req_id")
@@ -105,6 +101,68 @@ def normalize_wecom_text_frame(
     )
 
 
+def normalize_wecom_template_card_event(
+    frame: Mapping[str, Any],
+) -> WeComTemplateCardEvent:
+    """Normalize a template_card_event callback from the SDK."""
+    body = _mapping(frame.get("body"))
+    headers = _mapping(frame.get("headers"))
+    event = _mapping(body.get("event"))
+    sender = _mapping(body.get("from") or body.get("sender"))
+
+    event_type = _string(event.get("eventtype"))
+    if event_type is not None and event_type.lower() != "template_card_event":
+        raise ValueError(f"unexpected event type: {event_type}")
+
+    userid = str(
+        sender.get("userid")
+        or sender.get("user_id")
+        or body.get("userid")
+        or ""
+    ).strip()
+
+    if not userid:
+        raise ValueError("sender userid is missing")
+
+    message_id = _string(
+        body.get("msgid")
+        or body.get("message_id")
+        or body.get("msg_id")
+    )
+    request_id = _string(
+        headers.get("req_id")
+        or headers.get("request_id")
+    )
+
+    event_key = f"wecom-card:{message_id or request_id or 'unknown'}"
+
+    return WeComTemplateCardEvent(
+        event_key=event_key,
+        request_id=request_id,
+        message_id=message_id,
+        sender_userid=userid,
+        chat_id=_string(
+            body.get("chatid")
+            or body.get("chat_id")
+        ),
+        chat_type=_string(
+            body.get("chattype")
+            or body.get("chat_type")
+        ),
+        task_id=str(event.get("task_id") or "").strip(),
+        button_key=_parse_button_key(event.get("event_key")),
+    )
+
+
+def _parse_button_key(raw: Any) -> str:
+    value = str(raw or "").strip().lower()
+    if value == "confirm":
+        return "confirm"
+    if value == "cancel":
+        return "cancel"
+    return "unknown"
+
+
 def build_event_key(
     *, message_id: str | None, request_id: str | None, sender_userid: str, chat_id: str | None, content: str
 ) -> str:
@@ -147,4 +205,3 @@ def _mapping(value: Any) -> Mapping[str, Any]:
 def _string(value: Any) -> str | None:
     result = str(value).strip() if value is not None else ""
     return result or None
-
