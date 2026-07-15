@@ -30,6 +30,17 @@ def _isolated_subprocess_env() -> dict[str, str]:
             "JENKINS_URL": "",
             "JENKINS_USER": "",
             "JENKINS_TOKEN": "",
+            "LANGSMITH_TRACING": "false",
+            "LANGSMITH_API_KEY": "",
+            "LANGSMITH_PROJECT": "",
+            "LANGSMITH_ENDPOINT": "",
+            "CI_AGENT_WECOM_USER_MAPPING_FILE": "",
+            "CI_AGENT_TEST_MAINTAINER_MAPPING_FILE": "",
+            "CI_AGENT_FEEDBACK_BASE_URL": "",
+            "CI_AGENT_FEEDBACK_SHARED_TOKEN": "",
+            "CI_AGENT_NOTIFICATION_DEDUP_ENABLED": "false",
+            "CI_AGENT_WECOM_FALLBACK_USERIDS": "",
+            "CI_AGENT_WECOM_MENTION_MODE": "userid",
         }
     )
     return env
@@ -108,6 +119,11 @@ def test_isolated_subprocess_env_blocks_dangerous_config(monkeypatch):
     monkeypatch.setenv("CI_AGENT_WECOM_WEBHOOK_URL", "https://example.invalid/webhook")
     monkeypatch.setenv("CI_AGENT_MODEL_PROVIDER", "openai-compatible")
     monkeypatch.setenv("CI_AGENT_API_KEY", "secret")
+    monkeypatch.setenv("LANGSMITH_TRACING", "true")
+    monkeypatch.setenv("LANGSMITH_API_KEY", "real-secret")
+    monkeypatch.setenv("CI_AGENT_WECOM_USER_MAPPING_FILE", "C:/real/users.csv")
+    monkeypatch.setenv("CI_AGENT_TEST_MAINTAINER_MAPPING_FILE", "C:/real/maintainers.yml")
+    monkeypatch.setenv("CI_AGENT_FEEDBACK_SHARED_TOKEN", "real-token")
 
     env = _isolated_subprocess_env()
 
@@ -119,6 +135,14 @@ def test_isolated_subprocess_env_blocks_dangerous_config(monkeypatch):
     assert env["CI_AGENT_API_KEY"] == ""
     assert env["CI_AGENT_HISTORY_MONGO_URI"] == ""
     assert env["CI_AGENT_WECOM_WEBHOOK_URL"] == ""
+    assert env["LANGSMITH_TRACING"] == "false"
+    assert env["LANGSMITH_API_KEY"] == ""
+    assert env["LANGSMITH_PROJECT"] == ""
+    assert env["LANGSMITH_ENDPOINT"] == ""
+    assert env["CI_AGENT_WECOM_USER_MAPPING_FILE"] == ""
+    assert env["CI_AGENT_TEST_MAINTAINER_MAPPING_FILE"] == ""
+    assert env["CI_AGENT_FEEDBACK_BASE_URL"] == ""
+    assert env["CI_AGENT_FEEDBACK_SHARED_TOKEN"] == ""
 
 
 def test_module_notify_notice_missing_file_returns_process_code_2(tmp_path):

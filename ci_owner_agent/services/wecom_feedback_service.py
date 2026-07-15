@@ -9,7 +9,6 @@ from ci_owner_agent.services.failure_identity import build_responsibility_signat
 from ci_owner_agent.services.pending_feedback_store import PendingFeedbackStore
 from ci_owner_agent.services.wecom_bot_models import ParsedFeedbackIntent, WeComInboundMessage
 from ci_owner_agent.services.wecom_feedback_parser import parse_feedback_intent
-from ci_owner_agent.services.wecom_user_directory import WeComUserDirectory
 
 HELP_TEXT = """群内反馈命令：
 CI-XXXXXX 1 判断正确
@@ -29,7 +28,6 @@ class WeComFeedbackService:
         self.contexts = FeedbackContextStore(history_store, context_ttl_days)
         self.pending = PendingFeedbackStore(history_store, confirm_ttl_seconds)
         self.feedback = FeedbackStore(history_store)
-        self.users = WeComUserDirectory(history_store)
         self.confirm_ttl_seconds = confirm_ttl_seconds
 
     def handle(self, message: WeComInboundMessage) -> str:
@@ -191,11 +189,6 @@ class WeComFeedbackService:
             intent = ParsedFeedbackIntent.model_validate(pending["intent"])
             owner_name = intent.target_display_name
             owner_email = None
-            if intent.target_userid:
-                matches = self.users.search_users(intent.target_userid, limit=1)
-                if matches and matches[0].get("wecomUserId") == intent.target_userid:
-                    owner_name = matches[0].get("displayName") or owner_name
-                    owner_email = matches[0].get("preferredEmail")
             self.feedback.apply_feedback(
                 repo=_context["repo"],
                 job=_context["job"],
