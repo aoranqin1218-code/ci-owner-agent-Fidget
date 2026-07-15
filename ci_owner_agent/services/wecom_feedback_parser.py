@@ -12,15 +12,23 @@ _CREATE = re.compile(rf"^({_CODE})\s+(\d+)\s+(.+)$", re.I)
 
 _CORRECT_OWNER_RE = re.compile(
     r"^(责任人改为|改为|应该是)\s+@([A-Za-z]+)-([^\s-]+)$",
-    re.I,
+    re.ASCII,
+)
+
+_DISPLAY_NAME_RE = re.compile(
+    r"^([A-Za-z]+)-[^\s-]+$",
+    re.ASCII,
 )
 
 
 def derive_wecom_userid(display_name: str) -> str | None:
-    """Derive WeCom userid from display name format: EnglishPrefix-ChineseName."""
+    """Derive WeCom userid from display name format: EnglishPrefix-ChineseName.
+
+    Returns lowercase ASCII prefix as userid, or None if format is invalid.
+    """
     if not display_name:
         return None
-    match = re.fullmatch(r"([A-Za-z]+)-(.+)", display_name)
+    match = _DISPLAY_NAME_RE.fullmatch(display_name.strip())
     if match is None:
         return None
     return match.group(1).lower()
@@ -33,9 +41,11 @@ def parse_correct_owner_target(action_text: str) -> tuple[str, str] | None:
         return None
     prefix = match.group(2)
     name = match.group(3)
-    target_userid = prefix.lower()
-    target_display_name = f"{prefix}-{name}"
-    return target_userid, target_display_name
+    display_name = f"{prefix}-{name}"
+    userid = derive_wecom_userid(display_name)
+    if userid is None:
+        return None
+    return userid, display_name
 
 
 def parse_feedback_intent(message: WeComInboundMessage) -> ParsedFeedbackIntent:
@@ -98,6 +108,6 @@ def _action(text: str) -> str | None:
         return "mark_flaky"
     if lowered in {"无法定责", "无责任人", "无法确定责任人"}:
         return "mark_no_owner"
-    if re.match(r"^(责任人改为|改为|应该是)\s+@", text, re.I):
+    if re.match(r"^(责任人改为|改为|应该是)\s+@", text, re.ASCII):
         return "correct_owner"
     return None
