@@ -7,12 +7,18 @@ from collections.abc import Mapping
 from typing import Any
 
 from ci_owner_agent.services.wecom_bot_models import WeComInboundMessage, WeComMentionedUser
+import logging
 
 _MENTION_RE = re.compile(r"<@([^>]+)>")
 
 
-def normalize_wecom_text_frame(frame: Mapping[str, Any]) -> WeComInboundMessage:
-    """Normalize the documented SDK frame, with conservative compatibility fallbacks."""
+def normalize_wecom_text_frame(
+    frame: Mapping[str, Any],
+) -> WeComInboundMessage:
+    """Normalize the documented SDK frame."""
+
+    logger = logging.getLogger(__name__)
+
     body = _mapping(frame.get("body"))
     headers = _mapping(frame.get("headers"))
     text = _mapping(body.get("text"))
@@ -20,17 +26,87 @@ def normalize_wecom_text_frame(frame: Mapping[str, Any]) -> WeComInboundMessage:
     quote = _mapping(body.get("quote"))
     quote_text = _mapping(quote.get("text"))
 
-    content = str(text.get("content") or body.get("content") or "").strip()
-    userid = str(sender.get("userid") or sender.get("user_id") or body.get("userid") or "").strip()
+    content = str(
+        text.get("content")
+        or body.get("content")
+        or ""
+    ).strip()
+
+    logger.info("WeCom body keys: %r", list(body.keys()))
+    logger.info(
+        "WeCom text payload: %s",
+        json.dumps(
+            dict(text),
+            ensure_ascii=False,
+            default=str,
+        ),
+    )
+    logger.info(
+        "WeCom mention candidates: %s",
+        json.dumps(
+            {
+                "text.mentioned_list": text.get("mentioned_list"),
+                "text.mentioned_users": text.get("mentioned_users"),
+                "text.mention_list": text.get("mention_list"),
+                "text.mentions": text.get("mentions"),
+                "body.mentioned_list": body.get("mentioned_list"),
+                "body.mentioned_users": body.get("mentioned_users"),
+                "body.mention_list": body.get("mention_list"),
+                "body.mentions": body.get("mentions"),
+                "content": content,
+            },
+            ensure_ascii=False,
+            default=str,
+        ),
+    )
+
+    userid = str(
+        sender.get("userid")
+        or sender.get("user_id")
+        or body.get("userid")
+        or ""
+    ).strip()
+
     if not userid:
         raise ValueError("sender userid is missing")
 
+    bot_userid = _string(
+        body.get("aibotid")
+        or body.get("bot_id")
+    )
+
     mentioned = _mentioned_users(text, body, content)
-    request_id = _string(headers.get("req_id") or headers.get("request_id"))
-    message_id = _string(body.get("msgid") or body.get("message_id") or body.get("msg_id"))
-    chat_id = _string(body.get("chatid") or body.get("chat_id"))
-    chat_type = _string(body.get("chattype") or body.get("chat_type"))
-    bot_userid = _string(body.get("aibotid") or body.get("bot_id"))
+
+    logger.info(
+        "Normalized WeCom mentions: bot_userid=%r, mentions=%r",
+        bot_userid,
+        [
+            {
+                "userid": item.userid,
+                "display_name": item.display_name,
+            }
+            for item in mentioned
+        ],
+    )
+
+    request_id = _string(
+        headers.get("req_id")
+        or headers.get("request_id")
+    )
+    message_id = _string(
+        body.get("msgid")
+        or body.get("message_id")
+        or body.get("msg_id")
+    )
+    chat_id = _string(
+        body.get("chatid")
+        or body.get("chat_id")
+    )
+    chat_type = _string(
+        body.get("chattype")
+        or body.get("chat_type")
+    )
+
     event_key = build_event_key(
         message_id=message_id,
         request_id=request_id,
@@ -38,6 +114,7 @@ def normalize_wecom_text_frame(frame: Mapping[str, Any]) -> WeComInboundMessage:
         chat_id=chat_id,
         content=content,
     )
+
     return WeComInboundMessage(
         event_key=event_key,
         request_id=request_id,
@@ -45,13 +122,25 @@ def normalize_wecom_text_frame(frame: Mapping[str, Any]) -> WeComInboundMessage:
         chat_id=chat_id,
         chat_type=chat_type,
         sender_userid=userid,
-        sender_name=_string(sender.get("name") or sender.get("display_name") or body.get("sender_name")),
+        sender_name=_string(
+            sender.get("name")
+            or sender.get("display_name")
+            or body.get("sender_name")
+        ),
         content=content,
         bot_userid=bot_userid,
-        mentioned_userids=[item.userid for item in mentioned],
+        mentioned_userids=[
+            item.userid for item in mentioned
+        ],
         mentioned_users=mentioned,
-        quoted_message_id=_string(quote.get("msgid") or quote.get("message_id")),
-        quoted_content=_string(quote_text.get("content") or quote.get("content")),
+        quoted_message_id=_string(
+            quote.get("msgid")
+            or quote.get("message_id")
+        ),
+        quoted_content=_string(
+            quote_text.get("content")
+            or quote.get("content")
+        ),
     )
 
 

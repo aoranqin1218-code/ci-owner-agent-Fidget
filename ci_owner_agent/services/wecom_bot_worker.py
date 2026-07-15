@@ -88,33 +88,79 @@ class WeComBotWorker:
 
     async def handle_frame(self, frame: Mapping[str, Any]) -> None:
         claim_token: str | None = None
+        logger = logging.getLogger(__name__)
+
         try:
+            raw_body = frame.get("body")
+            body = raw_body if isinstance(raw_body, Mapping) else {}
+
+            raw_sender = body.get("from") or body.get("sender")
+            sender = raw_sender if isinstance(raw_sender, Mapping) else {}
+
+            logger.info(
+                "WeCom sender fields: %r",
+                dict(sender),
+            )
+
             message = normalize_wecom_text_frame(frame)
-            claim_status, event = await asyncio.to_thread(self.events.claim, message)
+
+            claim_status, event = await asyncio.to_thread(
+                self.events.claim,
+                message,
+            )
+
             if claim_status == "completed":
-                reply = str((event or {}).get("replyText") or "消息已处理完成。")
+                reply = str(
+                    (event or {}).get("replyText")
+                    or "消息已处理完成。"
+                )
             elif claim_status == "processing":
                 reply = "相同消息正在处理中，请稍后。"
             elif claim_status != "claimed":
                 reply = "消息暂时无法处理，请稍后重试。"
             else:
                 claim_token = event["claimToken"]
-                reply = await asyncio.to_thread(self.service.handle, message)
+                reply = await asyncio.to_thread(
+                    self.service.handle,
+                    message,
+                )
+
                 try:
-                    completed = await asyncio.to_thread(self.events.mark_completed, message.event_key, claim_token, reply)
+                    completed = await asyncio.to_thread(
+                        self.events.mark_completed,
+                        message.event_key,
+                        claim_token,
+                        reply,
+                    )
                     if not completed:
-                        logging.getLogger(__name__).warning("Lost WeCom event claim before completion: %s", message.event_key)
+                        logger.warning(
+                            "Lost WeCom event claim before completion: %s",
+                            message.event_key,
+                        )
                 except Exception:
-                    logging.getLogger(__name__).exception("Failed to mark WeCom message event completed")
+                    logger.exception(
+                        "Failed to mark WeCom message event completed"
+                    )
+
         except Exception as exc:
-            logging.getLogger(__name__).exception("Failed to process WeCom text message")
+            logger.exception("Failed to process WeCom text message")
+
             if "message" in locals() and claim_token:
                 try:
-                    await asyncio.to_thread(self.events.mark_failed, message.event_key, claim_token, str(exc))
+                    await asyncio.to_thread(
+                        self.events.mark_failed,
+                        message.event_key,
+                        claim_token,
+                        str(exc),
+                    )
                 except Exception:
-                    logging.getLogger(__name__).exception("Failed to mark WeCom message event failed")
+                    logger.exception(
+                        "Failed to mark WeCom message event failed"
+                    )
+
             reply = f"消息处理失败：{str(exc)[:200]}"
+
         try:
             await self.adapter.reply(frame, reply)
         except Exception:
-            logging.getLogger(__name__).exception("Failed to reply to WeCom message")
+            logger.exception("Failed to reply to WeCom message")
