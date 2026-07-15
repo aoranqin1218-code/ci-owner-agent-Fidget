@@ -686,6 +686,8 @@ def test_confirm_result_card_is_text_notice():
     assert confirm_reply.reply_type == "template_card"
     card = confirm_reply.template_card
     assert card["card_type"] == "text_notice"
+    assert card.get("card_action", {}).get("type") == 1
+    assert card.get("card_action", {}).get("url", "").startswith("https://")
     assert "button_list" not in card
     assert card["task_id"] == task_id
     title = card.get("main_title", {}).get("title", "")
@@ -711,6 +713,8 @@ def test_cancel_result_card_is_text_notice():
     assert cancel_reply.reply_type == "template_card"
     card = cancel_reply.template_card
     assert card["card_type"] == "text_notice"
+    assert card.get("card_action", {}).get("type") == 1
+    assert card.get("card_action", {}).get("url", "").startswith("https://")
     assert "button_list" not in card
     assert card["task_id"] == task_id
     title = card.get("main_title", {}).get("title", "")
@@ -736,6 +740,80 @@ def test_forbidden_result_card_is_text_notice():
     assert forbidden_reply.reply_type == "template_card"
     card = forbidden_reply.template_card
     assert card["card_type"] == "text_notice"
+    assert card.get("card_action", {}).get("type") == 1
+    assert card.get("card_action", {}).get("url", "").startswith("https://")
     assert "button_list" not in card
     assert card.get("userids") == ["lisi"]
     assert card["task_id"] == task_id
+
+
+
+def test_updated_card_is_valid_text_notice():
+    """All updated cards must be valid text_notice with card_action."""
+    store, _, context = _setup()
+    service = WeComFeedbackService(store)
+    reply = service.handle_text(_message("msg:valid", context["code"] + " 1 判断正确"))
+    task_id = reply.template_card["task_id"]
+
+    event = WeComTemplateCardEvent(
+        event_key="wecom-card:valid1",
+        message_id="valid1",
+        sender_userid="wangwu",
+        chat_id="chat",
+        task_id=task_id,
+        button_key="confirm",
+    )
+    confirm_reply = service.handle_template_card_event(event)
+    assert confirm_reply.reply_type == "template_card"
+    card = confirm_reply.template_card
+    assert card["card_type"] == "text_notice"
+    assert card.get("card_action", {}).get("type") == 1
+    assert card.get("card_action", {}).get("url", "").startswith("https://")
+    assert "button_list" not in card
+    assert card["task_id"] == task_id
+    title = card.get("main_title", {}).get("title", "")
+    assert "提交" in title
+
+
+def test_feedback_base_url_is_used_for_status_card_action():
+    """feedback_base_url setting must be used for status card card_action.url."""
+    store, _, context = _setup()
+    service = WeComFeedbackService(store, card_action_url="https://ci.example.com/feedback")
+    reply = service.handle_text(_message("msg:url1", context["code"] + " 1 判断正确"))
+    task_id = reply.template_card["task_id"]
+
+    event = WeComTemplateCardEvent(
+        event_key="wecom-card:url1",
+        message_id="url1",
+        sender_userid="wangwu",
+        chat_id="chat",
+        task_id=task_id,
+        button_key="confirm",
+    )
+    confirm_reply = service.handle_template_card_event(event)
+    card = confirm_reply.template_card
+    assert card.get("card_action", {}) == {
+        "type": 1,
+        "url": "https://ci.example.com/feedback",
+    }
+
+
+def test_status_card_action_url_has_safe_fallback():
+    """When no feedback_base_url is configured, card_action must use safe fallback."""
+    store, _, context = _setup()
+    service = WeComFeedbackService(store, card_action_url=None)
+    reply = service.handle_text(_message("msg:fallback", context["code"] + " 1 判断正确"))
+    task_id = reply.template_card["task_id"]
+
+    event = WeComTemplateCardEvent(
+        event_key="wecom-card:fallback",
+        message_id="fallback",
+        sender_userid="wangwu",
+        chat_id="chat",
+        task_id=task_id,
+        button_key="confirm",
+    )
+    confirm_reply = service.handle_template_card_event(event)
+    card = confirm_reply.template_card
+    assert card.get("card_action", {}).get("type") == 1
+    assert card.get("card_action", {}).get("url") == "https://work.weixin.qq.com/"

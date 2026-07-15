@@ -23,6 +23,7 @@ class WeComBotWorker:
         feedback_code_ttl_days: int = 30,
         event_ttl_days: int = 7,
         ai_parser: WeComFeedbackAiParserProtocol | None = None,
+        card_action_url: str | None = None,
     ) -> None:
         self.adapter = adapter
         self.events = WeComEventStore(history_store, event_ttl_days)
@@ -31,6 +32,7 @@ class WeComBotWorker:
             context_ttl_days=feedback_code_ttl_days,
             confirm_ttl_seconds=confirm_ttl_seconds,
             ai_parser=ai_parser,
+            card_action_url=card_action_url,
         )
         self._stop_event: asyncio.Event | None = None
         self._fatal_error: BaseException | None = None

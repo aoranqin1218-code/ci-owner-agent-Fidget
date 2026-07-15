@@ -434,7 +434,7 @@ def test_serve_wecom_bot_passes_ai_parser_to_worker(monkeypatch):
     )
 
     class FakeWorker:
-        def __init__(self, adapter, store, *, confirm_ttl_seconds=300, feedback_code_ttl_days=30, event_ttl_days=7, ai_parser=None):
+        def __init__(self, adapter, store, *, confirm_ttl_seconds=300, feedback_code_ttl_days=30, event_ttl_days=7, ai_parser=None, card_action_url=None):
             captured["ai_parser"] = ai_parser
         def run(self):
             pass

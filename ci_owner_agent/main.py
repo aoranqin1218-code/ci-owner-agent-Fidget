@@ -400,6 +400,10 @@ def main(argv: list[str] | None = None) -> int:
             print(f"ERROR: {exc}", file=sys.stderr)
             return 2
         ai_parser = _build_wecom_feedback_ai_parser(settings)
+        card_action_url = (
+            settings.feedback_base_url
+            or "https://work.weixin.qq.com/"
+        )
         worker = WeComBotWorker(
             adapter,
             store,
@@ -407,6 +411,7 @@ def main(argv: list[str] | None = None) -> int:
             feedback_code_ttl_days=settings.wecom_feedback_code_ttl_days,
             event_ttl_days=settings.wecom_bot_event_ttl_days,
             ai_parser=ai_parser,
+            card_action_url=card_action_url,
         )
         try:
             worker.run()

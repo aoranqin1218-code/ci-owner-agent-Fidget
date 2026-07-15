@@ -35,6 +35,7 @@ class WeComFeedbackService:
         context_ttl_days: int = 30,
         confirm_ttl_seconds: int = 300,
         ai_parser: WeComFeedbackAiParserProtocol | None = None,
+        card_action_url: str | None = None,
     ) -> None:
         self.history_store = history_store
         self.contexts = FeedbackContextStore(history_store, context_ttl_days)
@@ -42,6 +43,25 @@ class WeComFeedbackService:
         self.feedback = FeedbackStore(history_store)
         self.confirm_ttl_seconds = confirm_ttl_seconds
         self.ai_parser = ai_parser
+        self.card_action_url = (
+            str(card_action_url or "").strip()
+            or "https://work.weixin.qq.com/"
+        )
+    def _build_updated_card(
+        self, *, title: str, desc: str, task_id: str, status: str, userids: list[str] | None = None
+    ) -> dict[str, Any]:
+        action_url = self.card_action_url
+        card: dict[str, Any] = {
+            "card_type": "text_notice",
+            "main_title": {"title": title, "desc": desc},
+            "card_action": {"type": 1, "url": action_url},
+            "task_id": task_id,
+        }
+        if userids is not None:
+            card["userids"] = userids
+        return card
+
+
 
     def handle_text(self, message: WeComInboundMessage) -> WeComBotReply:
         """Handle a text message. Returns a reply (text or template_card)."""
@@ -78,7 +98,7 @@ class WeComFeedbackService:
         if pending is None:
             return WeComBotReply(
                 reply_type="template_card",
-                template_card=_build_updated_card(
+                template_card=self._build_updated_card(
                     title="反馈已失效",
                     desc="该反馈记录不存在或已过期，请重新发起。",
                     task_id=event.task_id,
@@ -93,7 +113,7 @@ class WeComFeedbackService:
         else:
             return WeComBotReply(
                 reply_type="template_card",
-                template_card=_build_updated_card(
+                template_card=self._build_updated_card(
                     title="未知操作",
                     desc="该按钮操作不可识别。",
                     task_id=event.task_id,
@@ -131,7 +151,7 @@ class WeComFeedbackService:
         if pending.get("senderUserId") != event.sender_userid:
             return WeComBotReply(
                 reply_type="template_card",
-                template_card=_build_updated_card(
+                template_card=self._build_updated_card(
                     title="无权限",
                     desc="只有反馈发起人可以确认或取消。",
                     task_id=event.task_id,
@@ -145,7 +165,7 @@ class WeComFeedbackService:
         if claimed is None:
             return WeComBotReply(
                 reply_type="template_card",
-                template_card=_build_updated_card(
+                template_card=self._build_updated_card(
                     title=_card_status_title(status, default="操作失败"),
                     desc=_card_status_desc(status, default="请稍后重试。"),
                     task_id=event.task_id,
@@ -155,7 +175,7 @@ class WeComFeedbackService:
         if status == "forbidden":
             return WeComBotReply(
                 reply_type="template_card",
-                template_card=_build_updated_card(
+                template_card=self._build_updated_card(
                     title="无权限",
                     desc="只有反馈发起人可以确认或取消。",
                     task_id=event.task_id,
@@ -166,7 +186,7 @@ class WeComFeedbackService:
         if status in {"expired", "cancelled", "failed", "stale"}:
             return WeComBotReply(
                 reply_type="template_card",
-                template_card=_build_updated_card(
+                template_card=self._build_updated_card(
                     title=_card_status_title(status),
                     desc=_card_status_desc(status),
                     task_id=event.task_id,
@@ -179,7 +199,7 @@ class WeComFeedbackService:
         if status == "applying":
             return WeComBotReply(
                 reply_type="template_card",
-                template_card=_build_updated_card(
+                template_card=self._build_updated_card(
                     title="\u5904\u7406\u4e2d",
                     desc="\u53cd\u9988\u6b63\u5728\u63d0\u4ea4\uff0c\u8bf7\u52ff\u91cd\u590d\u64cd\u4f5c\u3002",
                     task_id=event.task_id,
@@ -190,7 +210,7 @@ class WeComFeedbackService:
         if status != "claimed":
             return WeComBotReply(
                 reply_type="template_card",
-                template_card=_build_updated_card(
+                template_card=self._build_updated_card(
                     title=_card_status_title(status, default="\u64cd\u4f5c\u5931\u8d25"),
                     desc=_card_status_desc(status, default="\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002"),
                     task_id=event.task_id,
@@ -203,7 +223,7 @@ class WeComFeedbackService:
         if resolve_result[0] == "error":
             return WeComBotReply(
                 reply_type="template_card",
-                template_card=_build_updated_card(
+                template_card=self._build_updated_card(
                     title="确认中",
                     desc="反馈结果正在确认，请稍后重试。",
                     task_id=event.task_id,
@@ -215,7 +235,7 @@ class WeComFeedbackService:
             if stale_ok is True:
                 return WeComBotReply(
                     reply_type="template_card",
-                    template_card=_build_updated_card(
+                    template_card=self._build_updated_card(
                         title="反馈已失效",
                         desc="该责任项已经更新，请重新发起反馈。",
                         task_id=event.task_id,
@@ -224,7 +244,7 @@ class WeComFeedbackService:
                 )
             return WeComBotReply(
                 reply_type="template_card",
-                template_card=_build_updated_card(
+                template_card=self._build_updated_card(
                     title=_card_status_title(
                         self._safe_read_pending(pending).get("status", "applying")
                     ),
@@ -242,7 +262,7 @@ class WeComFeedbackService:
         if operation is _OPERATION_LOOKUP_FAILED:
             return WeComBotReply(
                 reply_type="template_card",
-                template_card=_build_updated_card(
+                template_card=self._build_updated_card(
                     title="确认中",
                     desc="反馈结果正在确认，请勿重复提交。",
                     task_id=event.task_id,
@@ -252,7 +272,7 @@ class WeComFeedbackService:
         if operation is None and status == "applying":
             return WeComBotReply(
                 reply_type="template_card",
-                template_card=_build_updated_card(
+                template_card=self._build_updated_card(
                     title="处理中",
                     desc="反馈正在提交，请勿重复操作。",
                     task_id=event.task_id,
@@ -267,7 +287,7 @@ class WeComFeedbackService:
                 if result is False:
                     return WeComBotReply(
                         reply_type="template_card",
-                        template_card=_build_updated_card(
+                        template_card=self._build_updated_card(
                             title=_card_status_title(
                                 self._safe_read_pending(pending).get("status", "applying")
                             ),
@@ -280,7 +300,7 @@ class WeComFeedbackService:
                     )
                 return WeComBotReply(
                     reply_type="template_card",
-                    template_card=_build_updated_card(
+                    template_card=self._build_updated_card(
                         title="确认中",
                         desc="反馈结果正在确认，请勿重复提交。",
                         task_id=event.task_id,
@@ -318,7 +338,7 @@ class WeComFeedbackService:
             if operation is _OPERATION_LOOKUP_FAILED:
                 return WeComBotReply(
                     reply_type="template_card",
-                    template_card=_build_updated_card(
+                    template_card=self._build_updated_card(
                         title="确认中",
                         desc="反馈结果正在确认，请勿重复提交。",
                         task_id=event.task_id,
@@ -330,7 +350,7 @@ class WeComFeedbackService:
                     if not self.pending.mark_failed(pending, pending.get("applyToken"), str(exc)):
                         return WeComBotReply(
                             reply_type="template_card",
-                            template_card=_build_updated_card(
+                            template_card=self._build_updated_card(
                                 title=_card_status_title(
                                     self._safe_read_pending(pending).get("status", "applying")
                                 ),
@@ -345,7 +365,7 @@ class WeComFeedbackService:
                     logging.getLogger(__name__).exception("Failed to mark pending feedback failed")
                     return WeComBotReply(
                         reply_type="template_card",
-                        template_card=_build_updated_card(
+                        template_card=self._build_updated_card(
                             title="确认中",
                             desc="反馈结果正在确认，请勿重复提交。",
                             task_id=event.task_id,
@@ -354,7 +374,7 @@ class WeComFeedbackService:
                     )
                 return WeComBotReply(
                     reply_type="template_card",
-                    template_card=_build_updated_card(
+                    template_card=self._build_updated_card(
                         title="反馈写入失败",
                         desc="请重新发起反馈。",
                         task_id=event.task_id,
@@ -368,7 +388,7 @@ class WeComFeedbackService:
                 if result is False:
                     return WeComBotReply(
                         reply_type="template_card",
-                        template_card=_build_updated_card(
+                        template_card=self._build_updated_card(
                             title=_card_status_title(
                                 self._safe_read_pending(pending).get("status", "applying")
                             ),
@@ -381,7 +401,7 @@ class WeComFeedbackService:
                     )
                 return WeComBotReply(
                     reply_type="template_card",
-                    template_card=_build_updated_card(
+                    template_card=self._build_updated_card(
                         title="确认中",
                         desc="反馈结果正在确认，请勿重复提交。",
                         task_id=event.task_id,
@@ -395,7 +415,7 @@ class WeComFeedbackService:
         if pending.get("senderUserId") != event.sender_userid:
             return WeComBotReply(
                 reply_type="template_card",
-                template_card=_build_updated_card(
+                template_card=self._build_updated_card(
                     title="无权限",
                     desc="只有反馈发起人可以确认或取消。",
                     task_id=event.task_id,
@@ -406,7 +426,7 @@ class WeComFeedbackService:
         status = self.pending.cancel(pending["confirmationCode"], event.sender_userid)
         return WeComBotReply(
             reply_type="template_card",
-            template_card=_build_updated_card(
+            template_card=self._build_updated_card(
                 title=_card_status_title(status, default="已取消"),
                 desc=_card_status_desc(status, default="未写入正式反馈。"),
                 task_id=event.task_id,
@@ -421,7 +441,7 @@ class WeComFeedbackService:
                 if activation in ("committed", "already_committed"):
                     return WeComBotReply(
                         reply_type="template_card",
-                        template_card=_build_updated_card(
+                        template_card=self._build_updated_card(
                             title="反馈已提交",
                             desc="该反馈已成功写入。",
                             task_id=event.task_id,
@@ -430,7 +450,7 @@ class WeComFeedbackService:
                     )
                 return WeComBotReply(
                     reply_type="template_card",
-                    template_card=_build_updated_card(
+                    template_card=self._build_updated_card(
                         title="反馈已接收",
                         desc="结果正在同步。",
                         task_id=event.task_id,
@@ -446,7 +466,7 @@ class WeComFeedbackService:
             if activation in ("committed", "already_committed"):
                 return WeComBotReply(
                     reply_type="template_card",
-                    template_card=_build_updated_card(
+                    template_card=self._build_updated_card(
                         title="反馈已提交",
                         desc="该反馈已成功写入。",
                         task_id=event.task_id,
@@ -455,7 +475,7 @@ class WeComFeedbackService:
                 )
             return WeComBotReply(
                 reply_type="template_card",
-                template_card=_build_updated_card(
+                template_card=self._build_updated_card(
                     title="反馈已接收",
                     desc="结果正在同步。",
                     task_id=event.task_id,
@@ -465,7 +485,7 @@ class WeComFeedbackService:
         if status == "applying":
             return WeComBotReply(
                 reply_type="template_card",
-                template_card=_build_updated_card(
+                template_card=self._build_updated_card(
                     title="处理中",
                     desc="反馈正在提交，请勿重复操作。",
                     task_id=event.task_id,
@@ -475,7 +495,7 @@ class WeComFeedbackService:
         if status in {"stale", "failed", "cancelled", "expired"}:
             return WeComBotReply(
                 reply_type="template_card",
-                template_card=_build_updated_card(
+                template_card=self._build_updated_card(
                     title=_card_status_title(status),
                     desc=_card_status_desc(status),
                     task_id=event.task_id,
@@ -484,7 +504,7 @@ class WeComFeedbackService:
             )
         return WeComBotReply(
             reply_type="template_card",
-            template_card=_build_updated_card(
+            template_card=self._build_updated_card(
                 title="确认中",
                 desc="反馈结果正在确认，请勿重复提交。",
                 task_id=event.task_id,
@@ -505,7 +525,7 @@ class WeComFeedbackService:
         if operation is _OPERATION_LOOKUP_FAILED:
             return WeComBotReply(
                 reply_type="template_card",
-                template_card=_build_updated_card(
+                template_card=self._build_updated_card(
                     title="\u7ed3\u679c\u6b63\u5728\u540c\u6b65",
                     desc="\u53cd\u9988\u5df2\u63a5\u53d7\uff0c\u7ed3\u679c\u6b63\u5728\u540c\u6b65\u3002",
                     task_id=event.task_id,
@@ -519,7 +539,7 @@ class WeComFeedbackService:
             )
             return WeComBotReply(
                 reply_type="template_card",
-                template_card=_build_updated_card(
+                template_card=self._build_updated_card(
                     title="\u7ed3\u679c\u6b63\u5728\u540c\u6b65",
                     desc="\u53cd\u9988\u5df2\u63a5\u53d7\uff0c\u7ed3\u679c\u6b63\u5728\u540c\u6b65\u3002",
                     task_id=event.task_id,
@@ -529,7 +549,7 @@ class WeComFeedbackService:
         if operation.get("isCommitted"):
             return WeComBotReply(
                 reply_type="template_card",
-                template_card=_build_updated_card(
+                template_card=self._build_updated_card(
                     title="\u53cd\u9988\u5df2\u63d0\u4ea4",
                     desc="\u8be5\u53cd\u9988\u5df2\u6210\u529f\u5199\u5165\u3002",
                     task_id=event.task_id,
@@ -540,7 +560,7 @@ class WeComFeedbackService:
         if activation in ("committed", "already_committed"):
             return WeComBotReply(
                 reply_type="template_card",
-                template_card=_build_updated_card(
+                template_card=self._build_updated_card(
                     title="\u53cd\u9988\u5df2\u63d0\u4ea4",
                     desc="\u8be5\u53cd\u9988\u5df2\u6210\u529f\u5199\u5165\u3002",
                     task_id=event.task_id,
@@ -549,7 +569,7 @@ class WeComFeedbackService:
             )
         return WeComBotReply(
             reply_type="template_card",
-            template_card=_build_updated_card(
+            template_card=self._build_updated_card(
                 title="\u7ed3\u679c\u6b63\u5728\u540c\u6b65",
                 desc="\u53cd\u9988\u5df2\u63a5\u53d7\uff0c\u7ed3\u679c\u6b63\u5728\u540c\u6b65\u3002",
                 task_id=event.task_id,
@@ -671,18 +691,6 @@ def _build_button_card(*, title: str, desc: str, desc_lines: list[str], task_id:
         "task_id": task_id,
     }
 
-
-def _build_updated_card(
-    *, title: str, desc: str, task_id: str, status: str, userids: list[str] | None = None
-) -> dict[str, Any]:
-    card: dict[str, Any] = {
-        "card_type": "text_notice",
-        "main_title": {"title": title, "desc": desc},
-        "task_id": task_id,
-    }
-    if userids is not None:
-        card["userids"] = userids
-    return card
 
 
 def _card_status_title(status: str, default: str = "操作失败") -> str:
