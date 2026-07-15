@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import argparse
 import csv
@@ -415,6 +415,7 @@ def main(argv: list[str] | None = None) -> int:
             confirm_ttl_seconds=settings.wecom_bot_confirm_ttl_seconds,
             feedback_code_ttl_days=settings.wecom_feedback_code_ttl_days,
             event_ttl_days=settings.wecom_bot_event_ttl_days,
+            ai_parser=ai_parser,
         )
         try:
             worker.run()

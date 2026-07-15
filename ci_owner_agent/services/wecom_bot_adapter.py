@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import asyncio
 import inspect
@@ -105,7 +105,7 @@ class WeComSdkAdapter:
     async def update_template_card(
         self, frame: Mapping[str, Any], template_card: dict[str, Any], userids: list[str] | None = None
     ) -> None:
-        kwargs: dict[str, Any] = {"frame": frame, "card": template_card}
+        kwargs: dict[str, Any] = {"frame": frame, "template_card": template_card}
         if userids is not None:
             kwargs["userids"] = userids
         await self._client.update_template_card(**kwargs)

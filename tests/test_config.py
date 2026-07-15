@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from ci_owner_agent.config import _parse_fallback_userids, load_settings, public_settings
 

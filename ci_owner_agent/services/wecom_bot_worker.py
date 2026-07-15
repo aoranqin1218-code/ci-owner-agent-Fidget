@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import asyncio
 import logging
@@ -106,7 +106,7 @@ class WeComBotWorker:
                 reply_type = (event or {}).get("responseType") or "text"
                 if reply_type == "template_card":
                     payload = (event or {}).get("responsePayload") or {}
-                    await self.adapter.reply_template_card(frame, payload.get("template_card", {}))
+                    await self.adapter.reply_template_card(frame, payload.get("template_card", {}), payload.get("userids"))
                     return
                 reply = str(
                     (event or {}).get("replyText")
@@ -214,8 +214,8 @@ class WeComBotWorker:
                     event,
                 )
 
-                card = (bot_reply.template_card or {})
-                userids = card.pop("userids", None) if card else None
+                card_data = dict(bot_reply.template_card or {})
+                userids = card_data.pop("userids", None)
 
                 try:
                     completed = await asyncio.to_thread(
@@ -223,7 +223,7 @@ class WeComBotWorker:
                         event.event_key,
                         claim_token,
                         "update_template_card",
-                        {"template_card": card},
+                        {"template_card": card_data, "userids": userids},
                     )
                     if not completed:
                         logger.warning(
@@ -233,7 +233,7 @@ class WeComBotWorker:
                 except Exception:
                     logger.exception("Failed to mark template card event completed")
 
-                await self.adapter.update_template_card(frame, card, userids)
+                await self.adapter.update_template_card(frame, card_data, userids)
                 return
 
         except Exception as exc:

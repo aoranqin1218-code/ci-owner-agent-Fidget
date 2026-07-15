@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import datetime as dt
 from ci_owner_agent.schemas import CiResponsibilityNotice

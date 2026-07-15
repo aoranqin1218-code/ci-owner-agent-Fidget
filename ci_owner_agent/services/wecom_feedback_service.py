@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from typing import Any
 import logging
@@ -140,6 +140,8 @@ class WeComFeedbackService:
                 ),
             )
         status, claimed = self.pending.claim(pending["confirmationCode"], event.sender_userid)
+        if claimed is not None:
+            pending = claimed
         if claimed is None:
             return WeComBotReply(
                 reply_type="template_card",
@@ -173,6 +175,32 @@ class WeComFeedbackService:
             )
         if status == "applied":
             return self._recover_and_finalize(pending, event)
+
+        # Stale check before operation
+        if status in ("claimed", "applying"):
+            try:
+                ctx = pending.get("feedbackContext") or {}
+                _current_ctx, _current_item = self.contexts.resolve_item(
+                    ctx.get("code") or "",
+                    ctx.get("itemIndex") or 0,
+                )
+                if not _same_failure(ctx, _current_item):
+                    try:
+                        self.pending.mark_stale(pending)
+                    except Exception:
+                        pass
+                    return WeComBotReply(
+                        reply_type="template_card",
+                        template_card=_build_updated_card(
+                            title="反馈已失效",
+                            desc="该责任项已经更新，请重新发起反馈。",
+                            task_id=event.task_id,
+                            status="stale",
+                        ),
+                    )
+            except Exception as exc:
+                logging.getLogger(__name__).warning("Stale check failed, keeping applying: %s", exc)
+
         if status not in {"claimed", "applying"}:
             return WeComBotReply(
                 reply_type="template_card",
@@ -240,6 +268,7 @@ class WeComFeedbackService:
             intent = ParsedFeedbackIntent.model_validate(pending["intent"])
             owner_name = intent.target_display_name
             owner_email = None
+
             self.feedback.apply_feedback(
                 repo=context["repo"],
                 job=context["job"],
