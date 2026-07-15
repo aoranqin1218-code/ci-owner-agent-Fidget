@@ -84,3 +84,102 @@ def test_template_card_event_normalization():
 def test_template_card_event_cancel():
     event = normalize_wecom_template_card_event(_card_frame(event_key="cancel"))
     assert event.button_key == "cancel"
+
+# ---- nested template_card_event (real WeCom shape) ----
+
+
+def test_nested_template_card_event_confirm():
+    frame = {
+        "headers": {"req_id": "req-nested-confirm"},
+        "body": {
+            "msgid": "msg-nested-confirm",
+            "chatid": "chat_1",
+            "chattype": "group",
+            "from": {"userid": "wangwu"},
+            "event": {
+                "eventtype": "template_card_event",
+                "template_card_event": {
+                    "event_key": "confirm",
+                    "task_id": "ci-feedback-nested-1",
+                },
+            },
+        },
+    }
+    event = normalize_wecom_template_card_event(frame)
+    assert event.event_key == "wecom-card:msg-nested-confirm"
+    assert event.sender_userid == "wangwu"
+    assert event.task_id == "ci-feedback-nested-1"
+    assert event.button_key == "confirm"
+
+
+def test_nested_template_card_event_cancel():
+    frame = {
+        "headers": {"req_id": "req-nested-cancel"},
+        "body": {
+            "msgid": "msg-nested-cancel",
+            "chatid": "chat_1",
+            "from": {"userid": "lisi"},
+            "event": {
+                "eventtype": "template_card_event",
+                "template_card_event": {
+                    "event_key": "cancel",
+                    "task_id": "ci-feedback-nested-2",
+                },
+            },
+        },
+    }
+    event = normalize_wecom_template_card_event(frame)
+    assert event.button_key == "cancel"
+    assert event.task_id == "ci-feedback-nested-2"
+
+
+def test_nested_template_card_event_missing_task_id():
+    with pytest.raises(ValueError, match="task_id"):
+        normalize_wecom_template_card_event({
+            "headers": {"req_id": "req-x"},
+            "body": {
+                "from": {"userid": "wangwu"},
+                "msgid": "msg-x",
+                "event": {
+                    "eventtype": "template_card_event",
+                    "template_card_event": {
+                        "event_key": "confirm",
+                    },
+                },
+            },
+        })
+
+
+def test_flat_template_card_event_missing_task_id():
+    """Flat structure with empty task_id must also raise ValueError."""
+    with pytest.raises(ValueError, match="task_id"):
+        normalize_wecom_template_card_event({
+            "headers": {"req_id": "req-y"},
+            "body": {
+                "from": {"userid": "wangwu"},
+                "msgid": "msg-y",
+                "event": {
+                    "eventtype": "template_card_event",
+                    "event_key": "confirm",
+                    "task_id": "",
+                },
+            },
+        })
+
+
+def test_flat_template_card_event_unknown_button():
+    """Unknown button key must not raise error, must return unknown."""
+    event = normalize_wecom_template_card_event({
+        "headers": {"req_id": "req-z"},
+        "body": {
+            "from": {"userid": "wangwu"},
+            "msgid": "msg-z",
+            "event": {
+                "eventtype": "template_card_event",
+                "task_id": "ci-feedback-flat-unknown",
+                "event_key": "some-unexpected-key",
+            },
+        },
+    })
+    assert event.button_key == "unknown"
+    assert event.task_id == "ci-feedback-flat-unknown"

@@ -326,3 +326,160 @@ def test_completed_text_event_replays_template_card():
 
     # No TypeError or "??????" on second call
     assert "\u6d88\u606f\u5904\u7406\u5931\u8d25" not in str(adapter.text_replies)
+
+
+def test_worker_handles_nested_confirm_template_card_event():
+    """Worker must handle real WeCom nested confirm callback."""
+    import asyncio
+    from ci_owner_agent.services.wecom_bot_models import WeComInboundMessage
+    from ci_owner_agent.services.feedback_context_store import FeedbackContextStore
+    from ci_owner_agent.schemas import CiResponsibilityNotice
+    from tests.test_notification_formatter import item, notice_payload
+
+    adapter = _MockAdapter()
+    store = make_store()
+    worker = WeComBotWorker(adapter, store)
+
+    # Create a notice and context
+    notice = CiResponsibilityNotice.model_validate(notice_payload([item("\u5f20\u4e09")]))
+    key = {"repo": notice.repo, "job": notice.job, "branch": notice.branch, "buildNumber": notice.buildNumber}
+    store.notices.update_one(key, {"$set": {**key, "notice": notice.model_dump(mode="json")}}, upsert=True)
+    context = FeedbackContextStore(store).get_or_create_for_notice(notice)
+
+    # Create a pending via fixed command
+    msg = WeComInboundMessage(
+        event_key="msg:nested_confirm_setup",
+        chat_id="chat",
+        sender_userid="zhangsan",
+        sender_name="\u5f20\u4e09",
+        content=context["code"] + " 1 \u5224\u65ad\u6b63\u786e",
+        mentioned_userids=[],
+        mentioned_users=[],
+    )
+    reply = worker.service.handle_text(msg)
+    assert reply.reply_type == "template_card"
+    task_id = reply.template_card["task_id"]
+
+    # Build a nested callback frame (real WeCom shape)
+    frame = {
+        "headers": {"req_id": "req-nested-confirm"},
+        "body": {
+            "aibotid": "bot-id",
+            "chatid": "chat",
+            "chattype": "group",
+            "create_time": 1234567890,
+            "from": {"userid": "zhangsan"},
+            "msgid": "msg-nested-confirm",
+            "msgtype": "event",
+            "response_url": "https://example.invalid/",
+            "event": {
+                "eventtype": "template_card_event",
+                "template_card_event": {
+                    "event_key": "confirm",
+                    "task_id": task_id,
+                },
+            },
+        },
+    }
+
+    asyncio.run(worker.handle_template_card_event_frame(frame))
+
+    # Must NOT send error text
+    assert len(adapter.text_replies) == 0
+
+    # Must update card once
+    assert len(adapter.card_updates) == 1
+    updated_card, userids = adapter.card_updates[0]
+    assert userids is None
+
+    # Updated card should indicate success
+    title = str(updated_card.get("main_title", {}).get("title", ""))
+    assert "\u63d0\u4ea4" in title or "\u5df2" in title or "\u6210\u529f" in title
+
+    # Pending should no longer be pending
+    pending = store.wecom_pending_feedback.find_one({"cardTaskId": task_id})
+    assert pending is not None
+    assert pending["status"] != "pending"
+
+    # Operation should exist and be committed
+    ops = list(store.feedback.find({}))
+    assert len(ops) == 1
+    assert ops[0]["isCommitted"] is True
+
+
+def test_worker_handles_nested_cancel_template_card_event():
+    """Worker must handle real WeCom nested cancel callback."""
+    import asyncio
+    from ci_owner_agent.services.wecom_bot_models import WeComInboundMessage
+    from ci_owner_agent.services.feedback_context_store import FeedbackContextStore
+    from ci_owner_agent.schemas import CiResponsibilityNotice
+    from tests.test_notification_formatter import item, notice_payload
+
+    adapter = _MockAdapter()
+    store = make_store()
+    worker = WeComBotWorker(adapter, store)
+
+    # Create a notice and context
+    notice = CiResponsibilityNotice.model_validate(notice_payload([item("\u5f20\u4e09")]))
+    key = {"repo": notice.repo, "job": notice.job, "branch": notice.branch, "buildNumber": notice.buildNumber}
+    store.notices.update_one(key, {"$set": {**key, "notice": notice.model_dump(mode="json")}}, upsert=True)
+    context = FeedbackContextStore(store).get_or_create_for_notice(notice)
+
+    # Create a pending via fixed command
+    msg = WeComInboundMessage(
+        event_key="msg:nested_cancel_setup",
+        chat_id="chat",
+        sender_userid="zhangsan",
+        sender_name="\u5f20\u4e09",
+        content=context["code"] + " 1 \u5224\u65ad\u6b63\u786e",
+        mentioned_userids=[],
+        mentioned_users=[],
+    )
+    reply = worker.service.handle_text(msg)
+    assert reply.reply_type == "template_card"
+    task_id = reply.template_card["task_id"]
+
+    # Build a nested cancel callback frame
+    frame = {
+        "headers": {"req_id": "req-nested-cancel"},
+        "body": {
+            "aibotid": "bot-id",
+            "chatid": "chat",
+            "chattype": "group",
+            "create_time": 1234567890,
+            "from": {"userid": "zhangsan"},
+            "msgid": "msg-nested-cancel",
+            "msgtype": "event",
+            "response_url": "https://example.invalid/",
+            "event": {
+                "eventtype": "template_card_event",
+                "template_card_event": {
+                    "event_key": "cancel",
+                    "task_id": task_id,
+                },
+            },
+        },
+    }
+
+    asyncio.run(worker.handle_template_card_event_frame(frame))
+
+    # Must NOT send error text
+    assert len(adapter.text_replies) == 0
+
+    # Must update card once
+    assert len(adapter.card_updates) == 1
+    updated_card, userids = adapter.card_updates[0]
+    assert userids is None
+
+    # Updated card should indicate cancellation
+    title = str(updated_card.get("main_title", {}).get("title", ""))
+    assert "\u53d6\u6d88" in title
+
+    # Pending should be cancelled
+    pending = store.wecom_pending_feedback.find_one({"cardTaskId": task_id})
+    assert pending is not None
+    assert pending["status"] == "cancelled"
+
+    # No operation should be created
+    ops = list(store.feedback.find({}))
+    assert len(ops) == 0

@@ -38,7 +38,7 @@ class WeComTemplateCardEvent(_StrictModel):
     chat_id: str | None = None
     chat_type: str | None = None
     task_id: str
-    button_key: Literal["confirm", "cancel"]
+    button_key: Literal["confirm", "cancel", "unknown"]
 
 
 class ParsedFeedbackIntent(_StrictModel):

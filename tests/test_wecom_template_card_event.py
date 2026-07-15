@@ -52,10 +52,8 @@ def test_normalize_template_card_event_cancel():
 
 def test_normalize_template_card_event_unknown_key():
     frame = _frame(event_key="some_other_key")
-    import pytest
-    from pydantic import ValidationError
-    with pytest.raises(ValidationError):
-        normalize_wecom_template_card_event(frame)
+    event = normalize_wecom_template_card_event(frame)
+    assert event.button_key == "unknown"
 
 
 def test_normalize_template_card_event_missing_sender():
@@ -90,3 +88,105 @@ def test_same_msgid_same_event_key():
     e1 = normalize_wecom_template_card_event(_frame(msgid="msg:same", event_key="confirm"))
     e2 = normalize_wecom_template_card_event(_frame(msgid="msg:same", event_key="cancel"))
     assert e1.event_key == e2.event_key
+
+# ---- nested template_card_event callback (real WeCom shape) ----
+
+
+def test_normalize_nested_confirm_template_card_event():
+    """Real WeCom callback with nested template_card_event (confirm)."""
+    frame = {
+        "headers": {"req_id": "req-confirm"},
+        "body": {
+            "aibotid": "bot-id",
+            "chatid": "chat-id",
+            "chattype": "group",
+            "create_time": 1234567890,
+            "from": {"userid": "wangwu"},
+            "msgid": "msg-confirm",
+            "msgtype": "event",
+            "response_url": "https://example.invalid/",
+            "event": {
+                "eventtype": "template_card_event",
+                "template_card_event": {
+                    "event_key": "confirm",
+                    "task_id": "ci-feedback-op-1",
+                },
+            },
+        },
+    }
+    event = normalize_wecom_template_card_event(frame)
+    assert event.event_key == "wecom-card:msg-confirm"
+    assert event.message_id == "msg-confirm"
+    assert event.sender_userid == "wangwu"
+    assert event.button_key == "confirm"
+    assert event.task_id == "ci-feedback-op-1"
+
+
+def test_normalize_nested_cancel_template_card_event():
+    """Real WeCom callback with nested template_card_event (cancel)."""
+    frame = {
+        "headers": {"req_id": "req-cancel"},
+        "body": {
+            "aibotid": "bot-id",
+            "chatid": "chat-id",
+            "chattype": "group",
+            "create_time": 1234567890,
+            "from": {"userid": "lisi"},
+            "msgid": "msg-cancel",
+            "msgtype": "event",
+            "response_url": "https://example.invalid/",
+            "event": {
+                "eventtype": "template_card_event",
+                "template_card_event": {
+                    "event_key": "cancel",
+                    "task_id": "ci-feedback-op-2",
+                },
+            },
+        },
+    }
+    event = normalize_wecom_template_card_event(frame)
+    assert event.button_key == "cancel"
+    assert event.task_id == "ci-feedback-op-2"
+    assert event.sender_userid == "lisi"
+
+
+def test_normalize_template_card_event_rejects_missing_task_id():
+    """Missing task_id must raise ValueError."""
+    frame = {
+        "headers": {"req_id": "req-notask"},
+        "body": {
+            "from": {"userid": "wangwu"},
+            "msgid": "msg-notask",
+            "event": {
+                "eventtype": "template_card_event",
+                "template_card_event": {
+                    "event_key": "confirm",
+                },
+            },
+        },
+    }
+    with pytest.raises(ValueError, match="task_id"):
+        normalize_wecom_template_card_event(frame)
+
+
+def test_nested_template_card_event_takes_precedence_over_flat_fields():
+    """Nested template_card_event fields must take precedence over flat event fields."""
+    frame = {
+        "headers": {"req_id": "req-priority"},
+        "body": {
+            "from": {"userid": "zhangsan"},
+            "msgid": "msg-priority",
+            "event": {
+                "eventtype": "template_card_event",
+                "event_key": "cancel",
+                "task_id": "flat-task",
+                "template_card_event": {
+                    "event_key": "confirm",
+                    "task_id": "nested-task",
+                },
+            },
+        },
+    }
+    event = normalize_wecom_template_card_event(frame)
+    assert event.button_key == "confirm"
+    assert event.task_id == "nested-task"

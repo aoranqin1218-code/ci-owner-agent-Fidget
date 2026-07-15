@@ -108,6 +108,7 @@ def normalize_wecom_template_card_event(
     body = _mapping(frame.get("body"))
     headers = _mapping(frame.get("headers"))
     event = _mapping(body.get("event"))
+    card_event = _mapping(event.get("template_card_event"))
     sender = _mapping(body.get("from") or body.get("sender"))
 
     event_type = _string(event.get("eventtype"))
@@ -136,6 +137,21 @@ def normalize_wecom_template_card_event(
 
     event_key = f"wecom-card:{message_id or request_id or 'unknown'}"
 
+    raw_button_key = (
+        card_event.get("event_key")
+        or card_event.get("key")
+        or event.get("event_key")
+    )
+
+    raw_task_id = (
+        card_event.get("task_id")
+        or event.get("task_id")
+    )
+
+    task_id = str(raw_task_id or "").strip()
+    if not task_id:
+        raise ValueError("template card task_id is missing")
+
     return WeComTemplateCardEvent(
         event_key=event_key,
         request_id=request_id,
@@ -149,12 +165,18 @@ def normalize_wecom_template_card_event(
             body.get("chattype")
             or body.get("chat_type")
         ),
-        task_id=str(event.get("task_id") or "").strip(),
-        button_key=_parse_button_key(event.get("event_key")),
+        task_id=task_id,
+        button_key=_parse_button_key(raw_button_key),
     )
 
 
 def _parse_button_key(raw: Any) -> str:
+    if isinstance(raw, Mapping):
+        raw = (
+            raw.get("event_key")
+            or raw.get("key")
+            or raw.get("value")
+        )
     value = str(raw or "").strip().lower()
     if value == "confirm":
         return "confirm"
