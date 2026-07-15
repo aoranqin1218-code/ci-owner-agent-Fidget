@@ -11,6 +11,7 @@ from ci_owner_agent.services.wecom_bot_adapter import WeComBotAdapterProtocol, f
 from ci_owner_agent.services.wecom_feedback_ai_parser import WeComFeedbackAiParserProtocol
 from ci_owner_agent.services.wecom_feedback_service import WeComFeedbackService
 from ci_owner_agent.services.wecom_message_normalizer import normalize_wecom_text_frame, normalize_wecom_template_card_event
+from ci_owner_agent.services.wecom_notification_outbox import WeComNotificationOutbox
 
 
 class WeComBotWorker:
@@ -24,6 +25,10 @@ class WeComBotWorker:
         event_ttl_days: int = 7,
         ai_parser: WeComFeedbackAiParserProtocol | None = None,
         card_action_url: str | None = None,
+        notification_chat_id: str | None = None,
+        notification_poll_seconds: int = 2,
+        notification_lease_seconds: int = 30,
+        notification_max_attempts: int = 5,
     ) -> None:
         self.adapter = adapter
         self.events = WeComEventStore(history_store, event_ttl_days)
@@ -36,6 +41,11 @@ class WeComBotWorker:
         )
         self._stop_event: asyncio.Event | None = None
         self._fatal_error: BaseException | None = None
+        self.notification_chat_id = (notification_chat_id or "").strip() or None
+        self.notification_poll_seconds = max(1, notification_poll_seconds)
+        self.notification_outbox = WeComNotificationOutbox(history_store, lease_seconds=notification_lease_seconds,
+                                                            max_attempts=notification_max_attempts)
+        self._notification_task: asyncio.Task[None] | None = None
         adapter.set_text_handler(self.handle_text_frame)
         adapter.set_template_card_event_handler(self.handle_template_card_event_frame)
         adapter.set_fatal_error_handler(self._handle_fatal_error)
@@ -59,11 +69,20 @@ class WeComBotWorker:
         try:
             if self._fatal_error is None:
                 await self.adapter.start()
+            if self._fatal_error is None and self.notification_chat_id:
+                self._notification_task = asyncio.create_task(self._notification_loop())
             if self._fatal_error is None:
                 await self._stop_event.wait()
         except BaseException as exc:
             run_error = exc
         finally:
+            if self._notification_task is not None:
+                self._notification_task.cancel()
+                try:
+                    await self._notification_task
+                except asyncio.CancelledError:
+                    pass
+                self._notification_task = None
             try:
                 await self.adapter.stop()
             except BaseException as exc:
@@ -91,6 +110,50 @@ class WeComBotWorker:
     def stop(self) -> None:
         if self._stop_event is not None:
             self._stop_event.set()
+
+    async def deliver_one_notification(self) -> bool:
+        item = await asyncio.to_thread(self.notification_outbox.claim_next)
+        if item is None:
+            return False
+        delivery_key, lease_token = item.get("deliveryKey"), item.get("leaseToken")
+        chat_id = item.get("targetChatId")
+        markdown = (item.get("payload") or {}).get("content")
+        if not all(isinstance(value, str) and value for value in (delivery_key, lease_token, chat_id, markdown)):
+            logging.getLogger(__name__).warning("Invalid notification outbox item")
+            return True
+        prefix = delivery_key[:12]
+        try:
+            await self.adapter.send_markdown(chat_id, markdown)
+        except Exception as exc:
+            outcome = await asyncio.to_thread(self.notification_outbox.mark_failed, delivery_key=delivery_key,
+                                              lease_token=lease_token, error=exc)
+            logging.getLogger(__name__).warning("Notification %s %s attempt=%s", prefix, outcome, item.get("attemptCount"))
+            return True
+        sent = await asyncio.to_thread(self.notification_outbox.mark_sent, delivery_key=delivery_key, lease_token=lease_token)
+        if not sent:
+            logging.getLogger(__name__).warning("notification lease lost after send")
+        else:
+            logging.getLogger(__name__).info("Notification %s sent attempt=%s", prefix, item.get("attemptCount"))
+        return True
+
+    async def _notification_loop(self) -> None:
+        logger = logging.getLogger(__name__)
+        while self._stop_event is not None and not self._stop_event.is_set():
+            try:
+                if await self.deliver_one_notification():
+                    continue
+                try:
+                    await asyncio.wait_for(self._stop_event.wait(), timeout=self.notification_poll_seconds)
+                except TimeoutError:
+                    pass
+            except asyncio.CancelledError:
+                return
+            except Exception:
+                logger.exception("Notification delivery loop failed")
+                try:
+                    await asyncio.wait_for(self._stop_event.wait(), timeout=self.notification_poll_seconds)
+                except TimeoutError:
+                    pass
 
     async def handle_text_frame(self, frame: Mapping[str, Any]) -> None:
         claim_token: str | None = None

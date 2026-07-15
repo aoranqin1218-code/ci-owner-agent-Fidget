@@ -20,7 +20,6 @@ def _isolated_subprocess_env() -> dict[str, str]:
             "CI_AGENT_HISTORY_MONGO_URI": "",
             "CI_AGENT_HISTORY_MONGO_DB": "",
             "CI_AGENT_WECOM_NOTIFY_ENABLED": "false",
-            "CI_AGENT_WECOM_WEBHOOK_URL": "",
             "CI_AGENT_WECOM_BOT_ENABLED": "false",
     "CI_AGENT_WECOM_BOT_LLM_ENABLED": "false",
     "CI_AGENT_WECOM_BOT_LLM_MAX_INPUT_CHARS": "2000",
@@ -118,7 +117,6 @@ def test_isolated_subprocess_env_blocks_dangerous_config(monkeypatch):
     monkeypatch.setenv("CI_AGENT_HISTORY_ENABLED", "true")
     monkeypatch.setenv("CI_AGENT_HISTORY_MONGO_URI", "mongodb://real-or-invalid-host")
     monkeypatch.setenv("CI_AGENT_WECOM_NOTIFY_ENABLED", "true")
-    monkeypatch.setenv("CI_AGENT_WECOM_WEBHOOK_URL", "https://example.invalid/webhook")
     monkeypatch.setenv("CI_AGENT_MODEL_PROVIDER", "openai-compatible")
     monkeypatch.setenv("CI_AGENT_API_KEY", "secret")
     monkeypatch.setenv("LANGSMITH_TRACING", "true")
@@ -136,7 +134,6 @@ def test_isolated_subprocess_env_blocks_dangerous_config(monkeypatch):
     assert env["JENKINS_URL"] == ""
     assert env["CI_AGENT_API_KEY"] == ""
     assert env["CI_AGENT_HISTORY_MONGO_URI"] == ""
-    assert env["CI_AGENT_WECOM_WEBHOOK_URL"] == ""
     assert env["LANGSMITH_TRACING"] == "false"
     assert env["LANGSMITH_API_KEY"] == ""
     assert env["LANGSMITH_PROJECT"] == ""
@@ -434,8 +431,8 @@ def test_serve_wecom_bot_passes_ai_parser_to_worker(monkeypatch):
     )
 
     class FakeWorker:
-        def __init__(self, adapter, store, *, confirm_ttl_seconds=300, feedback_code_ttl_days=30, event_ttl_days=7, ai_parser=None, card_action_url=None):
-            captured["ai_parser"] = ai_parser
+        def __init__(self, adapter, store, **kwargs):
+            captured["ai_parser"] = kwargs["ai_parser"]
         def run(self):
             pass
 
@@ -447,6 +444,7 @@ def test_serve_wecom_bot_passes_ai_parser_to_worker(monkeypatch):
     monkeypatch.setenv("CI_AGENT_HISTORY_ENABLED", "true")
     monkeypatch.setenv("CI_AGENT_WECOM_BOT_ENABLED", "true")
     monkeypatch.setenv("CI_AGENT_WECOM_BOT_LLM_ENABLED", "true")
+    monkeypatch.setenv("CI_AGENT_WECOM_NOTIFY_ENABLED", "false")
 
     result = main([
         "serve-wecom-bot",

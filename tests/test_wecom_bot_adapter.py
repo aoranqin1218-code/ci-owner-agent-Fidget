@@ -142,3 +142,36 @@ def test_sdk_adapter_reply_template_card_uses_two_arguments():
         frame,
         card,
     )
+
+
+def test_send_markdown_waits_for_authentication_and_uses_proactive_message():
+    import asyncio
+    adapter = object.__new__(WeComSdkAdapter)
+    adapter._client = MagicMock()
+    adapter._client.send_message = AsyncMock(return_value={"errcode": 0})
+    adapter._authenticated_event = asyncio.Event()
+    adapter._authentication_timeout_seconds = 1
+
+    async def run():
+        task = asyncio.create_task(adapter.send_markdown("chat", "hello"))
+        await asyncio.sleep(0)
+        adapter._client.send_message.assert_not_awaited()
+        adapter._on_authenticated()
+        await task
+
+    asyncio.run(run())
+    adapter._client.send_message.assert_awaited_once_with(
+        "chat", {"msgtype": "markdown", "markdown": {"content": "hello"}}
+    )
+
+
+def test_send_markdown_rejects_nonzero_ack_without_body():
+    import asyncio
+    adapter = object.__new__(WeComSdkAdapter)
+    adapter._client = MagicMock()
+    adapter._client.send_message = AsyncMock(return_value={"errcode": 93000, "errmsg": "bad"})
+    adapter._authenticated_event = asyncio.Event(); adapter._authenticated_event.set()
+    adapter._authentication_timeout_seconds = 1
+    with pytest.raises(RuntimeError, match="errcode=93000") as exc:
+        asyncio.run(adapter.send_markdown("chat", "private markdown"))
+    assert "private markdown" not in str(exc.value)

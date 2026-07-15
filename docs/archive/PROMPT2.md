@@ -1,3 +1,5 @@
+> Archive: historical implementation notes; webhook references below are obsolete.
+
 当前状态：
 - analyze / analyze-local 已能生成 CiResponsibilityNotice。
 - 企业微信 markdown 通知已实现并真实发送成功。

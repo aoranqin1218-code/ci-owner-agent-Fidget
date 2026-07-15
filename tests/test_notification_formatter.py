@@ -474,35 +474,29 @@ def test_env_enabled_notify_skips_success_by_default(monkeypatch):
     assert calls == []
 
 
-def test_notify_dedup_does_not_overwrite_sent(monkeypatch):
+def test_notify_dry_run_does_not_enqueue(monkeypatch):
     store = make_store()
     notice = CiResponsibilityNotice.model_validate(notice_payload([item()]))
-    digest = notification_digest(notice, fallback_userids=load_settings().wecom_fallback_userids)
-    store.save_notification(notice=notice, notice_hash=digest, channel="wecom", status="sent", message="old")
     settings = replace(load_settings(), notification_dedup_enabled=True)
     monkeypatch.setattr("ci_owner_agent.main.get_history_store", lambda settings: store)
 
     result = _notify_notice(notice, settings, dry_run=True, force=False, feedback_base_url=None)
 
-    assert result["status"] == "skipped"
-    assert len(store.notifications.docs) == 1
-    assert store.notifications.docs[0]["status"] == "sent"
+    assert result["status"] == "dry_run"
+    assert store.wecom_notification_outbox.docs == []
 
 
 def test_notify_force_bypasses_dedup(monkeypatch):
     store = make_store()
     notice = CiResponsibilityNotice.model_validate(notice_payload([item()]))
-    digest = notification_digest(notice, fallback_userids=load_settings().wecom_fallback_userids)
-    store.save_notification(notice=notice, notice_hash=digest, channel="wecom", status="sent", message="old")
-    settings = replace(load_settings(), notification_dedup_enabled=True, wecom_webhook_url="https://secret-webhook")
+    settings = replace(load_settings(), notification_dedup_enabled=True, wecom_bot_notify_chat_id="chat")
     monkeypatch.setattr("ci_owner_agent.main.get_history_store", lambda settings: store)
-    monkeypatch.setattr("ci_owner_agent.main.send_wecom_markdown", lambda url, markdown: {"ok": True, "statusCode": 200, "response": "ok", "error": None})
 
     result = _notify_notice(notice, settings, dry_run=False, force=True, feedback_base_url=None)
 
     assert result["ok"] is True
-    assert result.get("status") != "skipped"
-    assert store.notifications.docs[0]["status"] == "sent"
+    assert result["inserted"] is True
+    assert store.wecom_notification_outbox.docs[0]["status"] == "pending"
 
 
 def test_analyze_notify_exception_stays_json(monkeypatch, capsys):
@@ -644,17 +638,15 @@ def test_notify_notice_passes_fallback_from_settings(monkeypatch):
 
     no_owner = item("无高可信责任人", "no_high_confidence_owner", "no_high_confidence_owner", "证据不足。")
     notice = CiResponsibilityNotice.model_validate(notice_payload([no_owner]))
-    settings = replace(load_settings(), wecom_fallback_userids=("fb1", "fb2"), wecom_webhook_url="https://h.example")
+    settings = replace(load_settings(), wecom_fallback_userids=("fb1", "fb2"), wecom_bot_notify_chat_id="chat")
 
-    markdowns = []
-    monkeypatch.setattr("ci_owner_agent.main.get_history_store", lambda s: None)
+    store = make_store()
+    monkeypatch.setattr("ci_owner_agent.main.get_history_store", lambda s: store)
     monkeypatch.setattr("ci_owner_agent.main.build_wecom_notice_mapper", lambda s, store: None)
-    monkeypatch.setattr("ci_owner_agent.main.send_wecom_markdown", lambda url, md: markdowns.append(md) or {"ok": True})
 
     _notify_notice(notice, settings, dry_run=False, force=False, feedback_base_url=None)
 
-    assert len(markdowns) == 1
-    assert "**待确认维护人**：<@fb1>、<@fb2>" in markdowns[0]
+    assert "**待确认维护人**：<@fb1>、<@fb2>" in store.wecom_notification_outbox.docs[0]["payload"]["content"]
 
 
 def test_notify_notice_dry_run_with_fallback(monkeypatch):

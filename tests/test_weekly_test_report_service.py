@@ -61,18 +61,15 @@ def test_service_skips_no_important_and_dry_run_does_not_write():
     assert store.report_notifications.docs == []
 
 
-def test_notification_period_dedup_and_force(monkeypatch):
+def test_notification_period_dedup_and_force():
     store = make_store(); config = WeeklyTestReportConfig.model_validate({"important": {"enabled": False}})
-    service = WeeklyTestReportService(store, config, webhook_url="https://example.invalid")
-    calls = []
-    monkeypatch.setattr("ci_owner_agent.services.weekly_test_report_service.send_wecom_markdown",
-                        lambda url, text: calls.append(text) or {"ok": True, "error": None})
+    service = WeeklyTestReportService(store, config, notification_chat_id="chat")
     report = {"importantItemCount": 1, "normalItemCount": 0, "markdown": "x", "digest": "d"}
     first = service.notify(report, repo="r", jobs=["j"], branches=["dev"], period_start=START, period_end=END)
     second = service.notify(report, repo="r", jobs=["j"], branches=["dev"], period_start=START, period_end=END)
     forced = service.notify(report, repo="r", jobs=["j"], branches=["dev"], period_start=START, period_end=END, force=True)
-    assert first["sent"] and second["reason"] == "already_sent" and forced["sent"]
-    assert len(calls) == 2
+    assert first["status"] == "pending" and second["inserted"] is False and forced["inserted"] is True
+    assert len(store.wecom_notification_outbox.docs) == 2
 
 
 def _save_build(store, *, job: str, number: int, result, timestamp: datetime, branch: str = "dev"):
@@ -115,14 +112,11 @@ def test_weekly_completed_builds_multi_job_and_period_boundaries():
     assert report["failedBuildCount"] == 2
 
 
-def test_weekly_notification_dedup_is_scope_order_independent(monkeypatch):
+def test_weekly_notification_dedup_is_scope_order_independent():
     store = make_store()
-    service = WeeklyTestReportService(store, WeeklyTestReportConfig.model_validate({"important": {"enabled": False}}), webhook_url="https://example.invalid")
-    calls = []
-    monkeypatch.setattr("ci_owner_agent.services.weekly_test_report_service.send_wecom_markdown", lambda *_: calls.append(1) or {"ok": True})
+    service = WeeklyTestReportService(store, WeeklyTestReportConfig.model_validate({"important": {"enabled": False}}), notification_chat_id="chat")
     report = {"importantItemCount": 1, "normalItemCount": 0, "markdown": "x", "digest": "d"}
     first = service.notify(report, repo="r", jobs=["job-b", "job-a", "job-a"], branches=["release", "dev", "dev"], period_start=START, period_end=END)
     second = service.notify(report, repo="r", jobs=["job-a", "job-b"], branches=["dev", "release"], period_start=START, period_end=END)
-    assert first["sent"] is True
-    assert second["reason"] == "already_sent"
-    assert calls == [1]
+    assert first["inserted"] is True
+    assert second["inserted"] is False

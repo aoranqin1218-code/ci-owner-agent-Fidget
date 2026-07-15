@@ -21,6 +21,8 @@ class _MockAdapter:
         self.card_updates = []
         self.started = False
         self.stopped = False
+        self.send_markdown_calls = []
+        self.send_markdown_error = None
 
     def set_text_handler(self, handler):
         self.text_handler = handler
@@ -36,6 +38,11 @@ class _MockAdapter:
 
     async def stop(self):
         self.stopped = True
+
+    async def send_markdown(self, chat_id, markdown):
+        if self.send_markdown_error:
+            raise self.send_markdown_error
+        self.send_markdown_calls.append((chat_id, markdown))
 
     async def reply_text(self, frame, text):
         self.text_replies.append(text)
@@ -63,6 +70,24 @@ def test_worker_creates_service_with_ai_parser():
     parser.parse = MagicMock(return_value=MagicMock(intent_type="unknown"))
     worker = WeComBotWorker(adapter, store, ai_parser=parser)
     assert worker.service.ai_parser is parser
+
+
+def test_deliver_one_notification_sends_and_marks_sent():
+    import asyncio
+    adapter = _MockAdapter(); store = make_store(); worker = WeComBotWorker(adapter, store, notification_chat_id="chat")
+    worker.notification_outbox.enqueue_markdown(notification_type="ci_notice", target_chat_id="chat", markdown="hello", dedup_key="one")
+    assert asyncio.run(worker.deliver_one_notification()) is True
+    assert adapter.send_markdown_calls == [("chat", "hello")]
+    assert store.wecom_notification_outbox.docs[0]["status"] == "sent"
+
+
+def test_deliver_one_notification_requeues_failure():
+    import asyncio
+    adapter = _MockAdapter(); adapter.send_markdown_error = RuntimeError("offline")
+    store = make_store(); worker = WeComBotWorker(adapter, store, notification_chat_id="chat")
+    worker.notification_outbox.enqueue_markdown(notification_type="ci_notice", target_chat_id="chat", markdown="hello", dedup_key="one")
+    assert asyncio.run(worker.deliver_one_notification()) is True
+    assert store.wecom_notification_outbox.docs[0]["status"] == "pending"
 
 
 

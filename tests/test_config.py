@@ -59,6 +59,9 @@ def test_wecom_fallback_userids_are_parsed_from_env(monkeypatch):
 def test_wecom_bot_defaults_disabled(monkeypatch):
     for name in ("CI_AGENT_WECOM_BOT_ENABLED", "CI_AGENT_WECOM_BOT_ID", "CI_AGENT_WECOM_BOT_SECRET"):
         monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("CI_AGENT_WECOM_BOT_ENABLED", "false")
+    monkeypatch.setenv("CI_AGENT_WECOM_BOT_ID", "")
+    monkeypatch.setenv("CI_AGENT_WECOM_BOT_SECRET", "")
     settings = load_settings()
     assert settings.wecom_bot_enabled is False
     assert settings.wecom_bot_id is None

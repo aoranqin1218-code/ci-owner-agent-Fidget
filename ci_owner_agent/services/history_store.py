@@ -71,6 +71,7 @@ class MongoHistoryStore:
         self.feedback_contexts = self.db["ci_feedback_contexts"]
         self.wecom_pending_feedback = self.db["ci_wecom_pending_feedback"]
         self.wecom_bot_events = self.db["ci_wecom_bot_events"]
+        self.wecom_notification_outbox = self.db["ci_wecom_notification_outbox"]
         self.ensure_indexes()
 
     @classmethod
@@ -125,6 +126,9 @@ class MongoHistoryStore:
         self.wecom_bot_events.create_index([("eventKey", 1)], unique=True)
         self.wecom_bot_events.create_index([("status", 1), ("leaseUntil", 1)])
         _create_index(self.wecom_bot_events, [("expiresAt", 1)], expireAfterSeconds=0)
+        _create_index(self.wecom_notification_outbox, [("deliveryKey", 1)], unique=True)
+        self.wecom_notification_outbox.create_index([("status", 1), ("nextAttemptAt", 1), ("createdAt", 1)])
+        self.wecom_notification_outbox.create_index([("status", 1), ("leaseUntil", 1)])
 
     def upsert_notice_snapshot(self, notice: CiResponsibilityNotice, *, source: str | None = None) -> dict[str, Any]:
         """Persist the minimum notice state required for feedback without analysis side effects."""
