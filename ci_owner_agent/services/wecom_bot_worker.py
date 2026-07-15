@@ -91,17 +91,6 @@ class WeComBotWorker:
         logger = logging.getLogger(__name__)
 
         try:
-            raw_body = frame.get("body")
-            body = raw_body if isinstance(raw_body, Mapping) else {}
-
-            raw_sender = body.get("from") or body.get("sender")
-            sender = raw_sender if isinstance(raw_sender, Mapping) else {}
-
-            logger.info(
-                "WeCom sender fields: %r",
-                dict(sender),
-            )
-
             message = normalize_wecom_text_frame(frame)
 
             claim_status, event = await asyncio.to_thread(

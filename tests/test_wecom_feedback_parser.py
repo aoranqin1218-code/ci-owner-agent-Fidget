@@ -36,19 +36,37 @@ def test_parses_feedback_actions(text, action):
     assert intent.feedback_code == "CI-7K3M9Q"
 
 
-def test_correct_owner_uses_structured_mention():
-    intent = parse_feedback_intent(message("<@bot> CI-7K3M9Q 1 责任人改为 @李四", mentions=(("bot", None), ("lisi", "李四"))))
+def test_correct_owner_parses_display_name_from_action_text():
+    intent = parse_feedback_intent(message("<@bot> CI-7K3M9Q 1 责任人改为 @AoranQin-秦奥然"))
     assert intent.action == "correct_owner"
-    assert intent.target_userid == "lisi"
-    assert intent.target_display_name == "李四"
+    assert intent.target_userid == "aoranqin"
+    assert intent.target_display_name == "AoranQin-秦奥然"
 
 
-def test_correct_owner_rejects_multiple_targets():
-    intent = parse_feedback_intent(
-        message("CI-7K3M9Q 1 改为 @李四", mentions=(("lisi", "李四"), ("wang", "王五")))
-    )
+def test_correct_owner_parses_display_name_no_structured_mentions():
+    intent = parse_feedback_intent(message("<@bot> CI-7K3M9Q 1 责任人改为 @AoranQin-秦奥然", mentions=()))
+    assert intent.action == "correct_owner"
+    assert intent.target_userid == "aoranqin"
+    assert intent.target_display_name == "AoranQin-秦奥然"
+
+
+def test_correct_owner_parses_gaiwei_variant():
+    intent = parse_feedback_intent(message("CI-7K3M9Q 1 改为 @JAMES-李明"))
+    assert intent.action == "correct_owner"
+    assert intent.target_userid == "james"
+    assert intent.target_display_name == "JAMES-李明"
+
+
+def test_correct_owner_parses_yinggai_shi_variant():
+    intent = parse_feedback_intent(message("CI-7K3M9Q 1 应该是 @AoranQin-秦奥然"))
+    assert intent.action == "correct_owner"
+    assert intent.target_userid == "aoranqin"
+
+
+def test_correct_owner_rejects_invalid_format_no_prefix():
+    intent = parse_feedback_intent(message("CI-7K3M9Q 1 改为 @李四"))
     assert intent.intent_type == "unknown"
-    assert "只 @一个" in (intent.error or "")
+    assert "英文字母userid" in (intent.error or "")
 
 
 @pytest.mark.parametrize(
@@ -57,6 +75,35 @@ def test_correct_owner_rejects_multiple_targets():
 )
 def test_parses_non_create_commands(text, intent_type):
     assert parse_feedback_intent(message(text)).intent_type == intent_type
+
+
+@pytest.mark.parametrize(
+    ("action_text", "expect_error_keyword"),
+    [
+        ("责任人改为 @aoran123-秦奥然", "英文字母userid"),
+        ("责任人改为 @aoran_qin-秦奥然", "英文字母userid"),
+        ("责任人改为 @aoran.qin-秦奥然", "英文字母userid"),
+        ("责任人改为 @aoran-qin-秦奥然", "英文字母userid"),
+        ("责任人改为 @秦奥然", "英文字母userid"),
+        ("责任人改为 @AoranQin-", "英文字母userid"),
+        ("AoranQin-秦奥然", "未识别"),
+        ("责任人改为 @AoranQin-秦奥然 @James-李明", "英文字母userid"),
+    ],
+)
+def test_correct_owner_rejects_invalid_display_name_format(action_text, expect_error_keyword):
+    intent = parse_feedback_intent(message(f"CI-7K3M9Q 1 {action_text}"))
+    assert intent.intent_type == "unknown"
+    assert expect_error_keyword in (intent.error or "")
+    assert intent.action is None
+    assert intent.target_userid is None
+
+
+def test_correct_owner_ignores_extra_mentions():
+    intent = parse_feedback_intent(
+        message("CI-7K3M9Q 1 责任人改为 @AoranQin-秦奥然", mentions=(("wrong_user", "Wrong Name"),))
+    )
+    assert intent.action == "correct_owner"
+    assert intent.target_userid == "aoranqin"
 
 
 def test_unknown_does_not_become_feedback():

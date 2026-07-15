@@ -7,7 +7,6 @@ from collections.abc import Mapping
 from typing import Any
 
 from ci_owner_agent.services.wecom_bot_models import WeComInboundMessage, WeComMentionedUser
-import logging
 
 _MENTION_RE = re.compile(r"<@([^>]+)>")
 
@@ -16,8 +15,6 @@ def normalize_wecom_text_frame(
     frame: Mapping[str, Any],
 ) -> WeComInboundMessage:
     """Normalize the documented SDK frame."""
-
-    logger = logging.getLogger(__name__)
 
     body = _mapping(frame.get("body"))
     headers = _mapping(frame.get("headers"))
@@ -32,33 +29,7 @@ def normalize_wecom_text_frame(
         or ""
     ).strip()
 
-    logger.info("WeCom body keys: %r", list(body.keys()))
-    logger.info(
-        "WeCom text payload: %s",
-        json.dumps(
-            dict(text),
-            ensure_ascii=False,
-            default=str,
-        ),
-    )
-    logger.info(
-        "WeCom mention candidates: %s",
-        json.dumps(
-            {
-                "text.mentioned_list": text.get("mentioned_list"),
-                "text.mentioned_users": text.get("mentioned_users"),
-                "text.mention_list": text.get("mention_list"),
-                "text.mentions": text.get("mentions"),
-                "body.mentioned_list": body.get("mentioned_list"),
-                "body.mentioned_users": body.get("mentioned_users"),
-                "body.mention_list": body.get("mention_list"),
-                "body.mentions": body.get("mentions"),
-                "content": content,
-            },
-            ensure_ascii=False,
-            default=str,
-        ),
-    )
+
 
     userid = str(
         sender.get("userid")
@@ -77,17 +48,7 @@ def normalize_wecom_text_frame(
 
     mentioned = _mentioned_users(text, body, content)
 
-    logger.info(
-        "Normalized WeCom mentions: bot_userid=%r, mentions=%r",
-        bot_userid,
-        [
-            {
-                "userid": item.userid,
-                "display_name": item.display_name,
-            }
-            for item in mentioned
-        ],
-    )
+
 
     request_id = _string(
         headers.get("req_id")

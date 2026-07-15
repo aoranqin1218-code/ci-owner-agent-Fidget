@@ -10,6 +10,33 @@ _LIST_A = re.compile(rf"^查看\s*({_CODE})$", re.I)
 _LIST_B = re.compile(rf"^({_CODE})\s*查看反馈$", re.I)
 _CREATE = re.compile(rf"^({_CODE})\s+(\d+)\s+(.+)$", re.I)
 
+_CORRECT_OWNER_RE = re.compile(
+    r"^(责任人改为|改为|应该是)\s+@([A-Za-z]+)-([^\s-]+)$",
+    re.I,
+)
+
+
+def derive_wecom_userid(display_name: str) -> str | None:
+    """Derive WeCom userid from display name format: EnglishPrefix-ChineseName."""
+    if not display_name:
+        return None
+    match = re.fullmatch(r"([A-Za-z]+)-(.+)", display_name)
+    if match is None:
+        return None
+    return match.group(1).lower()
+
+
+def parse_correct_owner_target(action_text: str) -> tuple[str, str] | None:
+    """Parse target userid and display_name from correct_owner action text."""
+    match = _CORRECT_OWNER_RE.fullmatch(action_text.strip())
+    if match is None:
+        return None
+    prefix = match.group(2)
+    name = match.group(3)
+    target_userid = prefix.lower()
+    target_display_name = f"{prefix}-{name}"
+    return target_userid, target_display_name
+
 
 def parse_feedback_intent(message: WeComInboundMessage) -> ParsedFeedbackIntent:
     text = _clean_text(message.content, message)
@@ -35,14 +62,16 @@ def parse_feedback_intent(message: WeComInboundMessage) -> ParsedFeedbackIntent:
     target_userid = None
     target_name = None
     if action == "correct_owner":
-        candidates = [item for item in message.mentioned_users if item.userid != message.bot_userid]
-        if len(candidates) != 1:
+        result = parse_correct_owner_target(action_text)
+        if result is None:
             return ParsedFeedbackIntent(
                 intent_type="unknown",
-                error="修正责任人时请只 @一个新责任人。",
+                error=(
+                    "请使用“责任人改为 @英文字母userid-姓名”的格式，"
+                    "例如：责任人改为 @AoranQin-秦奥然。"
+                ),
             )
-        target_userid = candidates[0].userid
-        target_name = candidates[0].display_name or _display_name(action_text) or target_userid
+        target_userid, target_name = result
     return ParsedFeedbackIntent(
         intent_type="create_feedback",
         action=action,
@@ -69,12 +98,6 @@ def _action(text: str) -> str | None:
         return "mark_flaky"
     if lowered in {"无法定责", "无责任人", "无法确定责任人"}:
         return "mark_no_owner"
-    if re.match(r"^(责任人改为|改为|应该是)\s*(@\S+|<@[^>]+>)$", text, re.I):
+    if re.match(r"^(责任人改为|改为|应该是)\s+@", text, re.I):
         return "correct_owner"
     return None
-
-
-def _display_name(text: str) -> str | None:
-    match = re.search(r"@([^\s>]+)$", text)
-    return match.group(1) if match else None
-

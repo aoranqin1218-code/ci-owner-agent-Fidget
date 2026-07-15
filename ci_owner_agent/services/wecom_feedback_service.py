@@ -13,7 +13,7 @@ from ci_owner_agent.services.wecom_user_directory import WeComUserDirectory
 
 HELP_TEXT = """群内反馈命令：
 CI-XXXXXX 1 判断正确
-CI-XXXXXX 1 责任人改为 @某人
+CI-XXXXXX 1 责任人改为 @AoranQin-秦奥然
 CI-XXXXXX 1 标记偶发
 CI-XXXXXX 1 无法定责
 查看 CI-XXXXXX

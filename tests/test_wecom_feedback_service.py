@@ -180,7 +180,7 @@ def test_corrupted_pending_intent_marks_pending_failed():
 def test_user_directory_exception_marks_pending_failed(monkeypatch):
     store, _, context = _setup()
     service = WeComFeedbackService(store)
-    service.handle(_message("msg:create", f"{context['code']} 1 责任人改为 @李四", mentions=(("lisi", "李四"),)))
+    service.handle(_message("msg:create", f"{context['code']} 1 责任人改为 @Lisi-李四", mentions=(("lisi", "李四"),)))
     code = store.wecom_pending_feedback.docs[0]["confirmationCode"]
     monkeypatch.setattr(service.users, "search_users", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("directory failed")))
     assert "反馈写入失败" in service.handle(_message("msg:confirm", f"确认 {code}"))
@@ -207,12 +207,12 @@ def test_correct_owner_keeps_real_userid_without_directory_entry():
     store, _, context = _setup()
     service = WeComFeedbackService(store)
     service.handle(
-        _message("msg:create", f"{context['code']} 1 责任人改为 @李四", mentions=(("lisi.userid", "李四"),))
+        _message("msg:create", f"{context['code']} 1 责任人改为 @Lisi-李四", mentions=(("lisi.userid", "李四"),))
     )
     code = store.wecom_pending_feedback.docs[0]["confirmationCode"]
     service.handle(_message("msg:confirm", f"确认 {code}"))
-    assert store.feedback.docs[0]["correctedOwnerWeComUserId"] == "lisi.userid"
-    assert store.feedback.docs[0]["correctedOwner"]["name"] == "李四"
+    assert store.feedback.docs[0]["correctedOwnerWeComUserId"] == "lisi"  # derived from @Lisi-李四 display name
+    assert store.feedback.docs[0]["correctedOwner"]["name"] == "Lisi-李四"  # full display name from @Lisi-李四
 
 
 def test_feedback_write_failure_marks_pending_failed(monkeypatch):
