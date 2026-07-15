@@ -816,4 +816,40 @@ def test_status_card_action_url_has_safe_fallback():
     confirm_reply = service.handle_template_card_event(event)
     card = confirm_reply.template_card
     assert card.get("card_action", {}).get("type") == 1
+
+
+def test_confirmed_ai_feedback_persists_note():
+    """Note from AI parser must be persisted in the final operation."""
+    store, _, context = _setup()
+    parser = _RecordingAiParser()
+    parser.return_value = ParsedFeedbackIntent(
+        intent_type="create_feedback",
+        action="mark_flaky",
+        feedback_code=context["code"],
+        item_index=1,
+        note="\u4ec5\u5728 Windows \u73af\u5883\u51fa\u73b0",
+    )
+    service = WeComFeedbackService(store, ai_parser=parser)
+    reply = service.handle_text(_message("msg:note_test", context["code"] + " \u968f\u4fbf\u8bf4\u8bf4"))
+    task_id = reply.template_card["task_id"]
+
+    event = WeComTemplateCardEvent(
+        event_key="wecom-card:note_test",
+        message_id="note_test",
+        sender_userid="wangwu",
+        chat_id="chat",
+        task_id=task_id,
+        button_key="confirm",
+    )
+    confirm_reply = service.handle_template_card_event(event)
+    assert confirm_reply.reply_type == "template_card"
+    card = confirm_reply.template_card
+    title = card.get("main_title", {}).get("title", "")
+    assert "\u63d0\u4ea4" in title
+
+    # Check operation persisted note
+    assert len(store.feedback.docs) >= 1
+    op = store.feedback.docs[0]
+    assert op.get("note") == "\u4ec5\u5728 Windows \u73af\u5883\u51fa\u73b0"
+    assert op.get("isCommitted") is True
     assert card.get("card_action", {}).get("url") == "https://work.weixin.qq.com/"

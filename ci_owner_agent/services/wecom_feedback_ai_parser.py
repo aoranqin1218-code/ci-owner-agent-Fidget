@@ -283,6 +283,8 @@ def _convert_create_feedback(decision: WeComFeedbackAiDecision, code: str) -> Pa
                 error="\u8be5\u64cd\u4f5c\u4e0d\u9700\u8981\u76ee\u6807\u8d23\u4efb\u4eba\u3002",
             )
 
+    note = _normalize_ai_note(decision.note)
+
     return ParsedFeedbackIntent(
         intent_type="create_feedback",
         action=action,
@@ -290,7 +292,48 @@ def _convert_create_feedback(decision: WeComFeedbackAiDecision, code: str) -> Pa
         item_index=index,
         target_userid=target_userid,
         target_display_name=target_display_name,
+        note=note,
     )
+
+
+_MAX_AI_NOTE_CHARS = 500
+_DEFAULT_AI_UNKNOWN_ERROR = (
+    "\u65e0\u6cd5\u8bc6\u522b\u60a8\u7684\u610f\u56fe\uff0c\u8bf7\u660e\u786e\u63d0\u4f9b\u53cd\u9988\u7801\u3001"
+    "\u8d23\u4efb\u9879\u5e8f\u53f7\u548c\u64cd\u4f5c\uff0c\u4f8b\u5982\uff1a"
+    "\u201cCI-XXXXXX \u7b2c1\u9879\u5224\u65ad\u6b63\u786e\u201d\u3002"
+)
+
+
+def _normalize_ai_note(value: str | None) -> str | None:
+    if value is None:
+        return None
+    text = " ".join(str(value).split()).strip()
+    if not text:
+        return None
+    return text[:_MAX_AI_NOTE_CHARS]
+
+
+def _sanitize_ai_error(value: str | None) -> str:
+    text = " ".join(str(value or "").split()).strip()
+    if not text:
+        return _DEFAULT_AI_UNKNOWN_ERROR
+    # Remove @ to prevent mentions
+    text = text.replace("@", "")
+    # Remove markdown links: [text](url) -> text
+    text = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", text)
+    # Remove bare URLs
+    text = re.sub(r"https?://\S+", "", text, flags=re.IGNORECASE)
+    # Remove markdown code markers
+    text = text.replace("```", "")
+    text = text.replace("`", "")
+    # Collapse whitespace
+    text = " ".join(text.split()).strip()
+    if not text:
+        return _DEFAULT_AI_UNKNOWN_ERROR
+    return text[:_MAX_AI_ERROR_CHARS]
+
+
+_MAX_AI_ERROR_CHARS = 200
 
 def _safe_validation_summary(exc: Exception) -> str:
     errors = getattr(exc, "errors", None)
@@ -311,5 +354,5 @@ def _safe_validation_summary(exc: Exception) -> str:
 def _natural_language_failure() -> ParsedFeedbackIntent:
     return ParsedFeedbackIntent(
         intent_type="unknown",
-        error='\u81ea\u7136\u8bed\u8a00\u89e3\u6790\u7ed3\u679c\u4e0d\u5b8c\u6574\uff0c\u8bf7\u660e\u786e\u63d0\u4f9b\u53cd\u9988\u7801\u3001\u8d23\u4efb\u9879\u5e8f\u53f7\u548c\u64cd\u4f5c\uff0c\u4f8b\u5982\uff1a"CI-PQ6RQ6 \u7b2c1\u9879\u5224\u65ad\u6b63\u786e"\u3002',
+        error='\u81ea\u7136\u8bed\u8a00\u89e3\u6790\u7ed3\u679c\u4e0d\u5b8c\u6574\uff0c\u8bf7\u660e\u786e\u63d0\u4f9b\u53cd\u9988\u7801\u3001\u8d23\u4efb\u9879\u5e8f\u53f7\u548c\u64cd\u4f5c\uff0c\u4f8b\u5982\uff1a"CI-XXXXXX \u7b2c1\u9879\u5224\u65ad\u6b63\u786e"\u3002',
     )
