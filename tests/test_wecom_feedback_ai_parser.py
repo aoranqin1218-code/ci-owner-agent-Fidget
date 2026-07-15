@@ -4,13 +4,18 @@ import json
 import pytest
 from pydantic import ValidationError
 
-from ci_owner_agent.services.wecom_bot_models import WeComInboundMessage, WeComMentionedUser, _unknown_decision
+from ci_owner_agent.services.wecom_bot_models import WeComInboundMessage
 from ci_owner_agent.services.wecom_feedback_ai_parser import (
     FakeWeComFeedbackAiParser,
     _validate_decision,
     _convert_decision,
+    _sanitize_ai_error,
     WeComFeedbackAiDecision,
+    WeComFeedbackAiParser,
 )
+import logging
+from langchain_core.messages import AIMessage
+from ci_owner_agent.config import load_settings
 
 
 def _message(content: str) -> WeComInboundMessage:
@@ -249,7 +254,6 @@ def test_convert_item_index_zero():
             item_index=0,
         )
 
-from pydantic import ValidationError
 
 
 def test_ai_decision_accepts_integer_item_index():
@@ -339,8 +343,6 @@ class FakeBaseModel:
 
 
 def _make_structured_parser(monkeypatch, results):
-    from ci_owner_agent.config import load_settings
-    from ci_owner_agent.services.wecom_feedback_ai_parser import WeComFeedbackAiParser
     sm = FakeStructuredModel(results)
     bm = FakeBaseModel(sm)
     monkeypatch.setattr(
@@ -356,13 +358,35 @@ def _make_structured_parser(monkeypatch, results):
     return parser, sm, bm
 
 
-def _tool_call_result(parsed, tool_call_count=1, parsing_error=None, invalid_tool_call_count=0, tool_name="WeComFeedbackAiDecision"):
-    from langchain_core.messages import AIMessage
+def _tool_call_result(parsed, tool_call_count=1, parsing_error=None,
+                invalid_tool_call_count=0,
+                tool_name="WeComFeedbackAiDecision",
+                tool_args=None):
+    if tool_args is None:
+        if isinstance(parsed, WeComFeedbackAiDecision):
+            effective_args = parsed.model_dump()
+        else:
+            effective_args = {}
+    else:
+        effective_args = dict(tool_args)
     tool_calls = []
-    for i in range(tool_call_count):
-        tool_calls.append({"name": tool_name, "args": {}, "id": f"call-{i}", "type": "tool_call"})
-    invalid_tool_calls = [{"name": "bad"}] * invalid_tool_call_count
-    raw = AIMessage(content="", tool_calls=tool_calls, invalid_tool_calls=invalid_tool_calls)
+    for idx in range(tool_call_count):
+        tool_calls.append({
+            "name": tool_name,
+            "args": dict(effective_args),
+            "id": f"call-{idx}",
+            "type": "tool_call",
+        })
+    invalid_tool_calls = [
+        {"name": "bad", "args": "{}", "id": f"bad-{idx}",
+         "error": "invalid arguments", "type": "invalid_tool_call"}
+        for idx in range(invalid_tool_call_count)
+    ]
+    raw = AIMessage(
+        content="",
+        tool_calls=tool_calls,
+        invalid_tool_calls=invalid_tool_calls or [],
+    )
     return {"raw": raw, "parsed": parsed, "parsing_error": parsing_error}
 
 
@@ -379,14 +403,31 @@ def test_parser_accepts_single_valid_tool_call(monkeypatch):
 
 
 def test_parser_retries_once_after_validation_error(monkeypatch):
-    decision = _make_decision(intent_type="create_feedback", action="confirm_owner", feedback_code="CI-7K3M9Q", item_index=1)
-    first = _tool_call_result(parsed=None, parsing_error=ValueError("validation failed"))
+    incomplete_args = _decision_data(
+        intent_type="create_feedback",
+        action=None,
+        feedback_code="CI-7K3M9Q",
+        item_index=None,
+    )
+    try:
+        WeComFeedbackAiDecision.model_validate(incomplete_args)
+        validation_error = None
+    except ValidationError as exc:
+        validation_error = exc
+    decision = _make_decision(
+        intent_type="create_feedback", action="confirm_owner",
+        feedback_code="CI-7K3M9Q", item_index=1,
+    )
+    first = _tool_call_result(
+        parsed=None,
+        parsing_error=validation_error,
+        tool_args=incomplete_args,
+    )
     second = _tool_call_result(parsed=decision)
     parser, sm, bm = _make_structured_parser(monkeypatch, [first, second])
     intent = parser.parse(_message("validate then ok"))
     assert intent.intent_type == "create_feedback"
     assert sm.invoke_count == 2
-
 
 def test_parser_retries_once_for_duplicate_tool_calls(monkeypatch):
     decision = _make_decision(intent_type="create_feedback", action="confirm_owner", feedback_code="CI-7K3M9Q", item_index=1)
@@ -457,28 +498,35 @@ def test_parser_returns_actionable_error_after_two_failures(monkeypatch):
 
 
 def test_structured_failure_log_does_not_expose_tool_args(monkeypatch, caplog):
-    import logging
     caplog.set_level(logging.WARNING)
-    # Use a valid decision with sensitive fields
-    decision = _make_decision(
-        intent_type="create_feedback", action="confirm_owner",
-        feedback_code="CI-S3CR3T", item_index=1, note="private-note",
+    sensitive_args = _decision_data(
+        intent_type="create_feedback",
+        action="correct_owner",
+        feedback_code="CI-S3CR3T",
+        item_index=1,
+        target_display_name="SecretUser-秘密",
+        note="private-note",
     )
-    first = _tool_call_result(parsed=decision, tool_call_count=2)
-    second = _tool_call_result(parsed=decision, tool_call_count=2)
+    first = _tool_call_result(
+        parsed=None, tool_call_count=2,
+        tool_args=sensitive_args,
+    )
+    second = _tool_call_result(
+        parsed=None, tool_call_count=2,
+        tool_args=sensitive_args,
+    )
     parser, sm, bm = _make_structured_parser(monkeypatch, [first, second])
     parser.parse(_message("log security"))
     log_text = "".join(caplog.messages)
-    assert "tool call count" in log_text or "invalid tool call" in log_text
+    assert "invalid tool call count" in log_text
     assert "CI-S3CR3T" not in log_text
     assert "SecretUser" not in log_text
     assert "private-note" not in log_text
-
-
-# ---- Unknown error sanitization tests ----
+    assert "correct_owner" not in log_text
+    assert "call-0" not in log_text
+    assert "call-1" not in log_text
 
 def test_unknown_error_is_sanitized():
-    from ci_owner_agent.services.wecom_feedback_ai_parser import _sanitize_ai_error
     result = _sanitize_ai_error(
         "@\u6240\u6709\u4eba \u8bf7\u8bbf\u95ee https://evil.invalid/a [click](https://evil.invalid/b)"
     )
@@ -490,7 +538,6 @@ def test_unknown_error_is_sanitized():
 
 
 def test_empty_unknown_error_uses_local_fallback():
-    from ci_owner_agent.services.wecom_feedback_ai_parser import _sanitize_ai_error
     result = _sanitize_ai_error(None)
     assert "CI-XXXXXX" in result
     result = _sanitize_ai_error("   ")
@@ -498,22 +545,28 @@ def test_empty_unknown_error_uses_local_fallback():
 
 
 def test_unknown_error_is_length_limited():
-    from ci_owner_agent.services.wecom_feedback_ai_parser import _sanitize_ai_error
     result = _sanitize_ai_error("x" * 500)
     assert len(result) <= 200
 
 
 def test_unknown_error_cannot_change_intent():
-    from ci_owner_agent.services.wecom_feedback_ai_parser import _convert_decision
-    decision = _make_decision(intent_type="unknown", error="\u786e\u8ba4\u63d0\u4ea4 correct_owner operationId")
+    decision = _make_decision(
+        intent_type="unknown",
+        error=(
+            "@\u6240\u6709\u4eba \u786e\u8ba4\u63d0\u4ea4 "
+            "correct_owner operationId "
+            "https://evil.invalid"
+        ),
+    )
     intent = _convert_decision(decision)
     assert intent.intent_type == "unknown"
-
-
-# ---- Note preservation tests ----
+    assert intent.action is None
+    assert intent.feedback_code is None
+    assert intent.item_index is None
+    assert "@" not in (intent.error or "")
+    assert "http" not in (intent.error or "")
 
 def test_convert_create_feedback_preserves_note():
-    from ci_owner_agent.services.wecom_feedback_ai_parser import _convert_decision
     decision = _make_decision(
         intent_type="create_feedback", action="mark_flaky",
         feedback_code="CI-7K3M9Q", item_index=1,
@@ -526,7 +579,6 @@ def test_convert_create_feedback_preserves_note():
 
 
 def test_convert_create_feedback_limits_note_length():
-    from ci_owner_agent.services.wecom_feedback_ai_parser import _convert_decision
     long_note = "a" * 1000
     decision = _make_decision(
         intent_type="create_feedback", action="mark_flaky",

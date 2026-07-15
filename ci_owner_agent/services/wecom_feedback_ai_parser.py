@@ -218,7 +218,7 @@ def _convert_decision(decision: WeComFeedbackAiDecision) -> ParsedFeedbackIntent
     if decision.intent_type == "unknown":
         return ParsedFeedbackIntent(
             intent_type="unknown",
-            error=decision.error or "\u65e0\u6cd5\u8bc6\u522b\u60a8\u7684\u610f\u56fe\uff0c\u8bf7\u53d1\u9001\u201c\u5e2e\u52a9\u201d\u67e5\u770b\u7528\u6cd5\u3002",
+            error=_sanitize_ai_error(decision.error) or "\u65e0\u6cd5\u8bc6\u522b\u60a8\u7684\u610f\u56fe\uff0c\u8bf7\u53d1\u9001\u201c\u5e2e\u52a9\u201d\u67e5\u770b\u7528\u6cd5\u3002",
         )
 
     code = (decision.feedback_code or "").strip().upper()
