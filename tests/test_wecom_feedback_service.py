@@ -650,3 +650,92 @@ def test_card_confirmation_uses_current_signature_when_failure_id_is_same():
     op = store.feedback.docs[0]
     assert op["failureSignature"] == "new-signature-v2"
     assert op["isCommitted"] is True
+
+
+
+def test_initial_confirmation_card_has_two_buttons():
+    """Initial confirmation card must be button_interaction with 2 buttons."""
+    store, _, context = _setup()
+    service = WeComFeedbackService(store)
+    reply = service.handle_text(_message("msg:init_buttons", context["code"] + " 1 \u5224\u65ad\u6b63\u786e"))
+    assert reply.reply_type == "template_card"
+    card = reply.template_card
+    assert card["card_type"] == "button_interaction"
+    assert "button_list" in card
+    assert len(card["button_list"]) == 2
+    keys = {b["key"] for b in card["button_list"]}
+    assert keys == {"confirm", "cancel"}
+
+
+def test_confirm_result_card_is_text_notice():
+    """Confirm result card must be text_notice without button_list."""
+    store, _, context = _setup()
+    service = WeComFeedbackService(store)
+    reply = service.handle_text(_message("msg:confirm_result", context["code"] + " 1 \u5224\u65ad\u6b63\u786e"))
+    task_id = reply.template_card["task_id"]
+
+    event = WeComTemplateCardEvent(
+        event_key="wecom-card:confirm_result",
+        message_id="confirm_result",
+        sender_userid="wangwu",
+        chat_id="chat",
+        task_id=task_id,
+        button_key="confirm",
+    )
+    confirm_reply = service.handle_template_card_event(event)
+    assert confirm_reply.reply_type == "template_card"
+    card = confirm_reply.template_card
+    assert card["card_type"] == "text_notice"
+    assert "button_list" not in card
+    assert card["task_id"] == task_id
+    title = card.get("main_title", {}).get("title", "")
+    assert "\u63d0\u4ea4" in title
+
+
+def test_cancel_result_card_is_text_notice():
+    """Cancel result card must be text_notice without button_list."""
+    store, _, context = _setup()
+    service = WeComFeedbackService(store)
+    reply = service.handle_text(_message("msg:cancel_result", context["code"] + " 1 \u5224\u65ad\u6b63\u786e"))
+    task_id = reply.template_card["task_id"]
+
+    event = WeComTemplateCardEvent(
+        event_key="wecom-card:cancel_result",
+        message_id="cancel_result",
+        sender_userid="wangwu",
+        chat_id="chat",
+        task_id=task_id,
+        button_key="cancel",
+    )
+    cancel_reply = service.handle_template_card_event(event)
+    assert cancel_reply.reply_type == "template_card"
+    card = cancel_reply.template_card
+    assert card["card_type"] == "text_notice"
+    assert "button_list" not in card
+    assert card["task_id"] == task_id
+    title = card.get("main_title", {}).get("title", "")
+    assert "\u53d6\u6d88" in title
+
+
+def test_forbidden_result_card_is_text_notice():
+    """Forbidden card must be text_notice with userids."""
+    store, _, context = _setup()
+    service = WeComFeedbackService(store)
+    reply = service.handle_text(_message("msg:forbidden_result", context["code"] + " 1 \u5224\u65ad\u6b63\u786e"))
+    task_id = reply.template_card["task_id"]
+
+    event = WeComTemplateCardEvent(
+        event_key="wecom-card:forbidden_result",
+        message_id="forbidden_result",
+        sender_userid="lisi",
+        chat_id="chat",
+        task_id=task_id,
+        button_key="confirm",
+    )
+    forbidden_reply = service.handle_template_card_event(event)
+    assert forbidden_reply.reply_type == "template_card"
+    card = forbidden_reply.template_card
+    assert card["card_type"] == "text_notice"
+    assert "button_list" not in card
+    assert card.get("userids") == ["lisi"]
+    assert card["task_id"] == task_id

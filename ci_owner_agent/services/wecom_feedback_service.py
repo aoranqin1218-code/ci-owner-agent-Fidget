@@ -676,7 +676,7 @@ def _build_updated_card(
     *, title: str, desc: str, task_id: str, status: str, userids: list[str] | None = None
 ) -> dict[str, Any]:
     card: dict[str, Any] = {
-        "card_type": "button_interaction",
+        "card_type": "text_notice",
         "main_title": {"title": title, "desc": desc},
         "task_id": task_id,
     }

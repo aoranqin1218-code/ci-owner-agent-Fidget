@@ -483,3 +483,80 @@ def test_worker_handles_nested_cancel_template_card_event():
     # No operation should be created
     ops = list(store.feedback.find({}))
     assert len(ops) == 0
+
+
+def test_completed_card_replay_preserves_text_notice():
+    """Completed card event replay must preserve text_notice card type."""
+    import asyncio
+    from ci_owner_agent.services.wecom_bot_models import WeComInboundMessage
+    from ci_owner_agent.services.feedback_context_store import FeedbackContextStore
+    from ci_owner_agent.schemas import CiResponsibilityNotice
+    from tests.test_notification_formatter import item, notice_payload
+
+    adapter = _MockAdapter()
+    store = make_store()
+    worker = WeComBotWorker(adapter, store)
+
+    # Count service calls
+    original_service = worker.service.handle_template_card_event
+    service_calls = 0
+    def counted(event):
+        nonlocal service_calls
+        service_calls += 1
+        return original_service(event)
+    worker.service.handle_template_card_event = counted
+
+    # Create a notice and context
+    notice = CiResponsibilityNotice.model_validate(notice_payload([item("\u5f20\u4e09")]))
+    key = {"repo": notice.repo, "job": notice.job, "branch": notice.branch, "buildNumber": notice.buildNumber}
+    store.notices.update_one(key, {"$set": {**key, "notice": notice.model_dump(mode="json")}}, upsert=True)
+    context = FeedbackContextStore(store).get_or_create_for_notice(notice)
+
+    # Create a pending
+    msg = WeComInboundMessage(
+        event_key="msg:replay_card_type",
+        chat_id="chat",
+        sender_userid="zhangsan",
+        sender_name="\u5f20\u4e09",
+        content=context["code"] + " 1 \u5224\u65ad\u6b63\u786e",
+        mentioned_userids=[],
+        mentioned_users=[],
+    )
+    reply = worker.service.handle_text(msg)
+    assert reply.reply_type == "template_card"
+    task_id = reply.template_card["task_id"]
+
+    # Authorized confirm click
+    msg_id = "replay_card_type"
+    frame = {
+        "body": {
+            "event": {
+                "eventtype": "template_card_event",
+                "task_id": task_id,
+                "event_key": "confirm",
+            },
+            "from": {"userid": "zhangsan"},
+            "msgid": msg_id,
+            "chatid": "chat",
+        },
+        "headers": {"req_id": "req_" + msg_id},
+    }
+
+    # First call
+    asyncio.run(worker.handle_template_card_event_frame(frame))
+    assert service_calls == 1
+    assert len(adapter.card_updates) == 1
+    card1, userids1 = adapter.card_updates[0]
+    assert card1["card_type"] == "text_notice"
+    assert "button_list" not in card1
+    assert card1["task_id"] == task_id
+
+    # Second call (completed replay)
+    adapter.card_updates.clear()
+    asyncio.run(worker.handle_template_card_event_frame(frame))
+    assert service_calls == 1
+    assert len(adapter.card_updates) == 1
+    card2, userids2 = adapter.card_updates[0]
+    assert card2["card_type"] == "text_notice"
+    assert "button_list" not in card2
+    assert card2["task_id"] == task_id
