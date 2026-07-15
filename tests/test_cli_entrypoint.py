@@ -314,3 +314,68 @@ print(f"Validation correctly rejected: {error}")
         capture_output=True, text=True, timeout=30, env=env,
     )
     assert result.returncode == 0, f"Validation test failed: {result.stderr}"
+
+
+
+def test_build_wecom_ai_parser_fake_never_builds_real_model(monkeypatch):
+    """_build_wecom_feedback_ai_parser with provider=fake must not construct real model."""
+    from ci_owner_agent.config import load_settings
+    from ci_owner_agent.main import _build_wecom_feedback_ai_parser
+
+    # Ensure build_chat_model is never called
+    import ci_owner_agent.services.llm_client as llm_client
+    original = llm_client.build_chat_model
+    call_count = 0
+    def never_call(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        raise AssertionError("build_chat_model must not be called with provider=fake")
+    monkeypatch.setattr(llm_client, "build_chat_model", never_call)
+
+    monkeypatch.setenv("CI_AGENT_WECOM_BOT_LLM_ENABLED", "true")
+    monkeypatch.setenv("CI_AGENT_MODEL_PROVIDER", "fake")
+    monkeypatch.setenv("CI_AGENT_WECOM_BOT_LLM_MAX_INPUT_CHARS", "2000")
+
+    settings = load_settings()
+    result = _build_wecom_feedback_ai_parser(settings)
+
+    from ci_owner_agent.services.wecom_feedback_ai_parser import FakeWeComFeedbackAiParser
+    assert isinstance(result, FakeWeComFeedbackAiParser)
+    assert call_count == 0
+
+
+def test_build_wecom_ai_parser_invalid_config_returns_none(monkeypatch):
+    """Invalid model config should return None without constructing model."""
+    from ci_owner_agent.config import load_settings
+    from ci_owner_agent.main import _build_wecom_feedback_ai_parser
+
+    import ci_owner_agent.services.llm_client as llm_client
+    call_count = 0
+    def never_call(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        raise AssertionError("build_chat_model must not be called")
+    monkeypatch.setattr(llm_client, "build_chat_model", never_call)
+
+    monkeypatch.setenv("CI_AGENT_WECOM_BOT_LLM_ENABLED", "true")
+    monkeypatch.setenv("CI_AGENT_MODEL_PROVIDER", "openai-compatible")
+    monkeypatch.setenv("CI_AGENT_MODEL_NAME", "gpt-4o-mini")
+    monkeypatch.setenv("CI_AGENT_API_KEY", "")
+    monkeypatch.setenv("CI_AGENT_MODEL_BASE_URL", "")
+
+    settings = load_settings()
+    result = _build_wecom_feedback_ai_parser(settings)
+
+    assert result is None
+    assert call_count == 0
+
+
+def test_build_wecom_ai_parser_disabled_returns_none(monkeypatch):
+    """LLM disabled should return None."""
+    from ci_owner_agent.config import load_settings
+    from ci_owner_agent.main import _build_wecom_feedback_ai_parser
+
+    monkeypatch.setenv("CI_AGENT_WECOM_BOT_LLM_ENABLED", "false")
+    settings = load_settings()
+    result = _build_wecom_feedback_ai_parser(settings)
+    assert result is None

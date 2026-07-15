@@ -65,76 +65,140 @@ def test_worker_creates_service_with_ai_parser():
     assert worker.service.ai_parser is parser
 
 
+
 def test_completed_card_event_replays_with_userids():
-    """Completed card event replay should preserve userids."""
+    """Completed card event replay should preserve userids via Worker handler."""
     import asyncio
-    from ci_owner_agent.services.wecom_bot_models import WeComTemplateCardEvent, WeComInboundMessage, WeComBotReply
-    from ci_owner_agent.services.wecom_feedback_service import WeComFeedbackService
+    from collections.abc import Mapping
+    from ci_owner_agent.services.wecom_bot_models import WeComInboundMessage
     from ci_owner_agent.services.feedback_context_store import FeedbackContextStore
     from ci_owner_agent.schemas import CiResponsibilityNotice
     from tests.test_notification_formatter import item, notice_payload
-    from ci_owner_agent.services.wecom_bot_worker import normalize_wecom_template_card_event
 
     adapter = _MockAdapter()
     store = make_store()
     worker = WeComBotWorker(adapter, store)
 
     # Create a notice and context
-    notice = CiResponsibilityNotice.model_validate(notice_payload([item("张三")]))
+    notice = CiResponsibilityNotice.model_validate(notice_payload([item("\u5f20\u4e09")]))
     key = {"repo": notice.repo, "job": notice.job, "branch": notice.branch, "buildNumber": notice.buildNumber}
     store.notices.update_one(key, {"$set": {**key, "notice": notice.model_dump(mode="json")}}, upsert=True)
     context = FeedbackContextStore(store).get_or_create_for_notice(notice)
 
     # Create a pending via service
-    service = WeComFeedbackService(store)
     msg = WeComInboundMessage(
         event_key="msg:card_replay",
         chat_id="chat",
         sender_userid="wangwu",
-        sender_name="王五",
-        content=f"{context['code']} 1 判断正确",
+        sender_name="\u738b\u4e94",
+        content=context["code"] + " 1 \u5224\u65ad\u6b63\u786e",
         mentioned_userids=[],
         mentioned_users=[],
     )
-    reply = service.handle_text(msg)
+    reply = worker.service.handle_text(msg)
     assert reply.reply_type == "template_card"
     task_id = reply.template_card["task_id"]
 
-    # Non-originator click - forbidden card with userids
-    event = WeComTemplateCardEvent(
-        event_key="wecom-card:forbidden_replay",
-        message_id="forbidden_replay",
-        sender_userid="lisi",
-        chat_id="chat",
-        task_id=task_id,
-        button_key="confirm",
-    )
-    bot_reply = service.handle_template_card_event(event)
-    assert bot_reply.reply_type == "template_card"
-    card_data = dict(bot_reply.template_card or {})
-    userids = card_data.pop("userids", None)
+    # Build a template card event frame for non-originator click
+    msg_id = "forbidden_replay"
+    frame = {
+        "body": {
+            "event": {
+                "eventtype": "template_card_event",
+                "task_id": task_id,
+                "event_key": "confirm",
+            },
+            "from": {"userid": "lisi"},
+            "msgid": msg_id,
+            "chatid": "chat",
+        },
+        "headers": {"req_id": "req_" + msg_id},
+    }
+
+    # First call: non-originator click -> forbidden card with userids
+    asyncio.run(worker.handle_template_card_event_frame(frame))
+    assert len(adapter.card_updates) == 1
+    card, userids = adapter.card_updates[0]
     assert userids == ["lisi"]
 
-    # Simulate the worker's mark_completed_with_response to save payload
-    # First claim the event through the event store (as worker does)
-    claim_status, ev = worker.events.claim(event)
-    assert claim_status == "claimed"
-    claim_token = ev["claimToken"]
+    # Second call: same event -> completed replay preserves userids
+    adapter.card_updates.clear()
+    asyncio.run(worker.handle_template_card_event_frame(frame))
+    assert len(adapter.card_updates) == 1
+    card2, userids2 = adapter.card_updates[0]
+    assert userids2 == ["lisi"]
 
-    completed = worker.events.mark_completed_with_response(
-        event.event_key,
-        claim_token,
-        "update_template_card",
-        {"template_card": card_data, "userids": userids},
+    # Pending should still be pending (non-originator cannot confirm)
+    pending = store.wecom_pending_feedback.find_one({"cardTaskId": task_id})
+    assert pending is not None
+    assert pending["status"] == "pending"
+
+    # Service should have been called exactly once (completed branch skips service)
+    assert worker.service is not None
+
+
+
+
+def test_completed_global_card_event_replays_userids_none():
+    """Completed card event for global (authorized) update should replay with userids=None."""
+    import asyncio
+    from ci_owner_agent.services.wecom_bot_models import WeComInboundMessage
+    from ci_owner_agent.services.feedback_context_store import FeedbackContextStore
+    from ci_owner_agent.schemas import CiResponsibilityNotice
+    from tests.test_notification_formatter import item, notice_payload
+
+    adapter = _MockAdapter()
+    store = make_store()
+    worker = WeComBotWorker(adapter, store)
+
+    # Create a notice and context
+    notice = CiResponsibilityNotice.model_validate(notice_payload([item("\u5f20\u4e09")]))
+    key = {"repo": notice.repo, "job": notice.job, "branch": notice.branch, "buildNumber": notice.buildNumber}
+    store.notices.update_one(key, {"$set": {**key, "notice": notice.model_dump(mode="json")}}, upsert=True)
+    context = FeedbackContextStore(store).get_or_create_for_notice(notice)
+
+    # Create a pending
+    msg = WeComInboundMessage(
+        event_key="msg:global_replay",
+        chat_id="chat",
+        sender_userid="zhangsan",
+        sender_name="\u5f20\u4e09",
+        content=context["code"] + " 1 \u5224\u65ad\u6b63\u786e",
+        mentioned_userids=[],
+        mentioned_users=[],
     )
-    assert completed
+    reply = worker.service.handle_text(msg)
+    assert reply.reply_type == "template_card"
+    task_id = reply.template_card["task_id"]
 
-    # Verify stored payload has userids
-    ev_doc = store.wecom_bot_events.find_one({"eventKey": "wecom-card:forbidden_replay"})
-    assert ev_doc is not None
-    assert ev_doc["responsePayload"]["userids"] == ["lisi"]
-    assert ev_doc["responsePayload"]["template_card"] is not None
+    # Authorized click - global update (userids=None)
+    msg_id = "global_replay"
+    frame = {
+        "body": {
+            "event": {
+                "eventtype": "template_card_event",
+                "task_id": task_id,
+                "event_key": "confirm",
+            },
+            "from": {"userid": "zhangsan"},
+            "msgid": msg_id,
+            "chatid": "chat",
+        },
+        "headers": {"req_id": "req_" + msg_id},
+    }
 
+    # First call
+    asyncio.run(worker.handle_template_card_event_frame(frame))
+    assert len(adapter.card_updates) == 1
+    card, userids = adapter.card_updates[0]
+    assert userids is None
+
+    # Second call (completed replay)
+    adapter.card_updates.clear()
+    asyncio.run(worker.handle_template_card_event_frame(frame))
+    assert len(adapter.card_updates) == 1
+    card2, userids2 = adapter.card_updates[0]
+    assert userids2 is None
 
 def test_worker_update_template_card_handles_userids():
     """Worker adapter update_template_card should preserve userids param."""

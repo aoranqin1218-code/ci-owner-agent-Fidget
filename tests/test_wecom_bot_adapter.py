@@ -85,3 +85,36 @@ def test_fatal_sdk_error_reason():
     assert fatal_sdk_error_reason(RuntimeError("authentication failed")) == "authentication failed"
     assert fatal_sdk_error_reason(RuntimeError("max reconnect attempts exceeded")) == "maximum reconnect attempts exceeded"
     assert fatal_sdk_error_reason(RuntimeError("unknown")) == "unrecoverable SDK error"
+
+def test_sdk_adapter_update_template_card_uses_official_keyword_names():
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock
+    adapter = object.__new__(WeComSdkAdapter)
+    client = MagicMock()
+    client.update_template_card = AsyncMock()
+    adapter._client = client
+    frame = {"headers": {"req_id": "req-1"}}
+    card = {"card_type": "button_interaction", "task_id": "task-1"}
+    asyncio.run(adapter.update_template_card(frame, card, ["lisi"]))
+    client.update_template_card.assert_awaited_once_with(
+        frame=frame,
+        template_card=card,
+        userids=["lisi"],
+    )
+
+def test_sdk_adapter_update_template_card_omits_userids_when_none():
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock
+    adapter = object.__new__(WeComSdkAdapter)
+    client = MagicMock()
+    client.update_template_card = AsyncMock()
+    adapter._client = client
+    frame = {"headers": {"req_id": "req-2"}}
+    card = {"card_type": "button_interaction", "task_id": "task-2"}
+    asyncio.run(adapter.update_template_card(frame, card, None))
+    client.update_template_card.assert_awaited_once_with(
+        frame=frame,
+        template_card=card,
+    )
+    call_kwargs = client.update_template_card.call_args.kwargs
+    assert "card" not in call_kwargs
