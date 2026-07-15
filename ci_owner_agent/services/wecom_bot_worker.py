@@ -201,7 +201,11 @@ class WeComBotWorker:
 
             if claim_status == "completed":
                 payload = (ev or {}).get("responsePayload") or {}
-                await self.adapter.update_template_card(frame, payload.get("template_card", {}))
+                await self.adapter.update_template_card(
+                    frame,
+                    payload.get("template_card", {}),
+                    payload.get("userids"),
+                )
                 return
             elif claim_status == "processing":
                 return

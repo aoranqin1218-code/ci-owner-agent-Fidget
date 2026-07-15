@@ -3,7 +3,6 @@ from __future__ import annotations
 import datetime as dt
 import secrets
 import uuid
-import uuid
 from typing import Any
 
 _ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
@@ -34,7 +33,6 @@ class PendingFeedbackStore:
                 "senderName": message.sender_name,
                 "feedbackContext": _safe_context(context, item),
                 "intent": intent.model_dump(mode="json"),
-                "operationId": uuid.uuid4().hex,
                 "status": "pending",
                 "operationId": operation_id,
                 "createdAt": now,

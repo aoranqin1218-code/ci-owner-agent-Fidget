@@ -176,41 +176,46 @@ class WeComFeedbackService:
         if status == "applied":
             return self._recover_and_finalize(pending, event)
 
-        # Stale check before operation
-        if status in ("claimed", "applying"):
-            try:
-                ctx = pending.get("feedbackContext") or {}
-                _current_ctx, _current_item = self.contexts.resolve_item(
-                    ctx.get("code") or "",
-                    ctx.get("itemIndex") or 0,
-                )
-                if not _same_failure(ctx, _current_item):
-                    try:
-                        self.pending.mark_stale(pending)
-                    except Exception:
-                        pass
-                    return WeComBotReply(
-                        reply_type="template_card",
-                        template_card=_build_updated_card(
-                            title="反馈已失效",
-                            desc="该责任项已经更新，请重新发起反馈。",
-                            task_id=event.task_id,
-                            status="stale",
-                        ),
-                    )
-            except Exception as exc:
-                logging.getLogger(__name__).warning("Stale check failed, keeping applying: %s", exc)
-
-        if status not in {"claimed", "applying"}:
+        # Stale check before operation write
+        resolve_result = self._safe_resolve_current_item(pending)
+        if resolve_result[0] == "error":
             return WeComBotReply(
                 reply_type="template_card",
                 template_card=_build_updated_card(
-                    title=_card_status_title(status, default="操作失败"),
-                    desc=_card_status_desc(status, default="请稍后重试。"),
+                    title="确认中",
+                    desc="反馈结果正在确认，请稍后重试。",
                     task_id=event.task_id,
-                    status=status,
+                    status="applying",
                 ),
             )
+        if resolve_result[0] == "stale":
+            stale_ok = self._safe_mark_stale(pending, "责任项在确认前已更新")
+            if stale_ok is True:
+                return WeComBotReply(
+                    reply_type="template_card",
+                    template_card=_build_updated_card(
+                        title="反馈已失效",
+                        desc="该责任项已经更新，请重新发起反馈。",
+                        task_id=event.task_id,
+                        status="stale",
+                    ),
+                )
+            return WeComBotReply(
+                reply_type="template_card",
+                template_card=_build_updated_card(
+                    title=_card_status_title(
+                        self._safe_read_pending(pending).get("status", "applying")
+                    ),
+                    desc=_card_status_desc(
+                        self._safe_read_pending(pending).get("status", "applying")
+                    ),
+                    task_id=event.task_id,
+                    status="applying",
+                ),
+            )
+
+        # ok: use fresh context/item for operation
+        _current_context, _current_item = resolve_result[1], resolve_result[2]
         operation = self._safe_find_operation(pending)
         if operation is _OPERATION_LOOKUP_FAILED:
             return WeComBotReply(
@@ -260,8 +265,44 @@ class WeComFeedbackService:
                         status="applying",
                     ),
                 )
-            if status == "claimed":
-                return self._finalize_card(pending, event)
+            # Prepared operation - re-check stale before finalizing
+            prepped_resolve = self._safe_resolve_current_item(pending)
+            if prepped_resolve[0] == "error":
+                return WeComBotReply(
+                    reply_type="template_card",
+                    template_card=_build_updated_card(
+                        title="确认中",
+                        desc="反馈结果正在确认，请勿重复提交。",
+                        task_id=event.task_id,
+                        status="applying",
+                    ),
+                )
+            if prepped_resolve[0] == "stale":
+                stale_ok = self._safe_mark_stale(pending, "责任项在确认前已更新")
+                if stale_ok is True:
+                    return WeComBotReply(
+                        reply_type="template_card",
+                        template_card=_build_updated_card(
+                            title="反馈已失效",
+                            desc="该责任项已经更新，请重新发起反馈。",
+                            task_id=event.task_id,
+                            status="stale",
+                        ),
+                    )
+                return WeComBotReply(
+                    reply_type="template_card",
+                    template_card=_build_updated_card(
+                        title=_card_status_title(
+                            self._safe_read_pending(pending).get("status", "applying")
+                        ),
+                        desc=_card_status_desc(
+                            self._safe_read_pending(pending).get("status", "applying")
+                        ),
+                        task_id=event.task_id,
+                        status="applying",
+                    ),
+                )
+            _current_context, _current_item = prepped_resolve[1], prepped_resolve[2]
             return self._finalize_card(pending, event)
         context = pending.get("feedbackContext") or {}
         try:
@@ -543,9 +584,90 @@ class WeComFeedbackService:
                     status="applying",
                 ),
             )
+        # Prepared operation in recover - re-check stale before finalizing
+        rec_resolve = self._safe_resolve_current_item(pending)
+        if rec_resolve[0] == "error":
+            return WeComBotReply(
+                reply_type="template_card",
+                template_card=_build_updated_card(
+                    title="确认中",
+                    desc="反馈结果正在确认，请勿重复提交。",
+                    task_id=event.task_id,
+                    status="applying",
+                ),
+            )
+        if rec_resolve[0] == "stale":
+            stale_ok = self._safe_mark_stale(pending, "责任项在确认前已更新")
+            if stale_ok is True:
+                return WeComBotReply(
+                    reply_type="template_card",
+                    template_card=_build_updated_card(
+                        title="反馈已失效",
+                        desc="该责任项已经更新，请重新发起反馈。",
+                        task_id=event.task_id,
+                        status="stale",
+                    ),
+                )
+            return WeComBotReply(
+                reply_type="template_card",
+                template_card=_build_updated_card(
+                    title=_card_status_title(
+                        self._safe_read_pending(pending).get("status", "applying")
+                    ),
+                    desc=_card_status_desc(
+                        self._safe_read_pending(pending).get("status", "applying")
+                    ),
+                    task_id=event.task_id,
+                    status="applying",
+                ),
+            )
+        _current_context, _current_item = rec_resolve[1], rec_resolve[2]
         return self._finalize_card(pending, event)
 
     # ---- internal helpers ----
+
+    def _safe_resolve_current_item(
+        self,
+        pending: dict[str, Any],
+    ) -> tuple[
+        str,
+        dict[str, Any] | None,
+        dict[str, Any] | None,
+    ]:
+        try:
+            context = pending["feedbackContext"]
+            try:
+                current_context, current_item = self.contexts.resolve_item(
+                    str(context.get("feedbackCode") or context.get("code") or ""),
+                    int(context.get("itemIndex") or 0),
+                )
+            except ValueError:
+                return "stale", None, None
+            if not _same_failure(context, current_item):
+                return "stale", None, None
+            return "ok", current_context, current_item
+        except Exception:
+            logging.getLogger(__name__).exception(
+                "Failed to resolve current item"
+            )
+            return "error", None, None
+
+    def _safe_mark_stale(
+        self,
+        pending: dict[str, Any],
+        reason: str,
+    ) -> bool | None:
+        try:
+            return self.pending.mark_stale(
+                pending,
+                pending.get("applyToken"),
+                reason,
+            )
+        except Exception:
+            logging.getLogger(__name__).exception(
+                "Failed to mark pending stale"
+            )
+            return None
 
     def _safe_find_operation(self, pending: dict[str, Any]) -> Any:
         try:
@@ -674,6 +796,25 @@ def _action_label(action: str | None) -> str:
         "mark_flaky": "标记偶发",
         "mark_no_owner": "无法定责",
     }.get(action or "", action or "未知")
+
+
+
+
+def _same_failure(pending_context: dict[str, Any], current_item: dict[str, Any]) -> bool:
+    pending_id = str(pending_context.get("failureId") or "").strip()
+    current_id = str(current_item.get("failureId") or "").strip()
+    if pending_id and current_id:
+        return pending_id == current_id
+    pending_signature = _canonical_signature(pending_context.get("failureSignature"))
+    current_signature = _canonical_signature(current_item.get("failureSignature"))
+    return bool(pending_signature and current_signature and pending_signature == current_signature)
+
+
+def _canonical_signature(value: Any) -> str | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    return build_responsibility_signature(failure_title=None, failure_summary=None, existing_signature=raw)
 
 
 class StaleFeedbackError(Exception):
