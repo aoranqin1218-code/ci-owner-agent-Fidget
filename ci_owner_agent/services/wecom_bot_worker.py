@@ -106,7 +106,7 @@ class WeComBotWorker:
                 reply_type = (event or {}).get("responseType") or "text"
                 if reply_type == "template_card":
                     payload = (event or {}).get("responsePayload") or {}
-                    await self.adapter.reply_template_card(frame, payload.get("template_card", {}), payload.get("userids"))
+                    await self.adapter.reply_template_card(frame, payload.get("template_card", {}))
                     return
                 reply = str(
                     (event or {}).get("replyText")

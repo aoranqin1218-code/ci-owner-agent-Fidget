@@ -69,7 +69,6 @@ def test_worker_creates_service_with_ai_parser():
 def test_completed_card_event_replays_with_userids():
     """Completed card event replay should preserve userids via Worker handler."""
     import asyncio
-    from collections.abc import Mapping
     from ci_owner_agent.services.wecom_bot_models import WeComInboundMessage
     from ci_owner_agent.services.feedback_context_store import FeedbackContextStore
     from ci_owner_agent.schemas import CiResponsibilityNotice
@@ -78,6 +77,15 @@ def test_completed_card_event_replays_with_userids():
     adapter = _MockAdapter()
     store = make_store()
     worker = WeComBotWorker(adapter, store)
+
+    # Count service calls
+    original_service = worker.service.handle_template_card_event
+    service_calls = 0
+    def counted(event):
+        nonlocal service_calls
+        service_calls += 1
+        return original_service(event)
+    worker.service.handle_template_card_event = counted
 
     # Create a notice and context
     notice = CiResponsibilityNotice.model_validate(notice_payload([item("\u5f20\u4e09")]))
@@ -120,6 +128,7 @@ def test_completed_card_event_replays_with_userids():
     assert len(adapter.card_updates) == 1
     card, userids = adapter.card_updates[0]
     assert userids == ["lisi"]
+    assert service_calls == 1
 
     # Second call: same event -> completed replay preserves userids
     adapter.card_updates.clear()
@@ -127,14 +136,13 @@ def test_completed_card_event_replays_with_userids():
     assert len(adapter.card_updates) == 1
     card2, userids2 = adapter.card_updates[0]
     assert userids2 == ["lisi"]
+    # Service must NOT be called again on completed replay
+    assert service_calls == 1
 
     # Pending should still be pending (non-originator cannot confirm)
     pending = store.wecom_pending_feedback.find_one({"cardTaskId": task_id})
     assert pending is not None
     assert pending["status"] == "pending"
-
-    # Service should have been called exactly once (completed branch skips service)
-    assert worker.service is not None
 
 
 
@@ -150,6 +158,15 @@ def test_completed_global_card_event_replays_userids_none():
     adapter = _MockAdapter()
     store = make_store()
     worker = WeComBotWorker(adapter, store)
+
+    # Count service calls
+    original_service = worker.service.handle_template_card_event
+    service_calls = 0
+    def counted(event):
+        nonlocal service_calls
+        service_calls += 1
+        return original_service(event)
+    worker.service.handle_template_card_event = counted
 
     # Create a notice and context
     notice = CiResponsibilityNotice.model_validate(notice_payload([item("\u5f20\u4e09")]))
@@ -192,6 +209,7 @@ def test_completed_global_card_event_replays_userids_none():
     assert len(adapter.card_updates) == 1
     card, userids = adapter.card_updates[0]
     assert userids is None
+    assert service_calls == 1
 
     # Second call (completed replay)
     adapter.card_updates.clear()
@@ -199,6 +217,7 @@ def test_completed_global_card_event_replays_userids_none():
     assert len(adapter.card_updates) == 1
     card2, userids2 = adapter.card_updates[0]
     assert userids2 is None
+    assert service_calls == 1
 
 def test_worker_update_template_card_handles_userids():
     """Worker adapter update_template_card should preserve userids param."""
@@ -222,3 +241,88 @@ def test_worker_update_template_card_handles_userids():
     asyncio.run(worker.adapter.update_template_card(frame, card, ["lisi"]))
     assert len(adapter.card_updates) == 1
     assert adapter.card_updates[0] == (card, ["lisi"])
+
+
+class FailIfCalledAiParser:
+    """AI parser that must never be called during fixed command processing."""
+    def parse(self, message):
+        raise AssertionError(
+            "fixed command replay must not call LLM"
+        )
+
+
+def test_completed_text_event_replays_template_card():
+    """Same text event replayed must reply same template card without calling Service again."""
+    import asyncio
+    from ci_owner_agent.services.wecom_bot_models import WeComInboundMessage
+    from ci_owner_agent.services.feedback_context_store import FeedbackContextStore
+    from ci_owner_agent.schemas import CiResponsibilityNotice
+    from tests.test_notification_formatter import item, notice_payload
+
+    adapter = _MockAdapter()
+    store = make_store()
+    worker = WeComBotWorker(adapter, store, ai_parser=FailIfCalledAiParser())
+
+    # Count service.handle_text calls
+    original_handle_text = worker.service.handle_text
+    handle_text_calls = 0
+    def counted_handle_text(message):
+        nonlocal handle_text_calls
+        handle_text_calls += 1
+        return original_handle_text(message)
+    worker.service.handle_text = counted_handle_text
+
+    # Create a notice and context
+    notice = CiResponsibilityNotice.model_validate(notice_payload([item("\u5f20\u4e09")]))
+    key = {"repo": notice.repo, "job": notice.job, "branch": notice.branch, "buildNumber": notice.buildNumber}
+    store.notices.update_one(key, {"$set": {**key, "notice": notice.model_dump(mode="json")}}, upsert=True)
+    context = FeedbackContextStore(store).get_or_create_for_notice(notice)
+
+    feedback_code = context["code"]
+
+    # Build a text frame that produces a template card (fixed command)
+    msg_id = "text_card_replay"
+    frame = {
+        "body": {
+            "text": {
+                "content": feedback_code + " 1 \u5224\u65ad\u6b63\u786e",
+            },
+            "from": {
+                "userid": "wangwu",
+                "name": "\u738b\u4e94",
+            },
+            "msgid": msg_id,
+            "chatid": "chat",
+        },
+        "headers": {"req_id": "req_" + msg_id},
+    }
+
+    # First call: should create pending and reply with template card
+    asyncio.run(worker.handle_text_frame(frame))
+    assert handle_text_calls == 1
+    assert len(adapter.card_replies) == 1
+    assert len(adapter.text_replies) == 0
+    first_card = adapter.card_replies[0]
+    assert first_card["card_type"] == "button_interaction"
+    task_id = first_card["task_id"]
+
+    # Second call: same frame -> completed replay, same card, no service call
+    asyncio.run(worker.handle_text_frame(frame))
+    assert handle_text_calls == 1
+    assert len(adapter.card_replies) == 2
+    assert len(adapter.text_replies) == 0
+    second_card = adapter.card_replies[1]
+    assert second_card["task_id"] == task_id
+
+    # Only one pending created
+    assert len(store.wecom_pending_feedback.docs) == 1
+    pending = store.wecom_pending_feedback.find_one({"cardTaskId": task_id})
+    assert pending is not None
+    assert pending["status"] == "pending"
+
+    # confirmationCode must NOT appear in card text
+    card_text = str(first_card)
+    assert pending["confirmationCode"] not in card_text
+
+    # No TypeError or "??????" on second call
+    assert "\u6d88\u606f\u5904\u7406\u5931\u8d25" not in str(adapter.text_replies)

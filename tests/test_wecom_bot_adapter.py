@@ -118,3 +118,27 @@ def test_sdk_adapter_update_template_card_omits_userids_when_none():
     )
     call_kwargs = client.update_template_card.call_args.kwargs
     assert "card" not in call_kwargs
+
+
+def test_sdk_adapter_reply_template_card_uses_two_arguments():
+    """WeComSdkAdapter.reply_template_card() must only take frame and template_card."""
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock
+
+    adapter = object.__new__(WeComSdkAdapter)
+    client = MagicMock()
+    client.reply_template_card = AsyncMock()
+    adapter._client = client
+
+    frame = {"headers": {"req_id": "req-card"}}
+    card = {
+        "card_type": "button_interaction",
+        "task_id": "task-card",
+    }
+
+    asyncio.run(adapter.reply_template_card(frame, card))
+
+    client.reply_template_card.assert_awaited_once_with(
+        frame,
+        card,
+    )

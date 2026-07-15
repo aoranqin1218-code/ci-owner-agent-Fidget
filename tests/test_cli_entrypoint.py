@@ -322,15 +322,19 @@ def test_build_wecom_ai_parser_fake_never_builds_real_model(monkeypatch):
     from ci_owner_agent.config import load_settings
     from ci_owner_agent.main import _build_wecom_feedback_ai_parser
 
-    # Ensure build_chat_model is never called
-    import ci_owner_agent.services.llm_client as llm_client
-    original = llm_client.build_chat_model
+    # Patch at the actual location where build_chat_model is used
+    import ci_owner_agent.services.wecom_feedback_ai_parser as ai_parser_module
     call_count = 0
     def never_call(*args, **kwargs):
         nonlocal call_count
         call_count += 1
         raise AssertionError("build_chat_model must not be called with provider=fake")
-    monkeypatch.setattr(llm_client, "build_chat_model", never_call)
+    monkeypatch.setattr(ai_parser_module, "build_chat_model", never_call)
+
+    # Also ensure WeComFeedbackAiParser is never constructed
+    def fail_parser_init(*args, **kwargs):
+        raise AssertionError("WeComFeedbackAiParser must not be constructed")
+    monkeypatch.setattr(ai_parser_module, "WeComFeedbackAiParser", fail_parser_init)
 
     monkeypatch.setenv("CI_AGENT_WECOM_BOT_LLM_ENABLED", "true")
     monkeypatch.setenv("CI_AGENT_MODEL_PROVIDER", "fake")
@@ -349,13 +353,19 @@ def test_build_wecom_ai_parser_invalid_config_returns_none(monkeypatch):
     from ci_owner_agent.config import load_settings
     from ci_owner_agent.main import _build_wecom_feedback_ai_parser
 
-    import ci_owner_agent.services.llm_client as llm_client
+    # Patch at the actual location where build_chat_model is used
+    import ci_owner_agent.services.wecom_feedback_ai_parser as ai_parser_module
     call_count = 0
     def never_call(*args, **kwargs):
         nonlocal call_count
         call_count += 1
         raise AssertionError("build_chat_model must not be called")
-    monkeypatch.setattr(llm_client, "build_chat_model", never_call)
+    monkeypatch.setattr(ai_parser_module, "build_chat_model", never_call)
+
+    # Also ensure WeComFeedbackAiParser is never constructed
+    def fail_parser_init(*args, **kwargs):
+        raise AssertionError("WeComFeedbackAiParser must not be constructed")
+    monkeypatch.setattr(ai_parser_module, "WeComFeedbackAiParser", fail_parser_init)
 
     monkeypatch.setenv("CI_AGENT_WECOM_BOT_LLM_ENABLED", "true")
     monkeypatch.setenv("CI_AGENT_MODEL_PROVIDER", "openai-compatible")
@@ -379,3 +389,72 @@ def test_build_wecom_ai_parser_disabled_returns_none(monkeypatch):
     settings = load_settings()
     result = _build_wecom_feedback_ai_parser(settings)
     assert result is None
+
+
+def test_serve_wecom_bot_passes_ai_parser_to_worker(monkeypatch):
+    """main() serve-wecom-bot must pass built ai_parser to WeComBotWorker."""
+    from ci_owner_agent.main import main
+
+    sentinel_parser = object()
+    captured = {}
+
+    def fake_build(settings):
+        return sentinel_parser
+
+    monkeypatch.setattr(
+        "ci_owner_agent.main._build_wecom_feedback_ai_parser",
+        fake_build,
+    )
+
+    def fake_get_history_store(settings):
+        class FakeStore:
+            client = type("obj", (object,), {"admin": type("obj", (object,), {"command": lambda self, cmd: None})()})()
+            wecom_bot_events = type("obj", (object,), {"create_index": lambda self, *a, **kw: None})()
+        return FakeStore()
+
+    monkeypatch.setattr(
+        "ci_owner_agent.main.get_history_store",
+        fake_get_history_store,
+    )
+
+    # Patch at the import source rather than the local name inside main()
+    class FakeWeComSdkAdapter:
+        def __init__(self, bot_id, secret):
+            pass
+        def set_text_handler(self, h):
+            pass
+        def set_template_card_event_handler(self, h):
+            pass
+        def set_fatal_error_handler(self, h):
+            pass
+
+    monkeypatch.setattr(
+        "ci_owner_agent.services.wecom_bot_adapter.WeComSdkAdapter",
+        FakeWeComSdkAdapter,
+    )
+
+    class FakeWorker:
+        def __init__(self, adapter, store, *, confirm_ttl_seconds=300, feedback_code_ttl_days=30, event_ttl_days=7, ai_parser=None):
+            captured["ai_parser"] = ai_parser
+        def run(self):
+            pass
+
+    monkeypatch.setattr(
+        "ci_owner_agent.services.wecom_bot_worker.WeComBotWorker",
+        FakeWorker,
+    )
+
+    monkeypatch.setenv("CI_AGENT_HISTORY_ENABLED", "true")
+    monkeypatch.setenv("CI_AGENT_WECOM_BOT_ENABLED", "true")
+    monkeypatch.setenv("CI_AGENT_WECOM_BOT_LLM_ENABLED", "true")
+
+    result = main([
+        "serve-wecom-bot",
+        "--bot-id",
+        "test-bot",
+        "--secret",
+        "test-secret",
+    ])
+
+    assert result == 0
+    assert captured.get("ai_parser") is sentinel_parser

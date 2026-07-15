@@ -230,3 +230,68 @@ def test_convert_item_index_zero():
     )
     intent = _convert_decision(decision)
     assert intent.intent_type == "unknown"
+
+from pydantic import ValidationError
+
+
+def test_ai_decision_accepts_integer_item_index():
+    """WeComFeedbackAiDecision must accept integer item_index."""
+    decision = WeComFeedbackAiDecision.model_validate({
+        "intent_type": "create_feedback",
+        "action": "confirm_owner",
+        "feedback_code": "CI-7K3M9Q",
+        "item_index": 1,
+    })
+    assert decision.item_index == 1
+    assert type(decision.item_index) is int
+
+
+def test_ai_decision_rejects_string_item_index():
+    """WeComFeedbackAiDecision must reject string item_index."""
+    with pytest.raises(ValidationError):
+        WeComFeedbackAiDecision.model_validate({
+            "intent_type": "create_feedback",
+            "action": "confirm_owner",
+            "feedback_code": "CI-7K3M9Q",
+            "item_index": "1",
+        })
+
+
+def test_ai_decision_rejects_float_item_index():
+    """WeComFeedbackAiDecision must reject float item_index."""
+    with pytest.raises(ValidationError):
+        WeComFeedbackAiDecision.model_validate({
+            "intent_type": "create_feedback",
+            "action": "confirm_owner",
+            "feedback_code": "CI-7K3M9Q",
+            "item_index": 1.0,
+        })
+
+
+def test_ai_decision_rejects_boolean_item_index():
+    """WeComFeedbackAiDecision must reject boolean item_index."""
+    with pytest.raises(ValidationError):
+        WeComFeedbackAiDecision.model_validate({
+            "intent_type": "create_feedback",
+            "action": "confirm_owner",
+            "feedback_code": "CI-7K3M9Q",
+            "item_index": True,
+        })
+
+
+def test_validate_decision_returns_unknown_for_string_item_index():
+    """_validate_decision must return unknown for string item_index."""
+    decision = _validate_decision(
+        '{"intent_type": "create_feedback", "action": "confirm_owner", '
+        '"feedback_code": "CI-7K3M9Q", "item_index": "1"}'
+    )
+    assert decision.intent_type == "unknown"
+
+
+def test_validate_decision_returns_unknown_for_float_item_index():
+    """_validate_decision must return unknown for float item_index."""
+    decision = _validate_decision(
+        '{"intent_type": "create_feedback", "action": "confirm_owner", '
+        '"feedback_code": "CI-7K3M9Q", "item_index": 1.0}'
+    )
+    assert decision.intent_type == "unknown"

@@ -56,7 +56,7 @@ class ParsedFeedbackIntent(_StrictModel):
 
 
 class WeComFeedbackAiDecision(_StrictModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", strict=True)
 
     intent_type: Literal[
         "create_feedback",
