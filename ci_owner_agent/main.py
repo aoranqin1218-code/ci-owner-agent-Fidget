@@ -226,8 +226,12 @@ def main(argv: list[str] | None = None) -> int:
                                   period_end=period_end, top_n=args.top)
         print(report["markdown"])
         if args.notify or args.dry_run:
-            result = service.notify(report, repo=args.repo, jobs=jobs, branches=branches, period_start=period_start,
-                                    period_end=period_end, dry_run=args.dry_run, force=args.force)
+            try:
+                result = service.notify(report, repo=args.repo, jobs=jobs, branches=branches, period_start=period_start,
+                                        period_end=period_end, dry_run=args.dry_run, force=args.force)
+            except Exception:
+                print("ERROR: weekly report notification failed unexpectedly", file=sys.stderr)
+                return 2
             if not result.get("ok"):
                 print(f"ERROR: weekly report notification failed: {result.get('error')}", file=sys.stderr)
                 return 2
@@ -561,6 +565,10 @@ def _notify_notice(notice: CiResponsibilityNotice, settings, *, dry_run: bool, f
             dedup_key=dedup_key, force=force or not settings.notification_dedup_enabled,
             metadata={"repo": notice.repo or "", "job": notice.job, "branch": notice.branch,
                       "buildNumber": notice.buildNumber, "noticeHash": digest})
+        if not queued["inserted"] and queued["status"] == "dead":
+            return {"ok": False, "status": "dead", "inserted": False, "reason": "existing_dead_delivery",
+                    "error": "existing notification delivery is dead; retry with --force",
+                    "deliveryKey": queued["deliveryKey"], "markdown": markdown}
         return {"ok": True, "status": queued["status"], "inserted": queued["inserted"],
                 "deliveryKey": queued["deliveryKey"], "markdown": markdown}
 

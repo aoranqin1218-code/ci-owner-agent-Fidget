@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import json
+import logging
 import secrets
 import uuid
 from collections.abc import Mapping
@@ -67,7 +68,15 @@ class WeComNotificationOutbox:
         candidates = sorted(list(self.collection.find(query)), key=lambda d: (d.get("nextAttemptAt") or d.get("leaseUntil") or now, d.get("createdAt") or now))
         for candidate in candidates:
             old_status = candidate.get("status")
-            condition: dict[str, Any] = {"deliveryKey": candidate["deliveryKey"], "status": old_status}
+            delivery_key = candidate.get("deliveryKey")
+            document_id = candidate.get("_id")
+            if isinstance(delivery_key, str) and delivery_key:
+                condition: dict[str, Any] = {"deliveryKey": delivery_key, "status": old_status}
+            elif document_id is not None:
+                condition = {"_id": document_id, "status": old_status}
+            else:
+                logging.getLogger(__name__).warning("Skipping notification outbox item without an identifier")
+                continue
             if old_status == "pending":
                 condition["nextAttemptAt"] = {"$lte": now}
             else:
@@ -78,6 +87,21 @@ class WeComNotificationOutbox:
             if claimed is not None:
                 return claimed
         return None
+
+    def mark_invalid_dead(self, *, lease_token: str, delivery_key: str | None = None,
+                          document_id: Any | None = None, reason: str = "invalid notification outbox item",
+                          now: dt.datetime | None = None) -> bool:
+        if not delivery_key and document_id is None:
+            raise ValueError("delivery_key or document_id is required")
+        now = _utc(now)
+        identity = {"deliveryKey": delivery_key} if delivery_key else {"_id": document_id}
+        result = self.collection.update_one(
+            {**identity, "status": "sending", "leaseToken": lease_token},
+            {"$set": {"status": "dead", "deadAt": now, "updatedAt": now, "nextAttemptAt": None,
+                      "leaseToken": None, "leaseUntil": None, "lastErrorType": "InvalidOutboxItem",
+                      "lastError": " ".join(reason.split())[:300]}},
+        )
+        return bool(getattr(result, "modified_count", 0))
 
     def mark_sent(self, *, delivery_key: str, lease_token: str, now: dt.datetime | None = None) -> bool:
         now = _utc(now)

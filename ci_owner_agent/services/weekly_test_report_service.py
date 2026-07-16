@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import json
+import logging
 
 from ci_owner_agent.services.test_failure_stats import TestFailureStatsService
 from ci_owner_agent.services.test_maintainer_mapping import TestMaintainerResolver
@@ -83,10 +84,18 @@ class WeeklyTestReportService:
                     "ignoredItemCount": report.get("ignoredItemCount", 0)}
         if not self.notification_chat_id:
             return {"ok": False, "error": "CI_AGENT_WECOM_BOT_NOTIFY_CHAT_ID is not configured"}
-        queued = self.outbox.enqueue_markdown(notification_type="weekly_test_failure_report", target_chat_id=self.notification_chat_id,
-            markdown=report["markdown"], dedup_key=report["digest"], force=force or not self.notification_dedup_enabled,
-            metadata={"repo": repo, "jobs": jobs, "branches": branches, "periodStart": period_start,
-                      "periodEnd": period_end, "digest": report["digest"]})
+        try:
+            queued = self.outbox.enqueue_markdown(notification_type="weekly_test_failure_report", target_chat_id=self.notification_chat_id,
+                markdown=report["markdown"], dedup_key=report["digest"], force=force or not self.notification_dedup_enabled,
+                metadata={"repo": repo, "jobs": jobs, "branches": branches, "periodStart": period_start,
+                          "periodEnd": period_end, "digest": report["digest"]})
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Weekly notification enqueue failed: %s", type(exc).__name__)
+            return {"ok": False, "sent": False, "status": "enqueue_failed", "error": "notification outbox is unavailable"}
+        if not queued["inserted"] and queued["status"] == "dead":
+            return {"ok": False, "sent": False, "status": "dead", "inserted": False,
+                    "reason": "existing_dead_delivery", "error": "existing notification delivery is dead; retry with --force",
+                    "deliveryKey": queued["deliveryKey"]}
         return {"ok": True, "sent": False, "status": queued["status"], "inserted": queued["inserted"],
                 "deliveryKey": queued["deliveryKey"], "importantItemCount": report["importantItemCount"],
                 "normalItemCount": report["normalItemCount"], "ignoredItemCount": report.get("ignoredItemCount", 0)}

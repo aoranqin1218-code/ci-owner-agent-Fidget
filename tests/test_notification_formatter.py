@@ -499,6 +499,20 @@ def test_notify_force_bypasses_dedup(monkeypatch):
     assert store.wecom_notification_outbox.docs[0]["status"] == "pending"
 
 
+def test_notify_notice_existing_dead_returns_error_and_force_creates_new_delivery(monkeypatch):
+    store = make_store()
+    notice = CiResponsibilityNotice.model_validate(notice_payload([item()]))
+    settings = replace(load_settings(), wecom_bot_notify_chat_id="chat")
+    monkeypatch.setattr("ci_owner_agent.main.get_history_store", lambda _: store)
+    first = _notify_notice(notice, settings, dry_run=False, force=False, feedback_base_url=None)
+    store.wecom_notification_outbox.docs[0]["status"] = "dead"
+    repeat = _notify_notice(notice, settings, dry_run=False, force=False, feedback_base_url=None)
+    forced = _notify_notice(notice, settings, dry_run=False, force=True, feedback_base_url=None)
+    assert first["ok"] is True
+    assert repeat["ok"] is False and repeat["reason"] == "existing_dead_delivery" and repeat["inserted"] is False
+    assert forced["ok"] is True and forced["inserted"] is True and len(store.wecom_notification_outbox.docs) == 2
+
+
 def test_analyze_notify_exception_stays_json(monkeypatch, capsys):
     notice = CiResponsibilityNotice.model_validate(notice_payload([item()]))
     monkeypatch.setenv("CI_AGENT_MODEL_PROVIDER", "fake")

@@ -72,6 +72,26 @@ def test_notification_period_dedup_and_force():
     assert len(store.wecom_notification_outbox.docs) == 2
 
 
+def test_weekly_notify_handles_outbox_exception(monkeypatch):
+    store = make_store(); service = WeeklyTestReportService(store, WeeklyTestReportConfig.model_validate({"important": {"enabled": False}}), notification_chat_id="chat")
+    monkeypatch.setattr(service.outbox, "enqueue_markdown", lambda **_: (_ for _ in ()).throw(RuntimeError("mongodb://user:password@secret-host")))
+    report = {"importantItemCount": 1, "normalItemCount": 0, "markdown": "private", "digest": "d"}
+    result = service.notify(report, repo="r", jobs=["j"], branches=["dev"], period_start=START, period_end=END)
+    assert result["ok"] is False and result["sent"] is False and result["status"] == "enqueue_failed"
+    assert all(value not in result["error"] for value in ("password", "secret-host", "mongodb://"))
+
+
+def test_weekly_existing_dead_returns_error_and_force_creates_new_delivery():
+    store = make_store(); service = WeeklyTestReportService(store, WeeklyTestReportConfig.model_validate({"important": {"enabled": False}}), notification_chat_id="chat")
+    report = {"importantItemCount": 1, "normalItemCount": 0, "markdown": "x", "digest": "d"}
+    first = service.notify(report, repo="r", jobs=["j"], branches=["dev"], period_start=START, period_end=END)
+    store.wecom_notification_outbox.docs[0]["status"] = "dead"
+    repeat = service.notify(report, repo="r", jobs=["j"], branches=["dev"], period_start=START, period_end=END)
+    forced = service.notify(report, repo="r", jobs=["j"], branches=["dev"], period_start=START, period_end=END, force=True)
+    assert first["ok"] is True and repeat["ok"] is False and repeat["reason"] == "existing_dead_delivery"
+    assert forced["ok"] is True and forced["inserted"] is True and len(store.wecom_notification_outbox.docs) == 2
+
+
 def _save_build(store, *, job: str, number: int, result, timestamp: datetime, branch: str = "dev"):
     store.builds.update_one(
         {"repo": "r", "job": job, "branch": branch, "buildNumber": number},

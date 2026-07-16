@@ -50,3 +50,23 @@ def test_mark_sent_and_failure_backoff_and_dead():
     retry = outbox.claim_next(now=pending["nextAttemptAt"])
     assert outbox.mark_failed(delivery_key=retry["deliveryKey"], lease_token=retry["leaseToken"], error=RuntimeError("x"), now=now) == "dead"
     assert outbox.claim_next(now=now + timedelta(days=1)) is None
+
+
+def test_mark_invalid_dead_requires_matching_lease_and_clears_lease():
+    outbox = _outbox()
+    item = _enqueue(outbox)
+    claimed = outbox.claim_next(now=item["nextAttemptAt"])
+    assert outbox.mark_invalid_dead(delivery_key=claimed["deliveryKey"], lease_token="wrong") is False
+    assert outbox.mark_invalid_dead(delivery_key=claimed["deliveryKey"], lease_token=claimed["leaseToken"]) is True
+    dead = outbox.collection.find_one({"deliveryKey": claimed["deliveryKey"]})
+    assert dead["status"] == "dead" and dead["deadAt"] is not None and dead["nextAttemptAt"] is None
+    assert dead["leaseToken"] is None and dead["leaseUntil"] is None and dead["lastErrorType"] == "InvalidOutboxItem"
+
+
+def test_claim_uses_document_id_when_delivery_key_missing():
+    outbox = _outbox()
+    now = datetime.now(timezone.utc)
+    outbox.collection.insert_one({"_id": "broken", "status": "pending", "nextAttemptAt": now, "createdAt": now})
+    claimed = outbox.claim_next(now=now)
+    assert claimed and claimed["_id"] == "broken" and claimed["leaseToken"]
+    assert outbox.mark_invalid_dead(document_id="broken", lease_token=claimed["leaseToken"]) is True

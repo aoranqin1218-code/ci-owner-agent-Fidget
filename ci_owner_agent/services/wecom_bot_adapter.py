@@ -169,13 +169,13 @@ class _SdkLogger:
     """SDK logger that deliberately never serializes raw frames or credentials."""
 
     def debug(self, message: str, *args: Any) -> None:
-        logging.getLogger(__name__).debug("%s", message)
+        return
 
     def info(self, message: str, *args: Any) -> None:
-        logging.getLogger(__name__).info("%s", message)
+        return
 
     def warn(self, message: str, *args: Any) -> None:
-        logging.getLogger(__name__).warning("%s", message)
+        logging.getLogger(__name__).warning("WeCom SDK warning")
 
     def error(self, message: str, *args: Any) -> None:
-        logging.getLogger(__name__).error("%s", message)
+        logging.getLogger(__name__).error("WeCom SDK error")

@@ -90,6 +90,26 @@ def test_deliver_one_notification_requeues_failure():
     assert store.wecom_notification_outbox.docs[0]["status"] == "pending"
 
 
+def test_invalid_claimed_notification_is_marked_dead():
+    import asyncio
+    adapter = _MockAdapter(); store = make_store(); worker = WeComBotWorker(adapter, store, notification_chat_id="chat")
+    queued = worker.notification_outbox.enqueue_markdown(notification_type="ci_notice", target_chat_id="chat", markdown="private", dedup_key="broken")
+    store.wecom_notification_outbox.docs[0]["payload"] = {}
+    assert asyncio.run(worker.deliver_one_notification()) is True
+    assert adapter.send_markdown_calls == []
+    assert store.wecom_notification_outbox.docs[0]["status"] == "dead"
+
+
+def test_notification_target_mismatch_is_marked_dead(caplog):
+    import asyncio
+    adapter = _MockAdapter(); store = make_store(); worker = WeComBotWorker(adapter, store, notification_chat_id="configured-chat")
+    worker.notification_outbox.enqueue_markdown(notification_type="ci_notice", target_chat_id="unexpected-chat", markdown="private markdown", dedup_key="wrong-chat")
+    assert asyncio.run(worker.deliver_one_notification()) is True
+    assert adapter.send_markdown_calls == []
+    assert store.wecom_notification_outbox.docs[0]["status"] == "dead"
+    assert "unexpected-chat" not in caplog.text and "configured-chat" not in caplog.text and "private markdown" not in caplog.text
+
+
 
 def test_completed_card_event_replays_with_userids():
     """Completed card event replay should preserve userids via Worker handler."""

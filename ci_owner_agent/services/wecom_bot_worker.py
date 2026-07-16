@@ -115,13 +115,18 @@ class WeComBotWorker:
         item = await asyncio.to_thread(self.notification_outbox.claim_next)
         if item is None:
             return False
-        delivery_key, lease_token = item.get("deliveryKey"), item.get("leaseToken")
-        chat_id = item.get("targetChatId")
-        markdown = (item.get("payload") or {}).get("content")
-        if not all(isinstance(value, str) and value for value in (delivery_key, lease_token, chat_id, markdown)):
-            logging.getLogger(__name__).warning("Invalid notification outbox item")
+        delivery_key, document_id, lease_token, chat_id, markdown = self._validate_notification_item(item)
+        target_matches = chat_id == self.notification_chat_id
+        if lease_token is None:
+            logging.getLogger(__name__).error("Invalid notification outbox item without lease token")
             return True
-        prefix = delivery_key[:12]
+        if (delivery_key is None and document_id is None) or chat_id is None or markdown is None or not target_matches:
+            reason = "notification target does not match configured chat" if not target_matches else "invalid notification outbox item"
+            marked = await asyncio.to_thread(self.notification_outbox.mark_invalid_dead, lease_token=lease_token,
+                                              delivery_key=delivery_key, document_id=document_id, reason=reason)
+            logging.getLogger(__name__).warning("Invalid notification outbox item isolated" if marked else "notification lease lost")
+            return True
+        prefix = (delivery_key or "document")[:12]
         try:
             await self.adapter.send_markdown(chat_id, markdown)
         except Exception as exc:
@@ -135,6 +140,17 @@ class WeComBotWorker:
         else:
             logging.getLogger(__name__).info("Notification %s sent attempt=%s", prefix, item.get("attemptCount"))
         return True
+
+    def _validate_notification_item(self, item: Mapping[str, Any]) -> tuple[str | None, Any | None, str | None, str | None, str | None]:
+        delivery_key = item.get("deliveryKey") if isinstance(item.get("deliveryKey"), str) and item.get("deliveryKey") else None
+        document_id = item.get("_id")
+        lease_token = item.get("leaseToken") if isinstance(item.get("leaseToken"), str) and item.get("leaseToken") else None
+        chat_id = item.get("targetChatId") if isinstance(item.get("targetChatId"), str) and item.get("targetChatId") else None
+        payload = item.get("payload")
+        markdown = payload.get("content") if isinstance(payload, Mapping) and isinstance(payload.get("content"), str) and payload.get("content") else None
+        if item.get("messageType") != "markdown" or not isinstance(item.get("notificationType"), str) or not item.get("notificationType"):
+            markdown = None
+        return delivery_key, document_id, lease_token, chat_id, markdown
 
     async def _notification_loop(self) -> None:
         logger = logging.getLogger(__name__)
