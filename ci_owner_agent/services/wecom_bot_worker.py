@@ -10,6 +10,7 @@ from ci_owner_agent.services.pending_feedback_store import WeComEventStore
 from ci_owner_agent.services.wecom_bot_adapter import WeComBotAdapterProtocol, fatal_sdk_error_reason
 from ci_owner_agent.services.wecom_feedback_ai_parser import WeComFeedbackAiParserProtocol
 from ci_owner_agent.services.wecom_feedback_service import WeComFeedbackService
+from ci_owner_agent.services.wecom_bot_models import WeComInboundMessage
 from ci_owner_agent.services.wecom_message_normalizer import normalize_wecom_text_frame, normalize_wecom_template_card_event
 from ci_owner_agent.services.wecom_notification_outbox import WeComNotificationOutbox
 
@@ -25,6 +26,7 @@ class WeComBotWorker:
         event_ttl_days: int = 7,
         ai_parser: WeComFeedbackAiParserProtocol | None = None,
         card_action_url: str | None = None,
+        discover_chat_id: bool = False,
         notification_chat_id: str | None = None,
         notification_poll_seconds: int = 2,
         notification_lease_seconds: int = 30,
@@ -41,6 +43,8 @@ class WeComBotWorker:
         )
         self._stop_event: asyncio.Event | None = None
         self._fatal_error: BaseException | None = None
+        self.discover_chat_id = bool(discover_chat_id)
+        self._chat_id_discovered = False
         self.notification_chat_id = (notification_chat_id or "").strip() or None
         self.notification_poll_seconds = max(1, notification_poll_seconds)
         self.notification_outbox = WeComNotificationOutbox(history_store, lease_seconds=notification_lease_seconds,
@@ -177,6 +181,7 @@ class WeComBotWorker:
 
         try:
             message = normalize_wecom_text_frame(frame)
+            self._maybe_log_discovered_chat_id(message)
 
             claim_status, event = await asyncio.to_thread(
                 self.events.claim,
@@ -267,6 +272,17 @@ class WeComBotWorker:
             await self.adapter.reply_text(frame, reply)
         except Exception:
             logger.exception("Failed to reply to WeCom message")
+
+    def _maybe_log_discovered_chat_id(self, message: WeComInboundMessage) -> None:
+        chat_type = (message.chat_type or "").strip().lower()
+        if not self.discover_chat_id or self._chat_id_discovered or not message.chat_id:
+            return
+        if chat_type not in {"group", "group_chat"}:
+            return
+        self._chat_id_discovered = True
+        logging.getLogger(__name__).warning(
+            "WeCom group chat discovery: chat_type=%s chat_id=%s", chat_type, message.chat_id
+        )
 
     async def handle_template_card_event_frame(self, frame: Mapping[str, Any]) -> None:
         claim_token: str | None = None

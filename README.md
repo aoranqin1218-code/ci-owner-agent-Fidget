@@ -859,6 +859,8 @@ steps {
 
 企业微信通知和群内反馈均使用 API 模式智能机器人的长期 WebSocket 连接。分析命令只向 MongoDB Outbox 入队，`serve-wecom-bot` 负责在认证完成后主动推送，因此 Bot 离线时通知会保留 pending 并在恢复后发送。
 
+获取目标群 chatid 时，临时设置 `CI_AGENT_WECOM_NOTIFY_ENABLED=false` 和 `CI_AGENT_WECOM_BOT_DISCOVER_CHAT_ID=true` 后启动机器人，并在目标群 @机器人发送消息。进程只会记录第一次群聊的 `chat_type` 和 chatid；随后停止进程，手动配置 `CI_AGENT_WECOM_BOT_NOTIFY_CHAT_ID`，关闭 discovery 后再启动长期 Worker。不要提交 chatid，也不要将 Bot ID、msgid、userid 或 response_url 当作 chatid；若先在错误群触发，重启 Worker 后重试。
+
 1. 在企业微信后台创建 API 模式智能机器人，接入方式选择“长连接”，获取 Bot ID 和 Secret，并将机器人加入研发群。
 2. 安装可选依赖：
 

@@ -8,6 +8,7 @@ from collections.abc import Mapping
 
 from ci_owner_agent.services.wecom_bot_adapter import WeComBotAdapterProtocol
 from ci_owner_agent.services.wecom_bot_worker import WeComBotWorker
+from ci_owner_agent.services.wecom_bot_models import WeComInboundMessage
 from tests.test_history_store import make_store
 
 
@@ -152,6 +153,37 @@ def test_notification_loop_redacts_unexpected_exception(caplog, monkeypatch):
     assert all(value not in caplog.text for value in ("mongodb://", "password", "secret-host", "/db", "Traceback"))
     relevant = [record for record in caplog.records if "Notification delivery loop failed" in record.getMessage()]
     assert len(relevant) == 1 and relevant[0].exc_info is None
+
+
+def _inbound_chat(*, chat_id, chat_type, content="private callback content", sender="secret-userid"):
+    return WeComInboundMessage(event_key="message:test", chat_id=chat_id, chat_type=chat_type,
+                               sender_userid=sender, content=content)
+
+
+def test_chat_discovery_disabled_does_not_log_chat_id(caplog):
+    worker = WeComBotWorker(_MockAdapter(), make_store(), discover_chat_id=False)
+    worker._maybe_log_discovered_chat_id(_inbound_chat(chat_id="secret-group-chat", chat_type="group"))
+    assert "WeCom group chat discovery" not in caplog.text
+    assert "secret-group-chat" not in caplog.text and "private callback content" not in caplog.text
+
+
+def test_chat_discovery_logs_first_group_chat_only(caplog):
+    worker = WeComBotWorker(_MockAdapter(), make_store(), discover_chat_id=True)
+    worker._maybe_log_discovered_chat_id(_inbound_chat(chat_id="first-group-chat", chat_type="group"))
+    worker._maybe_log_discovered_chat_id(_inbound_chat(chat_id="first-group-chat", chat_type="group"))
+    worker._maybe_log_discovered_chat_id(_inbound_chat(chat_id="second-group-chat", chat_type="group"))
+    assert caplog.text.count("WeCom group chat discovery") == 1
+    assert "first-group-chat" in caplog.text and "second-group-chat" not in caplog.text
+    assert "private callback content" not in caplog.text and "secret-userid" not in caplog.text
+    assert worker._chat_id_discovered is True
+
+
+def test_chat_discovery_ignores_direct_or_invalid_chat_metadata(caplog):
+    worker = WeComBotWorker(_MockAdapter(), make_store(), discover_chat_id=True)
+    for chat_id, chat_type in (("direct-userid", "single"), (None, "group"), ("", "group"), ("unknown-chat", "unknown")):
+        worker._maybe_log_discovered_chat_id(_inbound_chat(chat_id=chat_id, chat_type=chat_type))
+    assert "WeCom group chat discovery" not in caplog.text
+    assert "direct-userid" not in caplog.text and worker._chat_id_discovered is False
 
 
 

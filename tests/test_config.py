@@ -81,3 +81,13 @@ def test_wecom_bot_settings_and_secret_redaction(monkeypatch):
     assert settings.wecom_feedback_code_ttl_days == 40
     assert settings.wecom_bot_event_ttl_days == 9
     assert public_settings(settings)["wecom_bot_secret"] == "***"
+
+
+def test_wecom_bot_chat_discovery_defaults_disabled(monkeypatch):
+    monkeypatch.setenv("CI_AGENT_WECOM_BOT_DISCOVER_CHAT_ID", "false")
+    assert load_settings().wecom_bot_discover_chat_id is False
+
+
+def test_wecom_bot_chat_discovery_enabled_from_env(monkeypatch):
+    monkeypatch.setenv("CI_AGENT_WECOM_BOT_DISCOVER_CHAT_ID", "true")
+    assert load_settings().wecom_bot_discover_chat_id is True

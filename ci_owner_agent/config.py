@@ -56,6 +56,7 @@ class Settings:
     wecom_bot_enabled: bool
     wecom_bot_id: str | None
     wecom_bot_secret: str | None
+    wecom_bot_discover_chat_id: bool
     wecom_bot_notify_chat_id: str | None
     wecom_bot_notify_poll_seconds: int
     wecom_bot_notify_lease_seconds: int
@@ -190,6 +191,7 @@ def load_settings(env_file: str | Path | None = None) -> Settings:
         wecom_bot_enabled=_bool_env("CI_AGENT_WECOM_BOT_ENABLED", False),
         wecom_bot_id=os.getenv("CI_AGENT_WECOM_BOT_ID") or None,
         wecom_bot_secret=os.getenv("CI_AGENT_WECOM_BOT_SECRET") or None,
+        wecom_bot_discover_chat_id=_bool_env("CI_AGENT_WECOM_BOT_DISCOVER_CHAT_ID", False),
         wecom_bot_notify_chat_id=(os.getenv("CI_AGENT_WECOM_BOT_NOTIFY_CHAT_ID") or "").strip() or None,
         wecom_bot_notify_poll_seconds=_int_env("CI_AGENT_WECOM_BOT_NOTIFY_POLL_SECONDS", 2),
         wecom_bot_notify_lease_seconds=_int_env("CI_AGENT_WECOM_BOT_NOTIFY_LEASE_SECONDS", 30),

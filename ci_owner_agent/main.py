@@ -426,6 +426,7 @@ def main(argv: list[str] | None = None) -> int:
             event_ttl_days=settings.wecom_bot_event_ttl_days,
             ai_parser=ai_parser,
             card_action_url=card_action_url,
+            discover_chat_id=settings.wecom_bot_discover_chat_id,
             notification_chat_id=settings.wecom_bot_notify_chat_id,
             notification_poll_seconds=settings.wecom_bot_notify_poll_seconds,
             notification_lease_seconds=settings.wecom_bot_notify_lease_seconds,

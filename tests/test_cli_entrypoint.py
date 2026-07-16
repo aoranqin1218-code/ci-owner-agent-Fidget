@@ -434,6 +434,7 @@ def test_serve_wecom_bot_passes_ai_parser_to_worker(monkeypatch):
     class FakeWorker:
         def __init__(self, adapter, store, **kwargs):
             captured["ai_parser"] = kwargs["ai_parser"]
+            captured["discover_chat_id"] = kwargs["discover_chat_id"]
         def run(self):
             pass
 
@@ -457,6 +458,7 @@ def test_serve_wecom_bot_passes_ai_parser_to_worker(monkeypatch):
 
     assert result == 0
     assert captured.get("ai_parser") is sentinel_parser
+    assert captured.get("discover_chat_id") is False
 
 
 def test_weekly_notify_outbox_exception_returns_2_without_traceback(monkeypatch, capsys):

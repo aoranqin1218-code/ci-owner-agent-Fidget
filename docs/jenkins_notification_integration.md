@@ -42,6 +42,8 @@ CI_AGENT_API_KEY=******
 
 Do not print Bot secrets, API keys, chatids, or feedback tokens in Jenkins logs. The Jenkins command only queues notifications; the long-running bot worker delivers them from the shared MongoDB Outbox.
 
+To discover a group chatid, temporarily disable notifications and set `CI_AGENT_WECOM_BOT_DISCOVER_CHAT_ID=true`. Start `serve-wecom-bot` and @mention the bot in the intended group. It logs only the first qualifying group chatid per process; copy it manually into `CI_AGENT_WECOM_BOT_NOTIFY_CHAT_ID`, then set discovery back to false. Do not leave discovery enabled or log callback frames.
+
 ## Windows Jenkins Step
 
 ```powershell
