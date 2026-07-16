@@ -28,7 +28,8 @@ SUMMARY_FIELDS = [
     "noticeResult", "noticeOwner", "hasHighConfidenceOwner", "responsibilityItemCount", "inheritedOwnerCount",
     "currentBuildOwnerCount", "noOwnerItemCount", "metricsDurationMs", "llmCalls", "inputTokens", "outputTokens",
     "totalTokens", "tokenWarning", "stageCount", "traceOk", "traceUrl", "traceError", "stdoutFile",
-    "noticeFile", "stderrFile", "metricsFile", "traceFile", "traceSummaryFile",
+    "noticeFile", "stderrFile", "metricsFile", "traceFile", "traceSummaryFile", "traceChildRunCount",
+    "traceToolRunCount", "traceLlmRunCount", "traceUsageDictCount",
 ]
 
 def parse_args() -> argparse.Namespace:
@@ -128,6 +129,14 @@ def validate_notice(notice: dict[str, Any] | None, args: argparse.Namespace) -> 
         if notice.get(field) != value:
             return f"notice metadata mismatch: {field}"
     return None
+
+
+def write_summaries(out_dir: Path, rows: list[dict[str, Any]]) -> None:
+    with (out_dir / "summary.csv").open("w", encoding="utf-8-sig", newline="") as fp:
+        writer = csv.DictWriter(fp, fieldnames=SUMMARY_FIELDS, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(rows)
+    (out_dir / "summary.json").write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def build_command(args: argparse.Namespace, notice_path: Path | None = None) -> list[str]:
@@ -546,30 +555,35 @@ def main() -> int:
     if args.timeout_sec <= 0:
         raise SystemExit("--timeout-sec must be positive")
 
+    out_dir = resolve_user_path(args.out_dir) if args.out_dir else resolve_repo_default_path("runs/rerun-analyze-local")
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    def status_failure(error: str) -> int:
+        row = {"run": 0, "status": "FAILED", "errorKind": "status_validation", "error": error,
+               "noticeValid": False, "noticeValidationError": error}
+        write_summaries(out_dir, [row])
+        print(error, file=sys.stderr)
+        return 1
+
     console_file = resolve_user_path(args.console_file)
     if not console_file.exists():
         raise SystemExit(f"console file not found: {console_file}")
     if args.branch is not None:
         args.branch = normalize_branch_name(args.branch)
         if args.branch is None:
-            raise SystemExit("invalid branch")
+            return status_failure("invalid branch")
     status_resolution = resolve_final_status_from_console_log(console_file.read_text(encoding="utf-8", errors="replace"))
     if status_resolution.error:
-        print(status_resolution.error, file=sys.stderr)
-        return 1
+        return status_failure(status_resolution.error)
     detected_result = status_resolution.status
     if args.result is not None and args.result != detected_result:
-        print(f"status validation failed: requested {args.result}, log reports {detected_result}", file=sys.stderr)
-        return 1
+        return status_failure(f"status validation failed: requested {args.result}, log reports {detected_result}")
     args.result = detected_result
     if args.result not in {"FAILURE", "UNSTABLE", "UNKNOWN"}:
-        print("rerun-analyze-local only supports FAILURE, UNSTABLE and UNKNOWN", file=sys.stderr)
-        return 1
+        return status_failure("rerun-analyze-local only supports FAILURE, UNSTABLE and UNKNOWN")
     env_file = resolve_user_path(args.env_file) if args.env_file else resolve_repo_default_path(".env")
     load_env_file(env_file, override=args.env_override)
 
-    out_dir = resolve_user_path(args.out_dir) if args.out_dir else resolve_repo_default_path("runs/rerun-analyze-local")
-    out_dir.mkdir(parents=True, exist_ok=True)
 
     batch_id = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
     project_name = (
@@ -757,14 +771,7 @@ def main() -> int:
 
     summary_csv = out_dir / "summary.csv"
     summary_json = out_dir / "summary.json"
-
-    fieldnames = SUMMARY_FIELDS
-    with summary_csv.open("w", encoding="utf-8-sig", newline="") as fp:
-        writer = csv.DictWriter(fp, fieldnames=fieldnames, extrasaction="ignore")
-        writer.writeheader()
-        writer.writerows(rows)
-
-    summary_json.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
+    write_summaries(out_dir, rows)
 
     ok_count = sum(1 for row in rows if row["status"] == "OK")
     timeout_count = sum(1 for row in rows if row["status"] == "TIMEOUT")

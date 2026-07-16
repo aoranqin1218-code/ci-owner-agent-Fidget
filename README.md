@@ -750,6 +750,8 @@ python .\scripts\rerun_analyze_local.py `
 - `--base-commit` 为 lastSuccessfulBuild commit，即 fullRange 和 notice.baseCommit。
 - `--previous-commit` 为 focusRange 起点，优先从 Mongo `ci_builds` 查找上一个 build 的 headCommit。
 - 每次运行输出 `run-xx/notice.json`、`stdout.log`、`stderr.log`、`metrics.jsonl`、`command.txt`，可选 `trace.json` 和 `trace-summary.json`；notice 不再从 stdout 解析。
+- rerun 只执行 `FAILURE`、`UNSTABLE`、`UNKNOWN`。`SUCCESS`、`ABORTED`、`NOT_BUILT`、不支持的 Finished 状态，以及显式 `--result` 与日志状态不一致，都会在启动子进程前写入结构化 `status_validation` 失败摘要并返回非零。
+- rerun 的 `OK` 要求进程成功、notice 文件存在、notice schema 合法且 repo/job/build/branch/result/base/head 元数据一致；进程、timeout、notice 或清理错误都会写入固定字段的 CSV/JSON summary 并返回非零。
 
 三个批量/重跑脚本均可从任意 cwd 启动。显式传入的相对输入、输出和 env 路径相对启动 cwd；未显式提供的默认 `runs/...` 和 `.env` 相对仓库根目录。子进程固定在仓库根目录运行，并将仓库根目录置于 `PYTHONPATH` 首位（保留已有值）。
 ## 7. 输出结果说明
