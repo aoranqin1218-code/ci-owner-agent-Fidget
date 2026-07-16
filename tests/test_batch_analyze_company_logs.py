@@ -3,7 +3,22 @@ from __future__ import annotations
 import pytest
 from pathlib import Path
 import json
+import os
+import sys
 from scripts import batch_analyze_company_logs as company_batch
+
+FIXTURE = Path(__file__).parent / "fixtures" / "fake_analyze_launcher.py"
+
+
+def make_fake_python(tmp_path: Path) -> Path:
+    if os.name == "nt":
+        path = tmp_path / "fake-python.cmd"
+        path.write_text(f'@"{sys.executable}" "{FIXTURE}" %*\r\n', encoding="utf-8")
+    else:
+        path = tmp_path / "fake-python"
+        path.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{FIXTURE}" "$@"\n', encoding="utf-8")
+        path.chmod(0o755)
+    return path
 
 from scripts.batch_analyze_company_logs import (
     build_analyze_command,
@@ -223,6 +238,19 @@ def test_company_cleanup_failure_is_fail_closed(tmp_path, monkeypatch):
     assert main() == 1 and called is False
     record = json.loads((out_dir / "index.jsonl").read_text(encoding="utf-8").splitlines()[0])
     assert record["errorKind"] == "cleanup" and record["noticeValid"] is False and record["skipped"] is False
+
+
+@pytest.mark.parametrize(("mode", "notice_valid"), [("nonzero", True), ("nonzero_missing", False)])
+def test_company_real_child_nonzero_keeps_execution_error(tmp_path, monkeypatch, mode, notice_valid):
+    log_dir, out = tmp_path / "logs", tmp_path / "out"
+    log_dir.mkdir()
+    (log_dir / "company-unittest-2.log").write_text(f"Checking out Revision {'b' * 40} (refs/remotes/origin/dev)\nFinished: FAILURE\n", encoding="utf-8")
+    monkeypatch.setenv("FAKE_ANALYZE_MODE", mode)
+    monkeypatch.setattr("sys.argv", ["batch", "--log-dir", str(log_dir), "--out-dir", str(out), "--initial-base-commit", "a" * 40,
+                                      "--python", str(make_fake_python(tmp_path))])
+    code = main()
+    record = json.loads((out / "index.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert code == 1 and record["returnCode"] == 3 and record["errorKind"] == "execution" and record["noticeValid"] is notice_valid
 
 
 def test_extract_history_stats_from_structured_notice():

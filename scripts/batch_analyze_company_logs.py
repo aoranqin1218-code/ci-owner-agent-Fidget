@@ -492,13 +492,14 @@ def build_analyze_command(
     branch: str,
     build_url_prefix: str,
     notice_path: Path | None = None,
+    python_executable: str = sys.executable,
 ) -> list[str]:
     assert item.base_commit
     assert item.head_commit
     assert item.console_path
 
     command = [
-        sys.executable,
+        python_executable,
         "-m",
         "ci_owner_agent",
         "analyze-local",
@@ -545,6 +546,7 @@ def run_analyze_local(
     env: dict[str, str],
     timeout_seconds: int,
     notice_path: Path | None = None,
+    python_executable: str = sys.executable,
 ) -> subprocess.CompletedProcess[str]:
     cmd = build_analyze_command(
         item=item,
@@ -553,6 +555,7 @@ def run_analyze_local(
         branch=branch,
         build_url_prefix=build_url_prefix,
         notice_path=notice_path,
+        python_executable=python_executable,
     )
 
     return run_process_bounded(cmd, cwd=cwd, env=env, timeout_seconds=timeout_seconds)
@@ -688,6 +691,7 @@ def main() -> int:
     parser.add_argument("--env-override", action="store_true")
 
     parser.add_argument("--repo", default="fx-code")
+    parser.add_argument("--python", default=sys.executable)
     parser.add_argument("--job", default="services/fx-code-unittest")
     parser.add_argument("--branch", default="dev")
     parser.add_argument("--build-url-prefix", default="local://services/fx-code-unittest")
@@ -840,6 +844,7 @@ def main() -> int:
                 branch=branch,
                 build_url_prefix=args.build_url_prefix,
                 notice_path=notice_path,
+                python_executable=args.python,
             )
 
             record: dict[str, Any] = {
@@ -922,6 +927,7 @@ def main() -> int:
                     env=env,
                     timeout_seconds=args.timeout_seconds,
                     notice_path=notice_path,
+                    python_executable=args.python,
                 )
 
                 stdout_path.write_text(cp.stdout, encoding="utf-8")

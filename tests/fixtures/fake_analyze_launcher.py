@@ -19,7 +19,7 @@ def main() -> int:
         print("unexpected command prefix", file=sys.stderr)
         return 64
     mode = os.environ.get("FAKE_ANALYZE_MODE", "success")
-    supported = {"success", "missing_notice", "invalid_json", "invalid_schema", "nonzero", "write_then_timeout", "stdout_noise", "metadata_mismatch"}
+    supported = {"success", "missing_notice", "nonzero_missing", "invalid_json", "invalid_schema", "nonzero", "write_then_timeout", "stdout_noise", "metadata_mismatch"}
     if mode not in supported:
         print(f"unsupported FAKE_ANALYZE_MODE: {mode}", file=sys.stderr)
         return 64
@@ -27,8 +27,8 @@ def main() -> int:
     if diagnostic:
         Path(diagnostic).write_text(json.dumps({"cwd": os.getcwd(), "pythonpath": os.environ.get("PYTHONPATH", ""), "marker": os.environ.get("CI_AGENT_TEST_ENV_MARKER")}), encoding="utf-8")
     output = value("--output-file")
-    if mode == "missing_notice":
-        return 0
+    if mode in {"missing_notice", "nonzero_missing"}:
+        return 3 if mode == "nonzero_missing" else 0
     if output is None:
         return 65
     if mode == "invalid_json":
