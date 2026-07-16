@@ -16,12 +16,14 @@ from ci_owner_agent.services.wecom_bot_models import (
 from ci_owner_agent.services.wecom_feedback_parser import parse_fixed_feedback_intent
 from ci_owner_agent.services.wecom_feedback_ai_parser import WeComFeedbackAiParserProtocol
 
-HELP_TEXT = """群内反馈命令：
+HELP_TEXT = """发送命令请先@机器人
+群内反馈命令：
 CI-XXXXXX 1 判断正确
-CI-XXXXXX 1 责任人改为 @AoranQin-秦奥然
-CI-XXXXXX 1 标记偶发
+CI-XXXXXX 1 责任人改为 @Lisi-李四
+CI-XXXXXX 2 标记偶发
 CI-XXXXXX 1 无法定责
-查看 CI-XXXXXX"""
+查看 CI-XXXXXX
+中间数字为责任项序号，另外支持自然语言反馈。"""
 
 
 _OPERATION_LOOKUP_FAILED = object()

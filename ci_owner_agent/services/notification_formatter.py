@@ -92,9 +92,9 @@ def format_wecom_markdown_notice(
                 f"**反馈码：{feedback_code}**",
                 "",
                 "群内反馈：",
-                f"@CI机器人 {feedback_code} 1 判断正确",
-                f"@CI机器人 {feedback_code} 1 责任人改为 @某人",
-                f"@CI机器人 {feedback_code} 1 标记偶发",
+                f"@机器人 {feedback_code} 1 判断正确",
+                f"@机器人 {feedback_code} 1 责任人改为 @某人",
+                f"@机器人 {feedback_code} 1 标记偶发",
             ]
         )
     return "\n".join(lines)
