@@ -60,3 +60,13 @@ def test_aggregate_normalizes_branch_scope_like_weekly_reports():
     store = make_store(); t = datetime(2026, 7, 10, tzinfo=timezone.utc)
     _build(store, 1, "FAILURE", t); _event(store, 1, t)
     assert len(TestFailureStatsService(store).aggregate("r", ["j"], ["refs/remotes/origin/dev"], t.replace(day=1), t.replace(day=20))) == 1
+
+
+def test_aggregate_empty_or_invalid_branch_filter_matches_no_branches():
+    store = make_store(); t = datetime(2026, 7, 10, tzinfo=timezone.utc)
+    _build(store, 1, "FAILURE", t, branch="dev"); _event(store, 1, t, branch="dev")
+    _build(store, 2, "FAILURE", t, branch="release"); _event(store, 2, t, branch="release")
+    service = TestFailureStatsService(store)
+    assert service.aggregate("r", ["j"], ["refs/tags/v1"], t.replace(day=1), t.replace(day=20)) == []
+    assert service.aggregate("r", ["j"], [], t.replace(day=1), t.replace(day=20)) == []
+    assert len(service.aggregate("r", ["j"], None, t.replace(day=1), t.replace(day=20))) == 2

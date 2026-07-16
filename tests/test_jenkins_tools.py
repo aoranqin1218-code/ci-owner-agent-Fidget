@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from ci_owner_agent.main import main
 from ci_owner_agent.orchestrator import analyze_jenkins
 from ci_owner_agent.services.git_client import GitClient
@@ -135,6 +137,17 @@ def test_last_successful_requires_current_branch_without_requests():
     result = client.get_last_successful_build_info("job", branch=None, before_build_number=10)
     assert result["ok"] is False
     assert result["scannedBuildCount"] == 0
+    assert client.session.requested == []
+
+
+@pytest.mark.parametrize("before_build_number", [None, 0, -1])
+def test_last_successful_requires_positive_current_build_number_before_requests(before_build_number, sample_repo):
+    job = "services/fx-code-unittest"
+    client = client_for({jenkins_url(job, "lastSuccessfulBuild/api/json"): FakeResponse(build_payload(10, "SUCCESS", sample_repo["base"], "dev"))})
+    result = client.get_last_successful_build_info(job, "dev", before_build_number)
+    assert result["ok"] is False
+    assert result["scannedBuildCount"] == 0
+    assert result["candidateRejectedReasons"] == []
     assert client.session.requested == []
 
 

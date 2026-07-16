@@ -11,7 +11,7 @@ def normalize_scope_values(values: list[str] | tuple[str, ...] | None) -> list[s
 
 
 def normalize_branch_scope_values(values: list[str] | tuple[str, ...] | None) -> list[str] | None:
-    if not values:
+    if values is None:
         return None
     normalized = sorted({branch for branch in (normalize_branch_name(str(value)) for value in values) if branch})
-    return normalized or None
+    return normalized

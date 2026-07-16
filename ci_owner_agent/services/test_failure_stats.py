@@ -27,8 +27,9 @@ class TestFailureStatsService:
             query["repo"] = repo
         if jobs:
             query["job"] = {"$in": jobs}
-        if branches:
-            query["branch"] = {"$in": normalize_branch_scope_values(branches) or []}
+        normalized_branches = normalize_branch_scope_values(branches)
+        if normalized_branches is not None:
+            query["branch"] = {"$in": normalized_branches}
         events = list(self.store.test_file_failures.find(query))
         builds = list(self.store.builds.find(query))
 

@@ -120,6 +120,20 @@ class JenkinsClient:
                 "scannedBuildCount": 0,
                 "candidateRejectedReasons": [],
             }
+        if before_build_number is None:
+            return {
+                "ok": False,
+                "error": "current build number is required; refusing to select a Git diff baseline",
+                "scannedBuildCount": 0,
+                "candidateRejectedReasons": [],
+            }
+        if not isinstance(before_build_number, int) or isinstance(before_build_number, bool) or before_build_number <= 0:
+            return {
+                "ok": False,
+                "error": "current build number must be a positive integer",
+                "scannedBuildCount": 0,
+                "candidateRejectedReasons": [],
+            }
         rejected: list[str] = []
         scanned = 0
         seen_numbers: set[int] = set()
@@ -173,8 +187,6 @@ class JenkinsClient:
                 return {"ok": True, "successfulBuildInfo": found.model_dump(), "scannedBuildCount": scanned, "candidateRejectedReasons": rejected}
         elif not fast.get("ok"):
             rejected.append(f"lastSuccessfulBuild unreadable: {fast.get('error')}")
-        if before_build_number is None:
-            return {"ok": False, "error": "current build number is required to scan matching successful builds", "scannedBuildCount": scanned, "candidateRejectedReasons": rejected}
         for number in range(before_build_number - 1, max(0, before_build_number - max(1, scan_limit)) - 1, -1):
             if number in seen_numbers:
                 continue

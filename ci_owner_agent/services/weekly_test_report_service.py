@@ -106,7 +106,7 @@ def _scope_query(repo: str, jobs: list[str] | None, branches: list[str] | None) 
     query: dict = {"repo": repo}
     if jobs:
         query["job"] = {"$in": jobs}
-    if branches:
+    if branches is not None:
         query["branch"] = {"$in": branches}
     return query
 
