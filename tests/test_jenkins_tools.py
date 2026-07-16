@@ -117,6 +117,30 @@ def test_jenkins_branch_extraction_normalizes_and_rejects_ambiguous_candidates()
     assert any("unique logical branch" in warning for warning in result["buildInfo"]["warnings"])
 
 
+@pytest.mark.parametrize("parameters", [
+    [{"name": "BRANCH", "value": "dev"}, {"name": "GIT_BRANCH", "value": "release"}],
+    [{"name": "GIT_BRANCH", "value": "release"}, {"name": "BRANCH", "value": "dev"}],
+])
+def test_jenkins_conflicting_branch_parameters_fail_closed(parameters):
+    job = "services/fx-code-unittest"
+    payload = build_payload(1, "FAILURE", "abc1234")
+    payload["actions"] = [{"parameters": parameters}, {"buildsByBranchName": {"refs/remotes/origin/dev": {}}}]
+    result = client_for({jenkins_url(job, "1/api/json"): FakeResponse(payload), jenkins_url(job, "1/consoleText"): FakeResponse()}).get_build_info(job, 1)
+    assert result["buildInfo"]["branch"] is None
+    assert any("unique logical branch" in warning for warning in result["buildInfo"]["warnings"])
+
+
+def test_jenkins_branch_parameters_normalize_and_deduplicate_across_actions():
+    job = "services/fx-code-unittest"
+    payload = build_payload(1, "FAILURE", "abc1234")
+    payload["actions"] = [
+        {"parameters": [{"name": "BRANCH", "value": "dev"}]},
+        {"parameters": [{"name": "GIT_BRANCH", "value": "refs/remotes/origin/dev"}, {"name": "SOURCE_BRANCH", "value": "refs/heads/dev"}]},
+    ]
+    result = client_for({jenkins_url(job, "1/api/json"): FakeResponse(payload), jenkins_url(job, "1/consoleText"): FakeResponse()}).get_build_info(job, 1)
+    assert result["buildInfo"]["branch"] == "dev"
+
+
 def test_last_successful_build_scans_past_wrong_branch(sample_repo):
     job = "services/fx-code-unittest"
     routes = {

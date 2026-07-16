@@ -80,7 +80,7 @@ class JenkinsClient:
         if not commit:
             warnings.append("commit not found from Jenkins build metadata or console log")
         branch = self._extract_branch(data)
-        if branch is None and any(isinstance(action.get("buildsByBranchName"), dict) for action in data.get("actions") or []):
+        if branch is None and self._has_branch_metadata(data):
             warnings.append("could not determine a unique logical branch from Jenkins build metadata")
         build_info = BuildInfo(
             job=job,
@@ -216,6 +216,7 @@ class JenkinsClient:
             return str(value)
 
     def _extract_branch(self, data: dict[str, Any]) -> str | None:
+        parameter_candidates: set[str] = set()
         for action in data.get("actions") or []:
             for param in action.get("parameters") or []:
                 name = str(param.get("name", "")).lower()
@@ -223,7 +224,11 @@ class JenkinsClient:
                     value = param.get("value")
                     normalized = normalize_branch_name(str(value) if value else None)
                     if normalized:
-                        return normalized
+                        parameter_candidates.add(normalized)
+        if len(parameter_candidates) == 1:
+            return parameter_candidates.pop()
+        if len(parameter_candidates) > 1:
+            return None
         for action in data.get("actions") or []:
             builds_by_branch = action.get("buildsByBranchName")
             if isinstance(builds_by_branch, dict) and builds_by_branch:
@@ -232,6 +237,15 @@ class JenkinsClient:
                 if len(candidates) == 1:
                     return candidates.pop()
         return None
+
+    def _has_branch_metadata(self, data: dict[str, Any]) -> bool:
+        for action in data.get("actions") or []:
+            if isinstance(action.get("buildsByBranchName"), dict):
+                return True
+            for param in action.get("parameters") or []:
+                if str(param.get("name", "")).lower() in {"branch", "git_branch", "source_branch"}:
+                    return True
+        return False
 
     def _extract_commit(self, data: dict[str, Any], console_text: str) -> str | None:
         candidates: list[str] = []

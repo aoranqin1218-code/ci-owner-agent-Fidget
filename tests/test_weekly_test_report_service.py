@@ -175,3 +175,14 @@ def test_weekly_invalid_or_empty_branch_filter_matches_no_data():
         queued = service.notify({"importantItemCount": 1, "normalItemCount": 0, "markdown": "x", "digest": str(branches)}, repo="r", jobs=["job"], branches=branches, period_start=START, period_end=END)
         assert queued["ok"] is True
         assert store.wecom_notification_outbox.docs[-1]["metadata"]["branches"] == []
+
+
+def test_weekly_empty_branch_scope_has_distinct_markdown_and_digest():
+    store = make_store()
+    service = WeeklyTestReportService(store, WeeklyTestReportConfig.model_validate({"important": {"enabled": False}}))
+    report_all = service.generate(repo="r", jobs=["origin/dev"], branches=None, period_start=START, period_end=END)
+    report_empty = service.generate(repo="r", jobs=["origin/dev"], branches=[], period_start=START, period_end=END)
+    assert report_all["markdown"] != report_empty["markdown"]
+    assert report_all["digest"] != report_empty["digest"]
+    assert "origin/dev / *" in report_all["markdown"]
+    assert "origin/dev / 无有效分支" in report_empty["markdown"]
