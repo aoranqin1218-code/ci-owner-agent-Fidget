@@ -132,6 +132,23 @@ def test_jenkins_invalid_resume_reexecutes(tmp_path, monkeypatch, invalid_conten
     assert record["returnCode"] == 0 and record["noticeValid"] is True
 
 
+def test_jenkins_invalid_resume_cleanup_failure_is_fail_closed(tmp_path, monkeypatch):
+    out = tmp_path / "out"
+    argv = ["jenkins", "--job", "job", "--repo", "repo", "--builds", "13", "--out-dir", str(out), "--python", str(make_fake_python(tmp_path))]
+    monkeypatch.setenv("FAKE_ANALYZE_MODE", "success")
+    monkeypatch.setattr("sys.argv", argv)
+    assert main() == 0
+    notice = next((out / "notices").glob("*.notice.json"))
+    payload = json.loads(notice.read_text(encoding="utf-8")); payload["repo"] = "wrong"
+    notice.write_text(json.dumps(payload), encoding="utf-8")
+    monkeypatch.setattr(jenkins_batch, "cleanup_previous_outputs", lambda paths: ["cannot remove invalid resume notice"])
+    monkeypatch.setattr(jenkins_batch, "run_analyze", lambda **kwargs: (_ for _ in ()).throw(AssertionError("child must not start")))
+    monkeypatch.setattr("sys.argv", [*argv, "--resume"])
+    assert main() == 1
+    record = json.loads((out / "index.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert record["resumeValidated"] is False and record["resumeInvalidReason"] and record["errorKind"] == "cleanup"
+
+
 def test_parse_builds_list_range_and_union():
     assert parse_builds("7,13", None, None) == [7, 13]
     assert parse_builds(None, 7, 9) == [7, 8, 9]

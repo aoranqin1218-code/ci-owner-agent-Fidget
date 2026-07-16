@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -19,7 +20,7 @@ def main() -> int:
         print("unexpected command prefix", file=sys.stderr)
         return 64
     mode = os.environ.get("FAKE_ANALYZE_MODE", "success")
-    supported = {"success", "missing_notice", "nonzero_missing", "invalid_json", "invalid_schema", "nonzero", "write_then_timeout", "stdout_noise", "metadata_mismatch"}
+    supported = {"success", "missing_notice", "nonzero_missing", "invalid_json", "invalid_schema", "nonzero", "write_then_timeout", "spawn_descendant_then_timeout", "stdout_noise", "metadata_mismatch"}
     if mode not in supported:
         print(f"unsupported FAKE_ANALYZE_MODE: {mode}", file=sys.stderr)
         return 64
@@ -54,6 +55,10 @@ def main() -> int:
         notice[field] = replacements[field]
     Path(output).write_text(json.dumps(notice, ensure_ascii=False), encoding="utf-8")
     print('{"unrelated": true}')
+    if mode == "spawn_descendant_then_timeout":
+        marker = os.environ["FAKE_ANALYZE_MARKER_FILE"]
+        subprocess.Popen([sys.executable, "-c", "import pathlib,sys,time\np=pathlib.Path(sys.argv[1])\nwhile True:\n p.open('a').write('x')\n time.sleep(.05)", marker])
+        time.sleep(30)
     if mode == "write_then_timeout":
         time.sleep(30)
     return 3 if mode == "nonzero" else 0

@@ -5,6 +5,7 @@ from pathlib import Path
 import json
 import os
 import sys
+import time
 from scripts import batch_analyze_company_logs as company_batch
 
 FIXTURE = Path(__file__).parent / "fixtures" / "fake_analyze_launcher.py"
@@ -251,6 +252,61 @@ def test_company_real_child_nonzero_keeps_execution_error(tmp_path, monkeypatch,
     code = main()
     record = json.loads((out / "index.jsonl").read_text(encoding="utf-8").splitlines()[0])
     assert code == 1 and record["returnCode"] == 3 and record["errorKind"] == "execution" and record["noticeValid"] is notice_valid
+
+
+def test_company_descendant_stops_after_timeout(tmp_path, monkeypatch):
+    log_dir, out, marker = tmp_path / "logs", tmp_path / "out", tmp_path / "marker.txt"
+    log_dir.mkdir()
+    (log_dir / "company-unittest-2.log").write_text(f"Checking out Revision {'b' * 40} (refs/remotes/origin/dev)\nFinished: FAILURE\n", encoding="utf-8")
+    monkeypatch.setenv("FAKE_ANALYZE_MODE", "spawn_descendant_then_timeout")
+    monkeypatch.setenv("FAKE_ANALYZE_MARKER_FILE", str(marker))
+    monkeypatch.setattr("sys.argv", ["batch", "--log-dir", str(log_dir), "--out-dir", str(out), "--initial-base-commit", "a" * 40,
+                                      "--python", str(make_fake_python(tmp_path)), "--timeout-seconds", "1"])
+    assert main() == 1
+    record = json.loads((out / "index.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert record["errorKind"] == "timeout" and record["noticeValid"] is False and record["terminationReaped"] is True
+    size = marker.stat().st_size
+    time.sleep(0.3)
+    assert marker.stat().st_size == size
+
+
+def test_company_cleanup_failure_continues_next_build(tmp_path, monkeypatch):
+    log_dir, out = tmp_path / "logs", tmp_path / "out"
+    log_dir.mkdir()
+    for build, sha in ((2, "b" * 40), (3, "c" * 40)):
+        (log_dir / f"company-unittest-{build}.log").write_text(f"Checking out Revision {sha} (refs/remotes/origin/dev)\nFinished: FAILURE\n", encoding="utf-8")
+    calls = 0
+    original = company_batch.cleanup_previous_outputs
+    def cleanup(paths):
+        nonlocal calls
+        calls += 1
+        return ["locked"] if calls == 1 else original(paths)
+    monkeypatch.setattr(company_batch, "cleanup_previous_outputs", cleanup)
+    monkeypatch.setenv("FAKE_ANALYZE_MODE", "success")
+    monkeypatch.setattr("sys.argv", ["batch", "--log-dir", str(log_dir), "--out-dir", str(out), "--initial-base-commit", "a" * 40,
+                                      "--python", str(make_fake_python(tmp_path))])
+    assert main() == 1
+    records = [json.loads(line) for line in (out / "index.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert records[0]["errorKind"] == "cleanup" and records[1]["noticeValid"] is True and records[1]["returnCode"] == 0
+
+
+def test_company_invalid_resume_cleanup_failure_is_fail_closed(tmp_path, monkeypatch):
+    log_dir, out = tmp_path / "logs", tmp_path / "out"
+    log_dir.mkdir()
+    (log_dir / "company-unittest-2.log").write_text(f"Checking out Revision {'b' * 40} (refs/remotes/origin/dev)\nFinished: FAILURE\n", encoding="utf-8")
+    argv = ["batch", "--log-dir", str(log_dir), "--out-dir", str(out), "--initial-base-commit", "a" * 40, "--python", str(make_fake_python(tmp_path))]
+    monkeypatch.setenv("FAKE_ANALYZE_MODE", "success")
+    monkeypatch.setattr("sys.argv", argv)
+    assert main() == 0
+    notice = next((out / "notices").glob("*.notice.json"))
+    payload = json.loads(notice.read_text(encoding="utf-8")); payload["buildNumber"] = 999
+    notice.write_text(json.dumps(payload), encoding="utf-8")
+    monkeypatch.setattr(company_batch, "cleanup_previous_outputs", lambda paths: ["cannot remove invalid resume notice"])
+    monkeypatch.setattr(company_batch, "run_analyze_local", lambda **kwargs: (_ for _ in ()).throw(AssertionError("child must not start")))
+    monkeypatch.setattr("sys.argv", [*argv, "--resume"])
+    assert main() == 1
+    record = json.loads((out / "index.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert record["resumeValidated"] is False and record["resumeInvalidReason"] and record["errorKind"] == "cleanup"
 
 
 def test_extract_history_stats_from_structured_notice():
