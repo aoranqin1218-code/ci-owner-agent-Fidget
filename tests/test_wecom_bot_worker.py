@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import logging
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 from collections.abc import Mapping
@@ -127,6 +129,29 @@ def test_missing_delivery_key_is_dead_lettered_without_send(caplog, monkeypatch)
     assert doc["nextAttemptAt"] is None and doc["leaseToken"] is None and doc["leaseUntil"] is None
     assert doc["lastErrorType"] == "InvalidOutboxItem" and worker.notification_outbox.claim_next() is None
     assert "configured-chat" not in caplog.text and "private markdown" not in caplog.text
+
+
+def test_notification_loop_redacts_unexpected_exception(caplog, monkeypatch):
+    adapter = _MockAdapter()
+    worker = WeComBotWorker(adapter, make_store(), notification_chat_id="configured-chat", notification_poll_seconds=1)
+
+    async def fail_once():
+        assert worker._stop_event is not None
+        worker._stop_event.set()
+        raise RuntimeError("mongodb://user:password@secret-host/db")
+
+    monkeypatch.setattr(worker, "deliver_one_notification", fail_once)
+    caplog.set_level(logging.ERROR, logger="ci_owner_agent.services.wecom_bot_worker")
+
+    async def run():
+        worker._stop_event = asyncio.Event()
+        await worker._notification_loop()
+
+    asyncio.run(run())
+    assert "Notification delivery loop failed: RuntimeError" in caplog.text
+    assert all(value not in caplog.text for value in ("mongodb://", "password", "secret-host", "/db", "Traceback"))
+    relevant = [record for record in caplog.records if "Notification delivery loop failed" in record.getMessage()]
+    assert len(relevant) == 1 and relevant[0].exc_info is None
 
 
 

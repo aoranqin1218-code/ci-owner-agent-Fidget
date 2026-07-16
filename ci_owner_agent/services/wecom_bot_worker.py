@@ -164,8 +164,8 @@ class WeComBotWorker:
                     pass
             except asyncio.CancelledError:
                 return
-            except Exception:
-                logger.exception("Notification delivery loop failed")
+            except Exception as exc:
+                logger.error("Notification delivery loop failed: %s", type(exc).__name__)
                 try:
                     await asyncio.wait_for(self._stop_event.wait(), timeout=self.notification_poll_seconds)
                 except TimeoutError:
