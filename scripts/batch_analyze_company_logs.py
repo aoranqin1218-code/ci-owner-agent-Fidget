@@ -21,7 +21,7 @@ from scripts._runtime import REPO_ROOT, build_subprocess_env, ensure_repo_on_sys
 ensure_repo_on_sys_path()
 from ci_owner_agent.schemas import CiResponsibilityNotice
 from ci_owner_agent.services.branch_normalization import normalize_branch_name
-from ci_owner_agent.services.log_provider import log_detect_final_status, resolve_checkout_revision_from_console_log
+from ci_owner_agent.services.log_provider import log_detect_final_status, resolve_checkout_revision_from_console_log, resolve_final_status_from_console_log
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -47,6 +47,8 @@ class BuildLog:
     checkout_error: str | None = None
     branch_ambiguous: bool = False
     status_error: str | None = None
+    status_detected: bool = False
+    status_raw: str | None = None
     build_timestamp: str | None = None
     source: Literal["log", "manifest", "log+manifest"] = "log"
     baseline_source: str | None = None
@@ -122,13 +124,14 @@ def parse_build_log(path: Path) -> BuildLog | None:
 
     text = path.read_text(encoding="utf-8", errors="replace")
     resolution = resolve_checkout_revision_from_console_log(text)
+    status_resolution = resolve_final_status_from_console_log(text)
     normalized = tuple(sorted({branch for branch in (normalize_branch_name(ref) for ref in resolution.refs) if branch}))
     invalid = tuple(sorted(ref for ref in resolution.refs if normalize_branch_name(ref) is None))
     branch_error = "invalid checkout ref" if invalid else ("ambiguous checkout branch" if len(normalized) > 1 else None)
     return BuildLog(
         build=build,
         console_path=path,
-        status=parse_status(text),
+        status=status_resolution.status,
         head_commit=resolution.commit,
         branch=normalized[0] if len(normalized) == 1 else None,
         checkout_refs=resolution.refs,
@@ -138,6 +141,9 @@ def parse_build_log(path: Path) -> BuildLog | None:
         checkout_ambiguous=resolution.ambiguous,
         checkout_error="ambiguous trusted checkout commit" if resolution.ambiguous else ("missing trusted checkout commit" if not resolution.commit else None),
         branch_ambiguous=len(normalized) > 1,
+        status_error=status_resolution.error,
+        status_detected=status_resolution.detected,
+        status_raw=status_resolution.raw_status,
     )
 
 
@@ -211,6 +217,9 @@ def _assign_history(logs: list[BuildLog], initial_base_commit: str | None, branc
         item.validation_failed = True
 
     for item in sorted(logs, key=lambda value: value.build):
+        if item.status_error:
+            validation_failure(item, "status_validation", item.status_error)
+            continue
         if item.branch_error:
             validation_failure(item, "branch_validation", item.branch_error)
             continue
@@ -800,6 +809,9 @@ def main() -> int:
                     "headCommit": item.head_commit,
                     "branch": item.branch,
                     "checkoutAmbiguous": item.checkout_ambiguous,
+                    "statusDetected": item.status_detected,
+                    "statusRaw": item.status_raw,
+                    "statusError": item.status_error,
                     "baselineSource": item.baseline_source,
                     "baselineFromObservedSuccess": item.baseline_from_observed_success,
                     "baseCommit": item.base_commit,
@@ -846,6 +858,9 @@ def main() -> int:
                 "headCommit": item.head_commit,
                 "branch": item.branch,
                 "checkoutAmbiguous": item.checkout_ambiguous,
+                "statusDetected": item.status_detected,
+                "statusRaw": item.status_raw,
+                "statusError": item.status_error,
                 "baselineSource": item.baseline_source,
                 "baselineFromObservedSuccess": item.baseline_from_observed_success,
                 "lastSuccessfulBuildNumber": item.last_success_build_number,
@@ -995,6 +1010,9 @@ def main() -> int:
         "headCommit",
         "branch",
         "checkoutAmbiguous",
+        "statusDetected",
+        "statusRaw",
+        "statusError",
         "baselineSource",
         "baselineFromObservedSuccess",
         "validationFailed",

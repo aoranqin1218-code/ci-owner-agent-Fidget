@@ -70,6 +70,13 @@ SUMMARY_FIELDS = [
     "traceOk",
     "traceUrl",
     "failureReason",
+    "skipped",
+    "skipReason",
+    "noticeValid",
+    "resumeValidated",
+    "resumeInvalidReason",
+    "errorKind",
+    "cleanupWarning",
     "error",
 ]
 

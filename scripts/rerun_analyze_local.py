@@ -19,6 +19,9 @@ if str(_SCRIPT_REPO_ROOT) not in sys.path:
 from scripts._runtime import REPO_ROOT, build_subprocess_env, ensure_repo_on_sys_path, resolve_repo_default_path, resolve_user_path
 ensure_repo_on_sys_path()
 from scripts.batch_analyze_company_logs import cleanup_previous_outputs, load_env_file
+from ci_owner_agent.schemas import CiResponsibilityNotice
+from ci_owner_agent.services.branch_normalization import normalize_branch_name
+from ci_owner_agent.services.log_provider import log_detect_final_status
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -97,42 +100,26 @@ def read_last_jsonl(path: Path) -> dict[str, Any] | None:
         return None
 
 
-def extract_json_object(text: str) -> dict[str, Any] | None:
-    decoder = json.JSONDecoder()
-    for index, ch in enumerate(text):
-        if ch != "{":
-            continue
-        try:
-            obj, _ = decoder.raw_decode(text[index:])
-        except json.JSONDecodeError:
-            continue
-        if isinstance(obj, dict):
-            return obj
-    return None
-
-
-def read_notice(path: Path) -> dict[str, Any] | None:
+def read_notice(path: Path) -> tuple[dict[str, Any] | None, str | None]:
     if not path.exists():
-        return None
+        return None, "notice file missing"
+    try:
+        notice = CiResponsibilityNotice.model_validate_json(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return None, f"invalid notice: {type(exc).__name__}: {exc}"
+    return notice.model_dump(mode="json"), None
 
 
 def validate_notice(notice: dict[str, Any] | None, args: argparse.Namespace) -> str | None:
     if notice is None:
-        return "notice missing or invalid"
-    expected = {"repo": args.repo, "job": args.job, "buildNumber": args.build, "baseCommit": args.base_commit, "headCommit": args.head_commit}
+        return "notice unavailable"
+    expected = {"repo": args.repo, "job": args.job, "buildNumber": args.build, "baseCommit": args.base_commit, "headCommit": args.head_commit, "result": args.result}
     if args.branch is not None:
         expected["branch"] = args.branch
-    if args.result is not None:
-        expected["result"] = args.result
     for field, value in expected.items():
         if notice.get(field) != value:
             return f"notice metadata mismatch: {field}"
     return None
-    try:
-        from ci_owner_agent.schemas import CiResponsibilityNotice
-        return CiResponsibilityNotice.model_validate_json(path.read_text(encoding="utf-8")).model_dump(mode="json")
-    except Exception:
-        return None
 
 
 def build_command(args: argparse.Namespace, notice_path: Path | None = None) -> list[str]:
@@ -554,6 +541,13 @@ def main() -> int:
     console_file = resolve_user_path(args.console_file)
     if not console_file.exists():
         raise SystemExit(f"console file not found: {console_file}")
+    if args.branch is not None:
+        args.branch = normalize_branch_name(args.branch)
+        if args.branch is None:
+            raise SystemExit("invalid branch")
+    detected_result = log_detect_final_status(console_file.read_text(encoding="utf-8", errors="replace"))
+    if args.result is None:
+        args.result = detected_result
     env_file = resolve_user_path(args.env_file) if args.env_file else resolve_repo_default_path(".env")
     load_env_file(env_file, override=args.env_override)
 
@@ -592,7 +586,7 @@ def main() -> int:
 
         cleanup_warnings = cleanup_previous_outputs([notice_file, stdout_file, stderr_file, metrics_file, command_file, trace_file, trace_summary_file])
         if cleanup_warnings:
-            rows.append({"run": run_index, "status": "FAILED", "error": "; ".join(cleanup_warnings)})
+            rows.append({"run": run_index, "status": "FAILED", "errorKind": "cleanup", "error": "; ".join(cleanup_warnings), "noticeValid": False, "noticeValidationError": "cleanup failed"})
             continue
 
         run_args = argparse.Namespace(**vars(args))
@@ -658,12 +652,16 @@ def main() -> int:
 
         duration_sec = round(time.perf_counter() - started, 3)
 
+        error_kind: str | None = None
+        error: str | None = None
         if timed_out:
             status = "TIMEOUT"
+            error_kind, error = "timeout", f"analyze-local timeout after {args.timeout_sec}s"
         elif exit_code == 0:
             status = "OK"
         else:
             status = "FAILED"
+            error_kind, error = "execution", f"analyze-local exited with {exit_code}"
 
         trace_result: dict[str, Any] | None = None
         if args.fetch_trace:
@@ -681,10 +679,12 @@ def main() -> int:
             )
 
         metrics = read_last_jsonl(metrics_file)
-        notice = read_notice(notice_file)
-        notice_error = validate_notice(notice, args)
+        notice, read_error = read_notice(notice_file)
+        notice_error = read_error or validate_notice(notice, args)
         if not timed_out and exit_code == 0 and notice_error:
             status = "FAILED"
+            error = notice_error
+            error_kind = "notice_missing" if read_error == "notice file missing" else ("notice_schema" if read_error else "notice_metadata")
         notice_summary = summarize_notice(notice)
 
         row = {
@@ -709,7 +709,10 @@ def main() -> int:
             "traceError": trace_result.get("error") if trace_result and not trace_result.get("ok") else None,
             "stdoutFile": str(stdout_file),
             "noticeFile": str(notice_file),
+            "noticeValid": notice_error is None,
             "noticeValidationError": notice_error,
+            "errorKind": error_kind,
+            "error": error,
             "stderrFile": str(stderr_file),
             "metricsFile": str(metrics_file),
             "traceFile": str(trace_file) if args.fetch_trace else None,
