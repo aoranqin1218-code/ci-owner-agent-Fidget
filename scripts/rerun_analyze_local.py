@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import argparse
 import csv
@@ -21,7 +21,15 @@ ensure_repo_on_sys_path()
 from scripts.batch_analyze_company_logs import cleanup_previous_outputs, load_env_file
 from ci_owner_agent.schemas import CiResponsibilityNotice
 from ci_owner_agent.services.branch_normalization import normalize_branch_name
-from ci_owner_agent.services.log_provider import log_detect_final_status
+from ci_owner_agent.services.log_provider import resolve_final_status_from_console_log
+
+SUMMARY_FIELDS = [
+    "run", "status", "exitCode", "durationSec", "errorKind", "error", "noticeValid", "noticeValidationError",
+    "noticeResult", "noticeOwner", "hasHighConfidenceOwner", "responsibilityItemCount", "inheritedOwnerCount",
+    "currentBuildOwnerCount", "noOwnerItemCount", "metricsDurationMs", "llmCalls", "inputTokens", "outputTokens",
+    "totalTokens", "tokenWarning", "stageCount", "traceOk", "traceUrl", "traceError", "stdoutFile",
+    "noticeFile", "stderrFile", "metricsFile", "traceFile", "traceSummaryFile",
+]
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -545,9 +553,18 @@ def main() -> int:
         args.branch = normalize_branch_name(args.branch)
         if args.branch is None:
             raise SystemExit("invalid branch")
-    detected_result = log_detect_final_status(console_file.read_text(encoding="utf-8", errors="replace"))
-    if args.result is None:
-        args.result = detected_result
+    status_resolution = resolve_final_status_from_console_log(console_file.read_text(encoding="utf-8", errors="replace"))
+    if status_resolution.error:
+        print(status_resolution.error, file=sys.stderr)
+        return 1
+    detected_result = status_resolution.status
+    if args.result is not None and args.result != detected_result:
+        print(f"status validation failed: requested {args.result}, log reports {detected_result}", file=sys.stderr)
+        return 1
+    args.result = detected_result
+    if args.result not in {"FAILURE", "UNSTABLE", "UNKNOWN"}:
+        print("rerun-analyze-local only supports FAILURE, UNSTABLE and UNKNOWN", file=sys.stderr)
+        return 1
     env_file = resolve_user_path(args.env_file) if args.env_file else resolve_repo_default_path(".env")
     load_env_file(env_file, override=args.env_override)
 
@@ -620,35 +637,41 @@ def main() -> int:
         started_at = dt.datetime.now(dt.timezone.utc)
         started = time.perf_counter()
 
-        with stdout_file.open("w", encoding="utf-8", errors="replace") as stdout_fp, stderr_file.open(
-            "w", encoding="utf-8", errors="replace"
-        ) as stderr_fp:
-            creationflags = 0
-            preexec_fn = None
+        try:
+            with stdout_file.open("w", encoding="utf-8", errors="replace") as stdout_fp, stderr_file.open(
+                "w", encoding="utf-8", errors="replace"
+            ) as stderr_fp:
+                creationflags = 0
+                preexec_fn = None
 
-            if platform.system().lower().startswith("win"):
-                creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
-            else:
-                preexec_fn = os.setsid
+                if platform.system().lower().startswith("win"):
+                    creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
+                else:
+                    preexec_fn = os.setsid
 
-            process = subprocess.Popen(
-                run_command,
-                stdout=stdout_fp,
-                stderr=stderr_fp,
-                env=env,
-                text=True,
-                creationflags=creationflags,
-                preexec_fn=preexec_fn,
-                cwd=str(REPO_ROOT),
-            )
+                process = subprocess.Popen(
+                    run_command, stdout=stdout_fp, stderr=stderr_fp, env=env, text=True,
+                    creationflags=creationflags, preexec_fn=preexec_fn, cwd=str(REPO_ROOT),
+                )
 
-            timed_out = False
-            try:
-                exit_code = process.wait(timeout=args.timeout_sec)
-            except subprocess.TimeoutExpired:
-                timed_out = True
-                exit_code = None
-                kill_process_tree(process)
+                timed_out = False
+                try:
+                    exit_code = process.wait(timeout=args.timeout_sec)
+                except subprocess.TimeoutExpired:
+                    timed_out = True
+                    exit_code = None
+                    kill_process_tree(process)
+        except Exception as exc:
+            duration_sec = round(time.perf_counter() - started, 3)
+            rows.append({
+                "run": run_index, "status": "FAILED", "durationSec": duration_sec,
+                "errorKind": "execution", "error": f"{type(exc).__name__}: {exc}",
+                "noticeValid": False, "noticeValidationError": "process did not start",
+                "stdoutFile": str(stdout_file), "noticeFile": str(notice_file), "stderrFile": str(stderr_file),
+                "metricsFile": str(metrics_file), "traceFile": str(trace_file) if args.fetch_trace else None,
+                "traceSummaryFile": str(trace_summary_file) if args.fetch_trace else None,
+            })
+            continue
 
         duration_sec = round(time.perf_counter() - started, 3)
 
@@ -735,9 +758,9 @@ def main() -> int:
     summary_csv = out_dir / "summary.csv"
     summary_json = out_dir / "summary.json"
 
-    fieldnames = list(rows[0].keys()) if rows else []
+    fieldnames = SUMMARY_FIELDS
     with summary_csv.open("w", encoding="utf-8-sig", newline="") as fp:
-        writer = csv.DictWriter(fp, fieldnames=fieldnames)
+        writer = csv.DictWriter(fp, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(rows)
 

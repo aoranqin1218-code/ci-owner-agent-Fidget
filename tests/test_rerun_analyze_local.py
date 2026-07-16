@@ -1,4 +1,4 @@
-﻿import argparse
+import argparse
 from ci_owner_agent.schemas import CiResponsibilityNotice, Owner
 from scripts.rerun_analyze_local import build_command, read_notice, validate_notice
 
