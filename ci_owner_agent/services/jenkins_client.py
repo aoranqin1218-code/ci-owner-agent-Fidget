@@ -8,6 +8,7 @@ from urllib.parse import quote
 import requests
 
 from ci_owner_agent.schemas import BuildInfo, LogTail, SuccessfulBuildInfo
+from ci_owner_agent.services.branch_normalization import normalize_branch_name
 from ci_owner_agent.services.command_runner import truncate_tail_text, truncate_text
 from ci_owner_agent.services.log_provider import log_detect_final_status
 
@@ -79,6 +80,8 @@ class JenkinsClient:
         if not commit:
             warnings.append("commit not found from Jenkins build metadata or console log")
         branch = self._extract_branch(data)
+        if branch is None and any(isinstance(action.get("buildsByBranchName"), dict) for action in data.get("actions") or []):
+            warnings.append("could not determine a unique logical branch from Jenkins build metadata")
         build_info = BuildInfo(
             job=job,
             buildNumber=int(data.get("number") or build_number),
@@ -107,35 +110,55 @@ class JenkinsClient:
         job: str,
         branch: str | None = None,
         before_build_number: int | None = None,
+        scan_limit: int = 100,
     ) -> dict:
-        result = self.get_build_json(job, "lastSuccessfulBuild")
-        if not result.get("ok"):
-            return {"ok": False, "error": result.get("error")}
-        data = result["data"]
-        console = self.get_console_text(job, int(data.get("number") or 0))
-        console_text = console.get("content", "")
-        warnings: list[str] = []
-        if console.get("truncated"):
-            warnings.append("last successful console text was truncated while reading from Jenkins")
-        number = data.get("number")
-        if before_build_number is not None and number is not None and int(number) >= before_build_number:
-            warnings.append("lastSuccessfulBuild is not before the failed build")
-        detected_branch = self._extract_branch(data)
-        if branch and detected_branch and branch != detected_branch:
-            warnings.append(f"last successful build branch {detected_branch} differs from current branch {branch}")
-        elif branch and not detected_branch:
-            warnings.append("could not confirm last successful build branch")
-        commit = self._extract_commit(data, console_text)
-        if not commit:
-            warnings.append("commit not found for last successful build")
-        info = SuccessfulBuildInfo(
-            buildNumber=int(number or 0),
-            result=(data.get("result") or "SUCCESS").upper(),
-            commit=commit,
-            buildUrl=data.get("url") or self._url(job, "lastSuccessfulBuild/"),
-            warnings=warnings,
-        )
-        return {"ok": True, "successfulBuildInfo": info.model_dump()}
+        current_branch = normalize_branch_name(branch)
+        rejected: list[str] = []
+        scanned = 0
+
+        def validate(info: BuildInfo, source: str) -> SuccessfulBuildInfo | None:
+            reasons: list[str] = []
+            if before_build_number is not None and info.buildNumber >= before_build_number:
+                reasons.append("not before current build")
+            if info.result != "SUCCESS":
+                reasons.append(f"result={info.result}")
+            if not info.commit:
+                reasons.append("missing commit")
+            if current_branch and info.branch != current_branch:
+                reasons.append(f"branch={info.branch!r} does not match {current_branch!r}")
+            if reasons:
+                rejected.append(f"{source}: build {info.buildNumber} rejected: {', '.join(reasons)}")
+                return None
+            return SuccessfulBuildInfo(buildNumber=info.buildNumber, result=info.result, commit=info.commit, buildUrl=info.buildUrl, branch=info.branch, warnings=info.warnings)
+
+        def candidate(number: int | str, source: str) -> SuccessfulBuildInfo | None:
+            nonlocal scanned
+            result = self.get_build_info(job, int(number), 0)
+            scanned += 1
+            if not result.get("ok"):
+                rejected.append(f"{source}: build {number} unreadable: {result.get('error')}")
+                return None
+            return validate(BuildInfo.model_validate(result["buildInfo"]), source)
+
+        fast = self.get_build_json(job, "lastSuccessfulBuild")
+        if fast.get("ok") and fast["data"].get("number") is not None:
+            data = fast["data"]
+            number = int(data["number"])
+            console = self.get_console_text(job, number)
+            scanned += 1
+            info = BuildInfo(job=job, buildNumber=number, result=(data.get("result") or "SUCCESS").upper(), buildUrl=data.get("url") or self._url(job, "lastSuccessfulBuild/"), branch=self._extract_branch(data), commit=self._extract_commit(data, console.get("content", "")), warnings=[])
+            found = validate(info, "lastSuccessfulBuild")
+            if found:
+                return {"ok": True, "successfulBuildInfo": found.model_dump(), "scannedBuildCount": scanned, "candidateRejectedReasons": rejected}
+        elif not fast.get("ok"):
+            rejected.append(f"lastSuccessfulBuild unreadable: {fast.get('error')}")
+        if before_build_number is None:
+            return {"ok": False, "error": "current build number is required to scan matching successful builds", "scannedBuildCount": scanned, "candidateRejectedReasons": rejected}
+        for number in range(before_build_number - 1, max(0, before_build_number - max(1, scan_limit)) - 1, -1):
+            found = candidate(number, "history")
+            if found:
+                return {"ok": True, "successfulBuildInfo": found.model_dump(), "scannedBuildCount": scanned, "candidateRejectedReasons": rejected}
+        return {"ok": False, "error": "no earlier successful build with a valid commit on the current branch", "scannedBuildCount": scanned, "candidateRejectedReasons": rejected}
 
     def _tail_from_text(self, text: str, lines: int) -> LogTail:
         all_lines = text.splitlines()
@@ -159,11 +182,16 @@ class JenkinsClient:
                 name = str(param.get("name", "")).lower()
                 if name in {"branch", "git_branch", "source_branch"}:
                     value = param.get("value")
-                    return str(value) if value else None
+                    normalized = normalize_branch_name(str(value) if value else None)
+                    if normalized:
+                        return normalized
         for action in data.get("actions") or []:
             builds_by_branch = action.get("buildsByBranchName")
             if isinstance(builds_by_branch, dict) and builds_by_branch:
-                return next(iter(builds_by_branch.keys()))
+                candidates = {normalize_branch_name(str(key)) for key in builds_by_branch}
+                candidates.discard(None)
+                if len(candidates) == 1:
+                    return candidates.pop()
         return None
 
     def _extract_commit(self, data: dict[str, Any], console_text: str) -> str | None:

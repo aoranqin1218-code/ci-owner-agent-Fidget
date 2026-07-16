@@ -148,6 +148,11 @@ def analyze_failed_build(
             detail=message,
             source="repo_sync",
         )
+    ancestry = git_client.check_ancestor(repo, base_commit, head_commit)
+    if not ancestry.get("ok"):
+        return failure_without_context(build_info, base_commit, f"Git ancestry 校验失败，不能输出高可信责任人：{ancestry.get('error')}", repo=repo)
+    if not ancestry.get("isAncestor"):
+        return failure_without_context(build_info, base_commit, "当前选择的上次成功提交不是本次构建提交的祖先，不能将该提交区间作为可靠的定责范围。", repo=repo)
     investigation_scope = _resolve_investigation_scope(
         repo=repo,
         build_info=build_info,
@@ -1116,6 +1121,7 @@ def analyze_jenkins(
             job,
             branch=build_info.branch,
             beforeBuildNumber=build_info.buildNumber,
+            scanLimit=settings.jenkins_successful_build_scan_limit,
         )
     if not last_success_result.get("ok"):
         return failure_without_context(

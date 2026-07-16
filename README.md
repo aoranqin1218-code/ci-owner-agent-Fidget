@@ -220,6 +220,7 @@ JENKINS_TOKEN=
 ```env
 CI_AGENT_REPO_CACHE_DIR=E:/ci-agent-cache
 CI_AGENT_DEFAULT_LOG_TAIL_LINES=500
+CI_AGENT_JENKINS_SUCCESSFUL_BUILD_SCAN_LIMIT=100
 CI_AGENT_MAX_TOOL_STEPS=12
 CI_AGENT_MAX_TOOL_OUTPUT_CHARS=20000
 CI_AGENT_RECURSION_LIMIT=60
@@ -229,6 +230,7 @@ CI_AGENT_RECURSION_LIMIT=60
 | --- | --- |
 | `CI_AGENT_REPO_CACHE_DIR` | 本地 Git repo 缓存目录。 |
 | `CI_AGENT_DEFAULT_LOG_TAIL_LINES` | 默认读取日志尾部行数。 |
+| `CI_AGENT_JENKINS_SUCCESSFUL_BUILD_SCAN_LIMIT` | Jenkins 上次成功构建回溯扫描上限，默认 100。 |
 | `CI_AGENT_MAX_TOOL_STEPS` | Agent 工具调用预算参考值。 |
 | `CI_AGENT_MAX_TOOL_OUTPUT_CHARS` | 单个工具输出最大字符数，防止上下文过大。 |
 | `CI_AGENT_RECURSION_LIMIT` | LangChain Agent recursion limit。 |
@@ -483,7 +485,9 @@ python -m ci_owner_agent analyze `
 | `--force-notify` | 否 | 忽略通知去重。 |
 | `--output-file` | 否 | 将 notice JSON 直接写入文件（UTF-8 无 BOM），避免 PowerShell 管道转码。 |
 
-`analyze` 会读取当前构建和 `lastSuccessfulBuild`，用上次成功 commit 作为 base commit，再进入正式分析流程。
+`analyze` 会读取当前构建，并只选择早于当前构建、同一逻辑分支、结果为 `SUCCESS` 且具有有效 checkout commit 的最近成功构建作为 base commit。全局 `lastSuccessfulBuild` 仅是快速候选；不符合条件时会在配置上限内向前扫描。Git 分析始终使用 Jenkins checkout SHA，而不使用本地或远程分支指针；在 `git merge-base --is-ancestor baseCommit headCommit` 校验失败时，系统不会执行高可信 diff 定责。
+
+所有身份字段中的 `branch` 都保存逻辑分支名，例如 `dev`、`feature/a`。Jenkins 原始 ref（如 `refs/remotes/origin/dev`、`*/dev`）会在输入边界规范化，不会写入 MongoDB 的身份字段。项目尚未上线，因此不提供旧 MongoDB 分支格式的迁移或兼容逻辑。
 
 ### 5.3 发送或预览已有 notice：`notify-notice`
 

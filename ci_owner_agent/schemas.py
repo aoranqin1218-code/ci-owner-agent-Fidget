@@ -7,6 +7,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ci_owner_agent.constants import NO_OWNER_NAME
+from ci_owner_agent.services.branch_normalization import normalize_branch_name
 from ci_owner_agent.services.repository_path import normalize_repository_path
 
 
@@ -32,12 +33,18 @@ class BuildInfo(StrictModel):
     logTail: LogTail | None = None
     warnings: list[str] = Field(default_factory=list)
 
+    @model_validator(mode="after")
+    def normalize_branch(self) -> "BuildInfo":
+        self.branch = normalize_branch_name(self.branch)
+        return self
+
 
 class SuccessfulBuildInfo(StrictModel):
     buildNumber: int
     result: str
     commit: str | None = None
     buildUrl: str
+    branch: str | None = None
     warnings: list[str] = Field(default_factory=list)
 
 
@@ -223,6 +230,7 @@ class CiResponsibilityNotice(StrictModel):
 
     @model_validator(mode="after")
     def enforce_owner_consistency(self) -> "CiResponsibilityNotice":
+        self.branch = normalize_branch_name(self.branch)
         for item in self.responsibilityItems:
             _normalize_responsibility_item(item, self)
         responsible_owners = {

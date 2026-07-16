@@ -17,6 +17,7 @@ from ci_owner_agent.services.history_inheritance import (
     find_feedback_override_for_failure_signature,
 )
 from ci_owner_agent.services.responsibility_signature_enricher import enrich_responsibility_item_signatures
+from ci_owner_agent.services.branch_normalization import normalize_branch_name
 
 HISTORY_CHUNK_SCHEMA_VERSION = 3
 ALLOWED_HISTORY_CHUNK_SOURCES = {
@@ -321,6 +322,7 @@ class MongoHistoryStore:
         last_successful_build_number: int | None,
         lookback_builds: int = 20,
     ) -> list[dict]:
+        branch = normalize_branch_name(branch)
         build_query: dict[str, Any] = {
             "repo": repo,
             "job": job,
@@ -373,6 +375,7 @@ class MongoHistoryStore:
         branch: str | None,
         current_build_number: int,
     ) -> dict | None:
+        branch = normalize_branch_name(branch)
         query: dict[str, Any] = {
             "repo": repo,
             "job": job,
@@ -415,6 +418,7 @@ class MongoHistoryStore:
         lookback_builds: int = 20,
         max_facts: int = 20,
     ) -> dict:
+        branch = normalize_branch_name(branch)
         build_query: dict[str, Any] = {
             "repo": repo,
             "job": job,
@@ -456,7 +460,7 @@ class MongoHistoryStore:
 
     def notification_sent(self, *, repo: str, job: str, branch: str | None, build_number: int, notice_hash: str, channel: str = "wecom") -> bool:
         return self.notifications.find_one(
-            {"repo": repo, "job": job, "branch": branch, "buildNumber": build_number, "noticeHash": notice_hash, "channel": channel, "status": "sent"}
+            {"repo": repo, "job": job, "branch": normalize_branch_name(branch), "buildNumber": build_number, "noticeHash": notice_hash, "channel": channel, "status": "sent"}
         ) is not None
 
     def save_notification(self, *, notice: CiResponsibilityNotice, notice_hash: str, channel: str, status: str, message: str, error: str | None = None) -> dict:

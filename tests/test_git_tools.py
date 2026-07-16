@@ -54,3 +54,8 @@ def test_command_output_is_truncated():
     result = run_command(["python", "-c", "print('x' * 1000)"], max_output_chars=100)
     assert result.truncated is True
     assert len(result.stdout) <= 100 + len("\n...[truncated]...")
+
+def test_check_ancestor_uses_supplied_jenkins_commits(repo_cache, sample_repo):
+    client = GitClient(repo_cache)
+    assert client.check_ancestor(sample_repo["repo"], sample_repo["base"], sample_repo["head"]) == {"ok": True, "isAncestor": True}
+    assert client.check_ancestor(sample_repo["repo"], sample_repo["head"], sample_repo["base"]) == {"ok": True, "isAncestor": False}

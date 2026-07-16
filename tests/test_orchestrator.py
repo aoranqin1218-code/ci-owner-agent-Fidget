@@ -15,6 +15,7 @@ from ci_owner_agent.orchestrator import (
     analyze_failed_build,
     analyze_local,
 )
+from ci_owner_agent.config import load_settings
 from ci_owner_agent.schemas import BuildInfo, ChangedFile, CiResponsibilityNotice, FailureFact, FailureFactExtractionResult
 from ci_owner_agent.services.git_client import GitClient
 from ci_owner_agent.services.notification_formatter import format_wecom_markdown_notice
@@ -39,6 +40,9 @@ class RecordingGitClient:
     def sync(self, repo):
         return {"ok": True}
 
+    def check_ancestor(self, repo, base_commit, head_commit):
+        return {"ok": True, "isAncestor": True}
+
     def get_commits_between(self, repo, base_commit, head_commit):
         self.commit_ranges.append((base_commit, head_commit))
         return {
@@ -56,6 +60,19 @@ class RecordingGitClient:
     def get_diff_files(self, repo, base_commit, head_commit):
         self.diff_ranges.append((base_commit, head_commit))
         return {"ok": True, "files": [{"path": "packages/fxp-ai/src/index.ts", "status": "M", "additions": 1, "deletions": 0}]}
+
+
+def test_analyze_failed_build_stops_before_diff_when_base_is_not_ancestor():
+    class NonAncestorGitClient:
+        def sync(self, repo): return {"ok": True}
+        def check_ancestor(self, repo, base, head): return {"ok": True, "isAncestor": False}
+        def get_commits_between(self, *args): raise AssertionError("must not read diff")
+        def get_diff_files(self, *args): raise AssertionError("must not read diff")
+
+    build = BuildInfo(job="job", buildNumber=2, result="FAILURE", buildUrl="local://job/2", branch="dev", commit="head")
+    notice = analyze_failed_build("repo", build, "base", "head", NoSummaryProvider(), NonAncestorGitClient(), settings=replace(load_settings(), history_enabled=False), allow_sync_failure=True)
+    assert notice.owner.type == "no_high_confidence_owner"
+    assert "不是本次构建提交的祖先" in notice.failureReason
 
 
 class SummaryProvider:
@@ -1282,6 +1299,9 @@ def test_all_chunks_no_owner_but_second_path_changed_falls_back_to_agent(monkeyp
     class ChangedPathGitClient:
         def sync(self, repo):
             return {"ok": True}
+
+        def check_ancestor(self, repo, base_commit, head_commit):
+            return {"ok": True, "isAncestor": True}
 
         def get_commits_between(self, repo, base_commit, head_commit):
             return {"ok": True, "commits": []}

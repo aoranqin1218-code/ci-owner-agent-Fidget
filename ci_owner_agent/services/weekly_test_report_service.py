@@ -11,6 +11,7 @@ from ci_owner_agent.services.weekly_test_report_formatter import classify_weekly
 from ci_owner_agent.services.weekly_test_report_config import WeeklyTestReportConfig
 from ci_owner_agent.services.responsibility_path_enricher import is_test_file_path
 from ci_owner_agent.services.wecom_notification_outbox import WeComNotificationOutbox
+from ci_owner_agent.services.branch_normalization import normalize_branch_name
 
 
 class WeeklyTestReportService:
@@ -116,7 +117,7 @@ VALID_COMPLETED_RESULTS = {"SUCCESS", "FAILURE", "UNSTABLE"}
 def normalize_scope_values(values: list[str] | None) -> list[str] | None:
     if not values:
         return None
-    normalized = sorted({str(value).strip() for value in values if str(value).strip()})
+    normalized = sorted({branch for branch in (normalize_branch_name(str(value)) for value in values) if branch})
     return normalized or None
 
 

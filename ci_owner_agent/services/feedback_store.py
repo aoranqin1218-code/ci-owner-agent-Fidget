@@ -9,6 +9,7 @@ from typing import Any
 from ci_owner_agent.schemas import Owner
 from ci_owner_agent.services.history_store import MongoHistoryStore
 from ci_owner_agent.services.failure_identity import build_responsibility_signature
+from ci_owner_agent.services.branch_normalization import normalize_branch_name
 try:
     from pymongo.errors import DuplicateKeyError
 except ImportError:  # pragma: no cover
@@ -49,7 +50,7 @@ class FeedbackStore:
         is_committed: bool = True,
     ) -> dict[str, Any]:
         repo = str(repo or "").strip()
-        branch = str(branch or "").strip()
+        branch = normalize_branch_name(branch) or ""
         if not repo:
             raise ValueError("repo is required")
         if not branch:
@@ -133,7 +134,7 @@ class FeedbackStore:
 
     def list_feedback(self, *, repo: str, job: str, branch: str, build_number: int) -> list[dict[str, Any]]:
         repo = str(repo or "").strip()
-        branch = str(branch or "").strip()
+        branch = normalize_branch_name(branch) or ""
         if not repo:
             raise ValueError("repo is required")
         if not branch:

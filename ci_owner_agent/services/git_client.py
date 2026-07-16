@@ -67,6 +67,21 @@ class GitClient:
         )
         return {"ok": result.ok, "repoPath": str(path), "bare": bare, "command": result.to_dict()}
 
+    def check_ancestor(self, repo: str, base_commit: str, head_commit: str) -> dict:
+        error = validate_commit_ref(base_commit) or validate_commit_ref(head_commit)
+        if error:
+            return {"ok": False, "isAncestor": False, "error": error}
+        result, repo_error = self._run_git(repo, ["merge-base", "--is-ancestor", base_commit, head_commit])
+        if repo_error:
+            return {"ok": False, "isAncestor": False, "error": repo_error}
+        if result is None:
+            return {"ok": False, "isAncestor": False, "error": "git command failed"}
+        if result.returncode == 0:
+            return {"ok": True, "isAncestor": True}
+        if result.returncode == 1:
+            return {"ok": True, "isAncestor": False}
+        return {"ok": False, "isAncestor": False, "error": result.error or result.stderr or "git merge-base failed", "command": result.to_dict()}
+
     def checkout_commit_for_analysis(self, repo: str, commit: str, force: bool = False) -> dict:
         error = validate_repo_name(repo) or validate_commit_ref(commit)
         if error:

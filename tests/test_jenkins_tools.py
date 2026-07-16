@@ -105,6 +105,31 @@ def test_jenkins_client_warns_when_commit_missing():
     assert any("commit not found" in item for item in result["buildInfo"]["warnings"])
 
 
+def test_jenkins_branch_extraction_normalizes_and_rejects_ambiguous_candidates():
+    job = "services/fx-code-unittest"
+    payload = build_payload(1, "FAILURE", "abc1234", branch="refs/heads/feature/a")
+    assert client_for({jenkins_url(job, "1/api/json"): FakeResponse(payload), jenkins_url(job, "1/consoleText"): FakeResponse()}).get_build_info(job, 1)["buildInfo"]["branch"] == "feature/a"
+    payload["actions"] = [{"buildsByBranchName": {"refs/remotes/origin/dev": {}, "refs/remotes/origin/release": {}}}]
+    result = client_for({jenkins_url(job, "1/api/json"): FakeResponse(payload), jenkins_url(job, "1/consoleText"): FakeResponse()}).get_build_info(job, 1)
+    assert result["buildInfo"]["branch"] is None
+    assert any("unique logical branch" in warning for warning in result["buildInfo"]["warnings"])
+
+
+def test_last_successful_build_scans_past_wrong_branch(sample_repo):
+    job = "services/fx-code-unittest"
+    routes = {
+        jenkins_url(job, "lastSuccessfulBuild/api/json"): FakeResponse(build_payload(10, "SUCCESS", sample_repo["base"], "release")),
+        jenkins_url(job, "10/api/json"): FakeResponse(build_payload(10, "SUCCESS", sample_repo["base"], "release")),
+        jenkins_url(job, "10/consoleText"): FakeResponse(),
+        jenkins_url(job, "9/api/json"): FakeResponse(build_payload(9, "SUCCESS", sample_repo["base"], "refs/remotes/origin/dev")),
+        jenkins_url(job, "9/consoleText"): FakeResponse(),
+    }
+    result = client_for(routes).get_last_successful_build_info(job, branch="dev", before_build_number=11)
+    assert result["ok"] is True
+    assert result["successfulBuildInfo"]["buildNumber"] == 9
+    assert result["successfulBuildInfo"]["branch"] == "dev"
+
+
 def test_jenkins_log_provider_methods(sample_repo):
     job = "services/fx-code-unittest"
     routes = {

@@ -16,5 +16,6 @@ def jenkins_get_last_successful_build_info(
     job: str,
     branch: str | None = None,
     beforeBuildNumber: int | None = None,
+    scanLimit: int = 100,
 ) -> dict:
-    return client.get_last_successful_build_info(job, branch, beforeBuildNumber)
+    return client.get_last_successful_build_info(job, branch, beforeBuildNumber, scanLimit)
