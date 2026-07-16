@@ -649,7 +649,9 @@ company 和 Jenkins batch 在 notice/stdout/stderr/metrics/trace 旧产物清理
 
 `noticeValid=true` 只表示 notice 文件自身有效。`--resume` 还要求父进程在 returnCode=0、notice 校验成功且没有执行错误后原子写入同目录的 `.success.json` marker；marker 通过 SHA-256 与 notice 的具体内容绑定。legacy notice-only、marker 缺失/损坏、metadata 或 digest 不匹配都会重新执行，marker 清理或写入失败采用 fail-closed。校验期间 marker/notice 消失或不可读也只会使当前 resume 无效，不会让单个 build 的文件异常中断整个 batch；清理成功后会重新执行，清理失败则记录 `errorKind=cleanup` 并继续后续 build。timeout 遗留的 schema 合法 notice 因没有 success marker，不能用于 resume。
 
-合法 resume row 会明确输出 `noticeValid=true`、来源 `returnCode=0`、`resumeValidated=true`、`resumable=true`、`successMarkerValid=true`、`skipped=true` 和 `executionSkipped=true`；`executionSkipped` 表示本次 batch 没有重新启动分析子进程。普通执行为 `executionSkipped=false`，dry-run 为 `executionSkipped=true`，但仍只使用既有 `dryRun` 契约，不伪造一次已验证的历史成功执行。这些字段同时写入 `index.jsonl` 与 `summary.csv`。success marker 用于拒绝失败执行、残留或部分写入造成的不一致状态，不用于防御拥有同一输出目录写权限的恶意写入者。
+success marker 当前使用严格的 schemaVersion 1 JSON schema，并禁止未知字段。`schemaVersion`、`returnCode` 和 `buildNumber` 必须是真正的 JSON integer；bool、float 或字符串不会被宽松转换。repo、job、noticeFile、completedAt 及 company 专用 metadata 必须是字符串，noticeSha256 必须是 64 位小写十六进制文本。JSON 语法错误、schema/type 错误和 metadata 值不匹配分别报告。notice 已校验成功后，如果 notice hash、临时文件写入、fsync 或原子替换失败，主错误记录为 `errorKind=resume_marker`，保持 `noticeValid=true`、`resumable=false`，并防御性清理 marker。
+
+合法 resume row 会明确输出 `noticeValid=true`、来源 `returnCode=0`、`resumeValidated=true`、`resumable=true`、`successMarkerValid=true`、`skipped=true` 和 `executionSkipped=true`。`executionSkipped` 精确表示本次处理是否调用了 `run_analyze_local` / `run_analyze`：默认和所有调用前路径为 true，只有即将调用分析函数时才改为 false。因此 cleanup/validation/dry-run/resume 跳过及非 runnable row 为 true；成功、非零、timeout、notice 输出错误和 marker 创建错误为 false。这些字段同时写入 `index.jsonl` 与 `summary.csv`。success marker 用于拒绝失败执行、残留或部分写入造成的不一致状态，不用于防御拥有同一输出目录写权限的恶意写入者。
 
 company 与 Jenkins batch 使用共享的有界进程组 timeout 管理：POSIX 终止独立进程组，Windows 使用带超时的 `taskkill /T /F` 并在失败时 fallback kill。终止或最终回收问题写入 `terminationReaped` / `terminationWarning`，不会把 timeout 改写为 execution；timeout 后 notice、metrics 和 trace 都不可信。company 子进程非零退出稳定记录 `errorKind=execution`。
 

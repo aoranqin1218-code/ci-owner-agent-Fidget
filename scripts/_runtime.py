@@ -11,6 +11,9 @@ import sys
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Annotated, Literal
+
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr, ValidationError, model_validator
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 INVOCATION_CWD = Path.cwd()
@@ -72,11 +75,42 @@ def write_success_marker_atomic(marker_path: Path, payload: dict) -> None:
             pass
 
 
-def load_success_marker(marker_path: Path) -> dict:
+Sha256Text = Annotated[StrictStr, Field(pattern=r"^[0-9a-f]{64}$")]
+
+
+class ResumeSuccessMarker(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    schemaVersion: StrictInt
+    kind: StrictStr
+    workflow: Literal["company", "jenkins"]
+    noticeFile: StrictStr
+    noticeSha256: Sha256Text
+    returnCode: StrictInt
+    repo: StrictStr
+    job: StrictStr
+    buildNumber: StrictInt
+    completedAt: StrictStr
+    branch: StrictStr | None = None
+    result: StrictStr | None = None
+    baseCommit: StrictStr | None = None
+    headCommit: StrictStr | None = None
+
+    @model_validator(mode="after")
+    def require_company_metadata(self):
+        if self.workflow == "company":
+            missing = [
+                field for field in ("branch", "result", "baseCommit", "headCommit")
+                if getattr(self, field) is None
+            ]
+            if missing:
+                raise ValueError(f"company success marker missing metadata: {', '.join(missing)}")
+        return self
+
+
+def load_success_marker(marker_path: Path) -> ResumeSuccessMarker:
     value = json.loads(marker_path.read_text(encoding="utf-8"))
-    if not isinstance(value, dict):
-        raise ValueError("success marker must be a JSON object")
-    return value
+    return ResumeSuccessMarker.model_validate(value, strict=True)
 
 
 def validate_success_marker(marker_path: Path, notice_path: Path, expected: dict) -> tuple[bool, str | None]:
@@ -94,18 +128,22 @@ def validate_success_marker(marker_path: Path, notice_path: Path, expected: dict
         return False, "success marker missing"
     try:
         marker = load_success_marker(marker_path)
-    except Exception as exc:
+    except json.JSONDecodeError as exc:
         return False, f"invalid success marker JSON: {type(exc).__name__}: {exc}"
+    except ValidationError as exc:
+        return False, f"invalid success marker schema: {type(exc).__name__}: {exc}"
+    except Exception as exc:
+        return False, f"failed to read success marker: {type(exc).__name__}: {exc}"
     required = {"schemaVersion": 1, "kind": "ci-owner-agent-resume-success", "returnCode": 0,
                 "noticeFile": notice_path.name, **expected}
     for field, value in required.items():
-        if marker.get(field) != value:
+        if getattr(marker, field) != value:
             return False, f"success marker metadata mismatch: {field}"
     try:
         notice_digest = sha256_file(notice_path)
     except Exception as exc:
         return False, f"failed to hash notice for success marker: {type(exc).__name__}: {exc}"
-    if marker.get("noticeSha256") != notice_digest:
+    if marker.noticeSha256 != notice_digest:
         return False, "success marker notice digest mismatch"
     return True, None
 

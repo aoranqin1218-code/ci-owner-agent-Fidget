@@ -817,6 +817,7 @@ def main() -> int:
                     "errorKind": item.error_kind,
                     "error": item.skip_reason if item.validation_failed else None,
                     "skipReason": item.skip_reason or f"skip status {item.status}",
+                    "executionSkipped": True,
                 }
                 index_file.write(json.dumps(record, ensure_ascii=False) + "\n")
                 rows.append(record)
@@ -870,7 +871,7 @@ def main() -> int:
                 "traceFile": str(trace_path),
                 "command": command,
                 "skipped": False,
-                "executionSkipped": False,
+                "executionSkipped": True,
             }
 
             print(f"\n=== build {item.build} ===")
@@ -921,6 +922,7 @@ def main() -> int:
             started = time.perf_counter()
             timed_out = False
             try:
+                record["executionSkipped"] = False
                 cp = run_analyze_local(
                     item=item,
                     repo=args.repo,
@@ -965,17 +967,24 @@ def main() -> int:
                     record.update(extract_history_stats_from_notice(notice))
                     record.update(extract_responsibility_stats_from_notice(notice))
                     if cp.returncode == 0 and not record.get("errorKind"):
-                        payload = {"schemaVersion": 1, "kind": "ci-owner-agent-resume-success", "workflow": "company",
-                                   "noticeFile": notice_path.name, "noticeSha256": sha256_file(notice_path), "returnCode": 0,
-                                   "repo": args.repo, "job": args.job, "buildNumber": item.build, "branch": branch,
-                                   "result": item.status, "baseCommit": item.base_commit, "headCommit": item.head_commit,
-                                   "completedAt": dt.datetime.now(dt.timezone.utc).isoformat()}
                         try:
+                            payload = {"schemaVersion": 1, "kind": "ci-owner-agent-resume-success", "workflow": "company",
+                                       "noticeFile": notice_path.name, "noticeSha256": sha256_file(notice_path), "returnCode": 0,
+                                       "repo": args.repo, "job": args.job, "buildNumber": item.build, "branch": branch,
+                                       "result": item.status, "baseCommit": item.base_commit, "headCommit": item.head_commit,
+                                       "completedAt": dt.datetime.now(dt.timezone.utc).isoformat()}
                             write_success_marker_atomic(marker_path, payload)
                             record.update({"resumable": True, "successMarkerValid": True})
                         except Exception as marker_exc:
-                            record.update({"errorKind": "resume_marker", "error": f"failed to write success marker: {marker_exc}",
-                                           "successMarkerValid": False, "successMarkerError": str(marker_exc)})
+                            detail = f"{type(marker_exc).__name__}: {marker_exc}"
+                            record.update({"errorKind": "resume_marker", "error": f"failed to create success marker: {detail}",
+                                           "resumable": False, "successMarkerValid": False, "successMarkerError": detail})
+                            marker_cleanup = cleanup_previous_outputs([marker_path])
+                            if marker_cleanup:
+                                existing = record.get("cleanupWarning")
+                                record["cleanupWarning"] = "; ".join(
+                                    ([str(existing)] if existing else []) + marker_cleanup
+                                )
                 except Exception as exc:
                     record["noticeValid"] = False
                     record["noticeValidationError"] = f"invalid output notice: {type(exc).__name__}: {exc}"

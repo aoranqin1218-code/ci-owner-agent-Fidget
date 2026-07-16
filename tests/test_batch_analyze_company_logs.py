@@ -23,6 +23,12 @@ def make_fake_python(tmp_path: Path) -> Path:
         path.chmod(0o755)
     return path
 
+
+def read_summary_row(out_dir: Path, build: int | None = None) -> dict[str, str]:
+    with (out_dir / "summary.csv").open(encoding="utf-8-sig", newline="") as file:
+        rows = list(csv.DictReader(file))
+    return next(row for row in rows if build is None or row["build"] == str(build))
+
 from scripts.batch_analyze_company_logs import (
     build_analyze_command,
     cleanup_previous_outputs,
@@ -188,6 +194,8 @@ def test_main_conflicting_checkout_sha_returns_validation_failure(tmp_path, monk
     record = __import__("json").loads((out_dir / "index.jsonl").read_text(encoding="utf-8").splitlines()[0])
     assert record["validationFailed"] is True
     assert record["errorKind"] == "checkout_validation"
+    assert record["executionSkipped"] is True
+    assert read_summary_row(out_dir)["executionSkipped"] == "True"
 
 
 def test_main_manifest_only_failure_is_validation_failure(tmp_path, monkeypatch):
@@ -199,6 +207,8 @@ def test_main_manifest_only_failure_is_validation_failure(tmp_path, monkeypatch)
     assert main() == 1
     record = json.loads((out_dir / "index.jsonl").read_text(encoding="utf-8").splitlines()[0])
     assert record["consoleFile"] is None and record["errorKind"] == "manifest_validation"
+    assert record["executionSkipped"] is True
+    assert read_summary_row(out_dir)["executionSkipped"] == "True"
     assert not list((out_dir / "notices").glob("*"))
 
 
@@ -214,6 +224,9 @@ def test_manifest_success_supplies_baseline_to_real_failure_log(tmp_path, monkey
     records = [json.loads(line) for line in (out_dir / "index.jsonl").read_text(encoding="utf-8").splitlines()]
     failure = next(item for item in records if item["build"] == 2)
     assert failure["baseCommit"] == base and failure["dryRun"] is True
+    success = next(item for item in records if item["build"] == 1)
+    assert success["executionSkipped"] is True and failure["executionSkipped"] is True
+    assert all(read_summary_row(out_dir, build)["executionSkipped"] == "True" for build in (1, 2))
 
 
 def test_company_cleanup_failure_is_fail_closed(tmp_path, monkeypatch):
@@ -232,6 +245,7 @@ def test_company_cleanup_failure_is_fail_closed(tmp_path, monkeypatch):
     assert main() == 1 and called is False
     record = json.loads((out_dir / "index.jsonl").read_text(encoding="utf-8").splitlines()[0])
     assert record["errorKind"] == "cleanup" and record["noticeValid"] is False and record["skipped"] is False
+    assert record["executionSkipped"] is True and read_summary_row(out_dir)["executionSkipped"] == "True"
 
 
 @pytest.mark.parametrize(("mode", "notice_valid"), [("nonzero", True), ("nonzero_missing", False)])
@@ -245,6 +259,7 @@ def test_company_real_child_nonzero_keeps_execution_error(tmp_path, monkeypatch,
     code = main()
     record = json.loads((out / "index.jsonl").read_text(encoding="utf-8").splitlines()[0])
     assert code == 1 and record["returnCode"] == 3 and record["errorKind"] == "execution" and record["noticeValid"] is notice_valid
+    assert record["executionSkipped"] is False and read_summary_row(out)["executionSkipped"] == "False"
 
 
 def test_company_nonzero_valid_notice_is_not_resumable(tmp_path, monkeypatch):
@@ -264,6 +279,20 @@ def test_company_nonzero_valid_notice_is_not_resumable(tmp_path, monkeypatch):
     assert record["resumable"] is True and list((out / "notices").glob("*.success.json"))
 
 
+def test_company_success_execution_state_matches_summary(tmp_path, monkeypatch):
+    log_dir, out = tmp_path / "logs", tmp_path / "out"
+    log_dir.mkdir()
+    (log_dir / "company-unittest-2.log").write_text(
+        f"Checking out Revision {'b' * 40} (refs/remotes/origin/dev)\nFinished: FAILURE\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("FAKE_ANALYZE_MODE", "success")
+    monkeypatch.setattr("sys.argv", ["batch", "--log-dir", str(log_dir), "--out-dir", str(out),
+                                      "--initial-base-commit", "a" * 40, "--python", str(make_fake_python(tmp_path))])
+    assert main() == 0
+    record = json.loads((out / "index.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert record["executionSkipped"] is False and read_summary_row(out)["executionSkipped"] == "False"
+
+
 def test_company_marker_write_failure_is_fail_closed(tmp_path, monkeypatch):
     log_dir, out = tmp_path / "logs", tmp_path / "out"
     log_dir.mkdir()
@@ -274,6 +303,35 @@ def test_company_marker_write_failure_is_fail_closed(tmp_path, monkeypatch):
     assert main() == 1
     record = json.loads((out / "index.jsonl").read_text(encoding="utf-8").splitlines()[0])
     assert record["noticeValid"] is True and record["errorKind"] == "resume_marker" and record["resumable"] is False
+    assert record["executionSkipped"] is False and read_summary_row(out)["executionSkipped"] == "False"
+
+
+def test_company_marker_hash_failure_is_resume_marker_and_reexecutes(tmp_path, monkeypatch):
+    log_dir, out = tmp_path / "logs", tmp_path / "out"
+    log_dir.mkdir()
+    (log_dir / "company-unittest-2.log").write_text(
+        f"Checking out Revision {'b' * 40} (refs/remotes/origin/dev)\nFinished: FAILURE\n", encoding="utf-8"
+    )
+    argv = ["batch", "--log-dir", str(log_dir), "--out-dir", str(out), "--initial-base-commit", "a" * 40,
+            "--python", str(make_fake_python(tmp_path))]
+    original_hash = company_batch.sha256_file
+    monkeypatch.setenv("FAKE_ANALYZE_MODE", "success")
+    monkeypatch.setattr(company_batch, "sha256_file", lambda path: (_ for _ in ()).throw(PermissionError("locked")))
+    monkeypatch.setattr("sys.argv", argv)
+    assert main() == 1
+    record = json.loads((out / "index.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert record["returnCode"] == 0 and record["noticeValid"] is True
+    assert record["errorKind"] == "resume_marker" and "PermissionError: locked" in record["error"]
+    assert record["successMarkerValid"] is False and "PermissionError: locked" in record["successMarkerError"]
+    assert record["resumable"] is False and record["executionSkipped"] is False
+    assert read_summary_row(out)["executionSkipped"] == "False"
+    assert not list((out / "notices").glob("*.success.json"))
+    monkeypatch.setattr(company_batch, "sha256_file", original_hash)
+    monkeypatch.setattr("sys.argv", [*argv, "--resume"])
+    assert main() == 0
+    resumed = json.loads((out / "index.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert resumed["resumeValidated"] is False and resumed["resumeInvalidReason"] == "success marker missing"
+    assert resumed["executionSkipped"] is False and resumed["successMarkerValid"] is True
 
 
 def test_company_marker_write_failure_does_not_leave_old_marker(tmp_path, monkeypatch):
@@ -296,6 +354,29 @@ def test_company_marker_write_failure_does_not_leave_old_marker(tmp_path, monkey
     assert not old_marker.exists() and not list((out / "notices").glob("*.success.json"))
 
 
+def test_company_partial_marker_is_removed_without_overwriting_primary_error(tmp_path, monkeypatch):
+    log_dir, out = tmp_path / "logs", tmp_path / "out"
+    log_dir.mkdir()
+    (log_dir / "company-unittest-2.log").write_text(
+        f"Checking out Revision {'b' * 40} (refs/remotes/origin/dev)\nFinished: FAILURE\n", encoding="utf-8"
+    )
+
+    def partial_write(marker_path, payload):
+        marker_path.write_text(json.dumps(payload), encoding="utf-8")
+        raise OSError("after write")
+
+    monkeypatch.setenv("FAKE_ANALYZE_MODE", "success")
+    monkeypatch.setattr(company_batch, "write_success_marker_atomic", partial_write)
+    monkeypatch.setattr("sys.argv", ["batch", "--log-dir", str(log_dir), "--out-dir", str(out),
+                                      "--initial-base-commit", "a" * 40, "--python", str(make_fake_python(tmp_path))])
+    assert main() == 1
+    record = json.loads((out / "index.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert record["errorKind"] == "resume_marker" and "OSError: after write" in record["successMarkerError"]
+    assert record["noticeValid"] is True and record["executionSkipped"] is False
+    assert read_summary_row(out)["executionSkipped"] == "False"
+    assert not list((out / "notices").glob("*.success.json"))
+
+
 @pytest.mark.parametrize("resume", [False, True])
 def test_company_marker_cleanup_failure_is_fail_closed(tmp_path, monkeypatch, resume):
     log_dir, out = tmp_path / "logs", tmp_path / "out"
@@ -310,7 +391,7 @@ def test_company_marker_cleanup_failure_is_fail_closed(tmp_path, monkeypatch, re
     assert main() == 0
     marker = next((out / "notices").glob("*.success.json"))
     if resume:
-        payload = json.loads(marker.read_text(encoding="utf-8")); payload["workflow"] = "wrong"
+        payload = json.loads(marker.read_text(encoding="utf-8")); payload["workflow"] = "jenkins"
         marker.write_text(json.dumps(payload), encoding="utf-8")
 
     def cleanup(paths):
@@ -328,6 +409,7 @@ def test_company_marker_cleanup_failure_is_fail_closed(tmp_path, monkeypatch, re
     assert main() == 1
     record = json.loads((out / "index.jsonl").read_text(encoding="utf-8").splitlines()[0])
     assert record["errorKind"] == "cleanup" and record["noticeValid"] is False and record["resumable"] is False
+    assert record["executionSkipped"] is True and read_summary_row(out)["executionSkipped"] == "True"
     assert str(marker) in record["cleanupWarning"] and marker.exists()
     if resume:
         assert record["resumeValidated"] is False
@@ -441,7 +523,11 @@ def test_company_timeout_residual_notice_is_not_resumed(tmp_path, monkeypatch):
     [
         ("missing_marker", "success marker missing"),
         ("invalid_json", "invalid success marker JSON: JSONDecodeError"),
-        ("not_object", "invalid success marker JSON: ValueError"),
+        ("not_object", "invalid success marker schema: ValidationError"),
+        ("schemaVersion_bool", "invalid success marker schema: ValidationError"),
+        ("returnCode_bool", "invalid success marker schema: ValidationError"),
+        ("buildNumber_float", "invalid success marker schema: ValidationError"),
+        ("unexpectedField", "invalid success marker schema: ValidationError"),
         ("schemaVersion", "success marker metadata mismatch: schemaVersion"),
         ("kind", "success marker metadata mismatch: kind"),
         ("workflow", "success marker metadata mismatch: workflow"),
@@ -481,7 +567,18 @@ def test_company_invalid_marker_matrix_reexecutes(tmp_path, monkeypatch, case, e
         notice.unlink()
     else:
         payload = json.loads(marker.read_text(encoding="utf-8"))
-        payload[case] = "0" * 64 if case == "noticeSha256" else (3 if case in {"schemaVersion", "returnCode", "buildNumber"} else "wrong")
+        if case == "schemaVersion_bool":
+            payload["schemaVersion"] = True
+        elif case == "returnCode_bool":
+            payload["returnCode"] = False
+        elif case == "buildNumber_float":
+            payload["buildNumber"] = 2.0
+        elif case == "unexpectedField":
+            payload["unexpectedField"] = "value"
+        elif case == "workflow":
+            payload["workflow"] = "jenkins"
+        else:
+            payload[case] = "0" * 64 if case == "noticeSha256" else (3 if case in {"schemaVersion", "returnCode", "buildNumber"} else "wrong")
         marker.write_text(json.dumps(payload), encoding="utf-8")
     monkeypatch.setattr("sys.argv", [*argv, "--resume"])
     assert main() == 0
@@ -501,6 +598,7 @@ def test_company_descendant_stops_after_timeout(tmp_path, monkeypatch):
     assert main() == 1
     record = json.loads((out / "index.jsonl").read_text(encoding="utf-8").splitlines()[0])
     assert record["errorKind"] == "timeout" and record["noticeValid"] is False and record["terminationReaped"] is True
+    assert record["executionSkipped"] is False and read_summary_row(out)["executionSkipped"] == "False"
     size = marker.stat().st_size
     time.sleep(0.3)
     assert marker.stat().st_size == size
@@ -543,6 +641,7 @@ def test_company_invalid_resume_cleanup_failure_is_fail_closed(tmp_path, monkeyp
     assert main() == 1
     record = json.loads((out / "index.jsonl").read_text(encoding="utf-8").splitlines()[0])
     assert record["resumeValidated"] is False and record["resumeInvalidReason"] and record["errorKind"] == "cleanup"
+    assert record["executionSkipped"] is True and read_summary_row(out)["executionSkipped"] == "True"
 
 
 def test_extract_history_stats_from_structured_notice():
