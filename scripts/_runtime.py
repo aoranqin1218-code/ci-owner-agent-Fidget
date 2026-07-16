@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import os
+import hashlib
+import json
 import platform
 import signal
 import subprocess
 import sys
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -38,6 +41,61 @@ def resolve_user_path(value: str | Path) -> Path:
 def resolve_repo_default_path(value: str | Path) -> Path:
     path = Path(value)
     return path if path.is_absolute() else REPO_ROOT / path
+
+
+def success_marker_path(notice_path: Path) -> Path:
+    return notice_path.with_name(notice_path.name + ".success.json")
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as file:
+        for chunk in iter(lambda: file.read(65536), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def write_success_marker_atomic(marker_path: Path, payload: dict) -> None:
+    marker_path.parent.mkdir(parents=True, exist_ok=True)
+    temp = marker_path.with_name(f".{marker_path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        with temp.open("w", encoding="utf-8", newline="\n") as file:
+            json.dump(payload, file, ensure_ascii=False, sort_keys=True, indent=2)
+            file.write("\n")
+            file.flush()
+            os.fsync(file.fileno())
+        os.replace(temp, marker_path)
+    finally:
+        try:
+            temp.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def load_success_marker(marker_path: Path) -> dict:
+    value = json.loads(marker_path.read_text(encoding="utf-8"))
+    if not isinstance(value, dict):
+        raise ValueError("success marker must be a JSON object")
+    return value
+
+
+def validate_success_marker(marker_path: Path, notice_path: Path, expected: dict) -> tuple[bool, str | None]:
+    if not notice_path.exists():
+        return False, "notice missing for success marker"
+    if not marker_path.exists():
+        return False, "success marker missing"
+    try:
+        marker = load_success_marker(marker_path)
+    except Exception as exc:
+        return False, f"invalid success marker JSON: {type(exc).__name__}: {exc}"
+    required = {"schemaVersion": 1, "kind": "ci-owner-agent-resume-success", "returnCode": 0,
+                "noticeFile": notice_path.name, **expected}
+    for field, value in required.items():
+        if marker.get(field) != value:
+            return False, f"success marker metadata mismatch: {field}"
+    if marker.get("noticeSha256") != sha256_file(notice_path):
+        return False, "success marker notice digest mismatch"
+    return True, None
 
 
 @dataclass(frozen=True)

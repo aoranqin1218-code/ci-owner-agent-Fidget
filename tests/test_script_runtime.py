@@ -5,6 +5,7 @@ import subprocess
 import pytest
 
 from scripts import _runtime
+import json
 
 
 class FakeProcess:
@@ -118,3 +119,27 @@ def test_mocked_windows_does_not_require_native_constant(monkeypatch):
     monkeypatch.setattr(_runtime.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a[0], 0, "", ""))
     termination = invoke(monkeypatch, FakeProcess())
     assert termination.reaped is True
+
+
+def test_success_marker_is_atomic_and_bound_to_notice(tmp_path):
+    notice = tmp_path / "notice.json"
+    notice.write_text('{"value":1}', encoding="utf-8")
+    marker = _runtime.success_marker_path(notice)
+    payload = {"schemaVersion": 1, "kind": "ci-owner-agent-resume-success", "workflow": "test", "noticeFile": notice.name,
+               "noticeSha256": _runtime.sha256_file(notice), "returnCode": 0, "repo": "r", "job": "j", "buildNumber": 1}
+    _runtime.write_success_marker_atomic(marker, payload)
+    assert json.loads(marker.read_text(encoding="utf-8"))["noticeSha256"] == payload["noticeSha256"]
+    assert _runtime.validate_success_marker(marker, notice, {"workflow": "test", "repo": "r", "job": "j", "buildNumber": 1}) == (True, None)
+    notice.write_text('{"value":2}', encoding="utf-8")
+    valid, reason = _runtime.validate_success_marker(marker, notice, {"workflow": "test", "repo": "r", "job": "j", "buildNumber": 1})
+    assert valid is False and reason == "success marker notice digest mismatch"
+    assert not list(tmp_path.glob(".*.tmp"))
+
+
+def test_success_marker_replace_failure_cleans_temp(tmp_path, monkeypatch):
+    notice, marker = tmp_path / "notice.json", tmp_path / "notice.json.success.json"
+    notice.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(_runtime.os, "replace", lambda *a: (_ for _ in ()).throw(OSError("denied")))
+    with pytest.raises(OSError):
+        _runtime.write_success_marker_atomic(marker, {"x": 1})
+    assert not marker.exists() and not list(tmp_path.glob(".*.tmp"))

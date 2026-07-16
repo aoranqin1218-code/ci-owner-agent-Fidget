@@ -164,6 +164,21 @@ def test_jenkins_nonzero_execution_precedes_notice_failures(tmp_path, monkeypatc
         assert record["noticeValidationError"]
 
 
+def test_jenkins_nonzero_valid_notice_is_not_resumable(tmp_path, monkeypatch):
+    out = tmp_path / "out"
+    argv = ["jenkins", "--job", "job", "--repo", "repo", "--builds", "13", "--out-dir", str(out), "--python", str(make_fake_python(tmp_path))]
+    monkeypatch.setenv("FAKE_ANALYZE_MODE", "nonzero")
+    monkeypatch.setattr("sys.argv", argv)
+    assert main() == 1
+    assert not list((out / "notices").glob("*.success.json"))
+    monkeypatch.setenv("FAKE_ANALYZE_MODE", "success")
+    monkeypatch.setattr("sys.argv", [*argv, "--resume"])
+    assert main() == 0
+    record = json.loads((out / "index.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert record["resumeValidated"] is False and "success marker missing" in record["resumeInvalidReason"]
+    assert record["resumable"] is True and list((out / "notices").glob("*.success.json"))
+
+
 def test_jenkins_timeout_preserves_cleanup_and_termination_warnings(tmp_path, monkeypatch):
     out = tmp_path / "out"
     calls = 0

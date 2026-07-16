@@ -647,6 +647,8 @@ runs/company-log-batch-xxxx/
 
 company 和 Jenkins batch 在 notice/stdout/stderr/metrics/trace 旧产物清理失败时采用 fail-closed：当前 build 不启动子进程、不读取残留产物，记录 `errorKind=cleanup` 后继续后续 build，批次最终返回非零。Jenkins batch 可用 `--python` 指定子解释器；notice 缺失、schema 无效和 repo/job/build metadata 不匹配分别记录稳定错误类型。
 
+`noticeValid=true` 只表示 notice 文件自身有效。`--resume` 还要求父进程在 returnCode=0、notice 校验成功且没有执行错误后原子写入同目录的 `.success.json` marker；marker 通过 SHA-256 与 notice 的具体内容绑定。legacy notice-only、marker 缺失/损坏、metadata 或 digest 不匹配都会重新执行，marker 清理或写入失败采用 fail-closed。
+
 company 与 Jenkins batch 使用共享的有界进程组 timeout 管理：POSIX 终止独立进程组，Windows 使用带超时的 `taskkill /T /F` 并在失败时 fallback kill。终止或最终回收问题写入 `terminationReaped` / `terminationWarning`，不会把 timeout 改写为 execution；timeout 后 notice、metrics 和 trace 都不可信。company 子进程非零退出稳定记录 `errorKind=execution`。
 
 共享恢复流程会分别标注 tree termination、grace reap、direct kill 和 final reap 错误；这些异常始终保留 timeout 主分类。Jenkins 非零退出的 execution 错误优先于 notice 错误，notice 缺失/schema/metadata 诊断独立保存在 `noticeValidationError`；timeout 后残留文件清理问题保存在 `cleanupWarning`。Windows 分支通过平台无关 mock 测试，POSIX descendant 终止由集成测试实际覆盖。

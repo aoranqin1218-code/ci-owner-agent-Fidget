@@ -16,7 +16,7 @@ from typing import Any, Literal
 _SCRIPT_REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_SCRIPT_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_REPO_ROOT))
-from scripts._runtime import REPO_ROOT, build_subprocess_env, ensure_repo_on_sys_path, resolve_repo_default_path, resolve_user_path, run_process_bounded
+from scripts._runtime import REPO_ROOT, build_subprocess_env, ensure_repo_on_sys_path, resolve_repo_default_path, resolve_user_path, run_process_bounded, sha256_file, success_marker_path, validate_success_marker, write_success_marker_atomic
 
 ensure_repo_on_sys_path()
 from ci_owner_agent.schemas import CiResponsibilityNotice
@@ -296,7 +296,7 @@ def should_skip_for_resume(resume: bool, notice_path: Path) -> bool:
     return resume and notice_path.exists()
 
 
-def validate_resume_notice(path: Path, *, item: BuildLog, repo: str, job: str, branch: str) -> tuple[bool, str | None]:
+def validate_resume_notice(path: Path, *, marker_path: Path, item: BuildLog, repo: str, job: str, branch: str) -> tuple[bool, str | None]:
     try:
         notice = CiResponsibilityNotice.model_validate_json(path.read_text(encoding="utf-8"))
     except Exception as exc:
@@ -308,7 +308,7 @@ def validate_resume_notice(path: Path, *, item: BuildLog, repo: str, job: str, b
     for field, value in expected.items():
         if getattr(notice, field) != value:
             return False, f"resume metadata mismatch: {field}"
-    return True, None
+    return validate_success_marker(marker_path, path, {"workflow": "company", **expected})
 
 
 def extract_first_json_object(text: str) -> dict[str, Any] | None:
@@ -833,6 +833,7 @@ def main() -> int:
             )
 
             notice_path = notices_dir / f"{name}.notice.json"
+            marker_path = success_marker_path(notice_path)
             stdout_path = stdout_dir / f"{name}.stdout.txt"
             stderr_path = stderr_dir / f"{name}.stderr.txt"
             trace_path = traces_dir / f"{name}.trace.json"
@@ -864,6 +865,8 @@ def main() -> int:
                 "previousCommit": item.previous_commit,
                 "consoleFile": str(item.console_path) if item.console_path else None,
                 "noticeFile": str(notice_path),
+                "successMarkerFile": str(marker_path),
+                "resumable": False,
                 "stdoutFile": str(stdout_path),
                 "stderrFile": str(stderr_path),
                 "traceFile": str(trace_path),
@@ -884,17 +887,19 @@ def main() -> int:
 
             metrics_file = metrics_dir / f"{name}.metrics.jsonl"
 
-            if args.resume and notice_path.exists():
-                valid, reason = validate_resume_notice(notice_path, item=item, repo=args.repo, job=args.job, branch=branch)
+            if args.resume and (notice_path.exists() or marker_path.exists()):
+                valid, reason = validate_resume_notice(notice_path, marker_path=marker_path, item=item, repo=args.repo, job=args.job, branch=branch)
                 record["resumeValidated"] = valid
                 record["resumeInvalidReason"] = reason
                 if valid:
+                    record["resumable"] = True
+                    record["successMarkerValid"] = True
                     record["skipped"] = True
                     record["skipReason"] = "resume: validated notice"
                     index_file.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
                     rows.append(record)
                     continue
-                resume_cleanup = cleanup_previous_outputs([notice_path])
+                resume_cleanup = cleanup_previous_outputs([notice_path, marker_path])
                 if resume_cleanup:
                     message = "; ".join(resume_cleanup)
                     record.update({"cleanupWarning": message, "errorKind": "cleanup", "error": message, "noticeValid": False})
@@ -902,7 +907,7 @@ def main() -> int:
                     rows.append(record)
                     continue
 
-            cleanup_warnings = cleanup_previous_outputs([notice_path, stdout_path, stderr_path, trace_path, metrics_file])
+            cleanup_warnings = cleanup_previous_outputs([notice_path, marker_path, stdout_path, stderr_path, trace_path, metrics_file])
             if cleanup_warnings:
                 message = "; ".join(cleanup_warnings)
                 record.update({"cleanupWarning": message, "errorKind": "cleanup", "error": message, "noticeValid": False})
@@ -960,6 +965,18 @@ def main() -> int:
                     record["historyEnabled"] = os.environ.get("CI_AGENT_HISTORY_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
                     record.update(extract_history_stats_from_notice(notice))
                     record.update(extract_responsibility_stats_from_notice(notice))
+                    if cp.returncode == 0 and not record.get("errorKind"):
+                        payload = {"schemaVersion": 1, "kind": "ci-owner-agent-resume-success", "workflow": "company",
+                                   "noticeFile": notice_path.name, "noticeSha256": sha256_file(notice_path), "returnCode": 0,
+                                   "repo": args.repo, "job": args.job, "buildNumber": item.build, "branch": branch,
+                                   "result": item.status, "baseCommit": item.base_commit, "headCommit": item.head_commit,
+                                   "completedAt": dt.datetime.now(dt.timezone.utc).isoformat()}
+                        try:
+                            write_success_marker_atomic(marker_path, payload)
+                            record.update({"resumable": True, "successMarkerValid": True})
+                        except Exception as marker_exc:
+                            record.update({"errorKind": "resume_marker", "error": f"failed to write success marker: {marker_exc}",
+                                           "successMarkerValid": False, "successMarkerError": str(marker_exc)})
                 except Exception as exc:
                     record["noticeValid"] = False
                     record["noticeValidationError"] = f"invalid output notice: {type(exc).__name__}: {exc}"
@@ -1034,6 +1051,10 @@ def main() -> int:
         "baselineFromObservedSuccess",
         "validationFailed",
         "noticeValid",
+        "resumable",
+        "successMarkerFile",
+        "successMarkerValid",
+        "successMarkerError",
         "resumeValidated",
         "resumeInvalidReason",
         "errorKind",

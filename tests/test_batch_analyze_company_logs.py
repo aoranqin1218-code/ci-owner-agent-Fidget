@@ -254,6 +254,35 @@ def test_company_real_child_nonzero_keeps_execution_error(tmp_path, monkeypatch,
     assert code == 1 and record["returnCode"] == 3 and record["errorKind"] == "execution" and record["noticeValid"] is notice_valid
 
 
+def test_company_nonzero_valid_notice_is_not_resumable(tmp_path, monkeypatch):
+    log_dir, out = tmp_path / "logs", tmp_path / "out"
+    log_dir.mkdir()
+    (log_dir / "company-unittest-2.log").write_text(f"Checking out Revision {'b' * 40} (refs/remotes/origin/dev)\nFinished: FAILURE\n", encoding="utf-8")
+    argv = ["batch", "--log-dir", str(log_dir), "--out-dir", str(out), "--initial-base-commit", "a" * 40, "--python", str(make_fake_python(tmp_path))]
+    monkeypatch.setenv("FAKE_ANALYZE_MODE", "nonzero")
+    monkeypatch.setattr("sys.argv", argv)
+    assert main() == 1
+    assert not list((out / "notices").glob("*.success.json"))
+    monkeypatch.setenv("FAKE_ANALYZE_MODE", "success")
+    monkeypatch.setattr("sys.argv", [*argv, "--resume"])
+    assert main() == 0
+    record = json.loads((out / "index.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert record["resumeValidated"] is False and "success marker missing" in record["resumeInvalidReason"]
+    assert record["resumable"] is True and list((out / "notices").glob("*.success.json"))
+
+
+def test_company_marker_write_failure_is_fail_closed(tmp_path, monkeypatch):
+    log_dir, out = tmp_path / "logs", tmp_path / "out"
+    log_dir.mkdir()
+    (log_dir / "company-unittest-2.log").write_text(f"Checking out Revision {'b' * 40} (refs/remotes/origin/dev)\nFinished: FAILURE\n", encoding="utf-8")
+    monkeypatch.setenv("FAKE_ANALYZE_MODE", "success")
+    monkeypatch.setattr(company_batch, "write_success_marker_atomic", lambda *a, **k: (_ for _ in ()).throw(OSError("denied")))
+    monkeypatch.setattr("sys.argv", ["batch", "--log-dir", str(log_dir), "--out-dir", str(out), "--initial-base-commit", "a" * 40, "--python", str(make_fake_python(tmp_path))])
+    assert main() == 1
+    record = json.loads((out / "index.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert record["noticeValid"] is True and record["errorKind"] == "resume_marker" and record["resumable"] is False
+
+
 def test_company_descendant_stops_after_timeout(tmp_path, monkeypatch):
     log_dir, out, marker = tmp_path / "logs", tmp_path / "out", tmp_path / "marker.txt"
     log_dir.mkdir()

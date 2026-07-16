@@ -14,7 +14,7 @@ from typing import Any
 _SCRIPT_REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_SCRIPT_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_REPO_ROOT))
-from scripts._runtime import REPO_ROOT, build_subprocess_env, ensure_repo_on_sys_path, resolve_repo_default_path, resolve_user_path, run_process_bounded
+from scripts._runtime import REPO_ROOT, build_subprocess_env, ensure_repo_on_sys_path, resolve_repo_default_path, resolve_user_path, run_process_bounded, sha256_file, success_marker_path, validate_success_marker, write_success_marker_atomic
 ensure_repo_on_sys_path()
 from ci_owner_agent.schemas import CiResponsibilityNotice
 
@@ -77,6 +77,10 @@ SUMMARY_FIELDS = [
     "resumeInvalidReason",
     "errorKind",
     "cleanupWarning",
+    "resumable",
+    "successMarkerFile",
+    "successMarkerValid",
+    "successMarkerError",
     "noticeValidationError",
     "terminationReaped",
     "terminationWarning",
@@ -379,6 +383,7 @@ def main() -> int:
         for build in builds:
             name = f"{slug(args.job)}_{build}"
             notice_path = notices_dir / f"{name}.notice.json"
+            marker_path = success_marker_path(notice_path)
             stdout_path = stdout_dir / f"{name}.stdout.txt"
             stderr_path = stderr_dir / f"{name}.stderr.txt"
             trace_path = traces_dir / f"{name}.trace.json"
@@ -398,6 +403,8 @@ def main() -> int:
                 "job": args.job,
                 "repo": args.repo,
                 "noticeFile": str(notice_path),
+                "successMarkerFile": str(marker_path),
+                "resumable": False,
                 "stdoutFile": str(stdout_path),
                 "stderrFile": str(stderr_path),
                 "traceFile": str(trace_path),
@@ -412,21 +419,26 @@ def main() -> int:
                 index_file.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
                 rows.append(record)
                 continue
-            if args.resume and notice_path.exists():
+            if args.resume and (notice_path.exists() or marker_path.exists()):
                 try:
                     notice = CiResponsibilityNotice.model_validate_json(notice_path.read_text(encoding="utf-8"))
                     valid = notice.repo == args.repo and notice.job == args.job and notice.buildNumber == build
-                except Exception:
+                    reason = None if valid else "notice metadata mismatch"
+                    if valid:
+                        valid, reason = validate_success_marker(marker_path, notice_path, {"workflow": "jenkins", "repo": args.repo, "job": args.job, "buildNumber": build})
+                except Exception as exc:
                     valid = False
+                    reason = f"invalid notice: {type(exc).__name__}"
                 record["resumeValidated"] = valid
                 if valid:
+                    record.update({"resumable": True, "successMarkerValid": True})
                     record["skipped"] = True
                     record["skipReason"] = "resume: validated notice"
                     index_file.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
                     rows.append(record)
                     continue
-                record["resumeInvalidReason"] = "invalid notice or metadata mismatch"
-                resume_cleanup = cleanup_previous_outputs([notice_path])
+                record["resumeInvalidReason"] = reason or "invalid notice or metadata mismatch"
+                resume_cleanup = cleanup_previous_outputs([notice_path, marker_path])
                 if resume_cleanup:
                     message = "; ".join(resume_cleanup)
                     record.update({"cleanupWarning": message, "errorKind": "cleanup", "error": message, "noticeValid": False})
@@ -434,7 +446,7 @@ def main() -> int:
                     rows.append(record)
                     continue
 
-            cleanup_warnings = cleanup_previous_outputs([notice_path, stdout_path, stderr_path, trace_path])
+            cleanup_warnings = cleanup_previous_outputs([notice_path, marker_path, stdout_path, stderr_path, trace_path])
             if cleanup_warnings:
                 message = "; ".join(cleanup_warnings)
                 record.update({"cleanupWarning": message, "errorKind": "cleanup", "error": message, "noticeValid": False})
@@ -491,6 +503,17 @@ def main() -> int:
                     else:
                         record["noticeValid"] = True
                         record.update(notice_record_fields(notice))
+                        if cp.returncode == 0 and not record.get("errorKind"):
+                            payload = {"schemaVersion": 1, "kind": "ci-owner-agent-resume-success", "workflow": "jenkins",
+                                       "noticeFile": notice_path.name, "noticeSha256": sha256_file(notice_path), "returnCode": 0,
+                                       "repo": args.repo, "job": args.job, "buildNumber": build,
+                                       "completedAt": dt.datetime.now(dt.timezone.utc).isoformat()}
+                            try:
+                                write_success_marker_atomic(marker_path, payload)
+                                record.update({"resumable": True, "successMarkerValid": True})
+                            except Exception as marker_exc:
+                                record.update({"errorKind": "resume_marker", "error": f"failed to write success marker: {marker_exc}",
+                                               "successMarkerValid": False, "successMarkerError": str(marker_exc)})
 
                 if args.fetch_trace:
                     trace_result = fetch_langsmith_trace(
