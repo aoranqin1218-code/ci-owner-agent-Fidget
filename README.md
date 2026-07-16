@@ -756,6 +756,8 @@ python .\scripts\rerun_analyze_local.py `
 - timeout 后的 notice、owner、责任项、metrics 和 trace 一律不作为可信分析结果；`terminationReaped` 表示子进程是否已确认回收，`terminationWarning` 保留尽力终止过程中的诊断。prepare 与 cleanup 使用独立错误类型分类，不依赖异常文本。
 
 三个批量/重跑脚本均可从任意 cwd 启动。显式传入的相对输入、输出和 env 路径相对启动 cwd；未显式提供的默认 `runs/...` 和 `.env` 相对仓库根目录。子进程固定在仓库根目录运行，并将仓库根目录置于 `PYTHONPATH` 首位（保留已有值）。
+
+集成测试会从仓库外使用相对 console/env/output 路径运行真实 rerun 父脚本和真实 `python -m ci_owner_agent analyze-local` 参数入口；严格受 pytest 专用环境开关保护的离线 fake analyzer 用于验证 output-file、cwd 和 PYTHONPATH 契约，不访问外部服务。
 ## 7. 输出结果说明
 
 CLI 会输出严格 JSON，主要字段包括：

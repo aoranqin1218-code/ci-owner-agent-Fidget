@@ -437,7 +437,7 @@ def run_to_dict(run: Any) -> dict[str, Any]:
         if value is not None:
             data[field] = to_jsonable(value)
 
-    # 鏈変簺 LangSmith Run 鎶?metadata 鏀惧湪 extra.metadata
+    # Some LangSmith Run objects store metadata under extra.metadata.
     if "metadata" not in data:
         metadata = get_run_metadata(run)
         if metadata:
