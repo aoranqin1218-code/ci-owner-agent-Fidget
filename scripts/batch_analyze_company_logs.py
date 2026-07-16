@@ -13,28 +13,40 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+_SCRIPT_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_SCRIPT_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_SCRIPT_REPO_ROOT))
+from scripts._runtime import REPO_ROOT, build_subprocess_env, ensure_repo_on_sys_path, resolve_repo_default_path, resolve_user_path
+
+ensure_repo_on_sys_path()
+from ci_owner_agent.schemas import CiResponsibilityNotice
+from ci_owner_agent.services.branch_normalization import normalize_branch_name
+from ci_owner_agent.services.log_provider import log_detect_final_status, resolve_checkout_revision_from_console_log
+
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 BUILD_NO_RE = re.compile(r"(\d+)(?=\.log$)", re.I)
-STATUS_RE = re.compile(r"Finished:\s+([A-Z]+)")
-
-HEAD_COMMIT_PATTERNS = [
-    re.compile(r"Checking out Revision\s+([0-9a-f]{40})", re.I),
-    re.compile(r"git checkout(?:\s+-f)?\s+([0-9a-f]{40})", re.I),
-    re.compile(r"\bGIT_COMMIT=([0-9a-f]{40})\b", re.I),
-    re.compile(r"\bHEAD_COMMIT=([0-9a-f]{40})\b", re.I),
-]
+SHA_RE = re.compile(r"^[0-9a-f]{40}$", re.I)
 
 
 @dataclass
 class BuildLog:
     build: int
     path: Path
-    status: str | None
+    status: str
     head_commit: str | None
+    branch: str | None = None
+    checkout_ambiguous: bool = False
+    checkout_error: str | None = None
+    branch_ambiguous: bool = False
+    status_error: str | None = None
+    build_timestamp: str | None = None
+    source: str = "log"
+    baseline_source: str | None = None
+    history_complete: bool = False
     base_commit: str | None = None
     last_success_build_number: int | None = None
     previous_build_number: int | None = None
@@ -88,18 +100,12 @@ def extract_build_number(path: Path) -> int | None:
     return int(match.group(1)) if match else None
 
 
-def parse_status(text: str) -> str | None:
-    matches = STATUS_RE.findall(text)
-    return matches[-1] if matches else None
+def parse_status(text: str) -> str:
+    return log_detect_final_status(text)
 
 
 def parse_head_commit(text: str) -> str | None:
-    commits: list[str] = []
-    for pattern in HEAD_COMMIT_PATTERNS:
-        commits.extend(pattern.findall(text))
-
-    # Jenkins 日志里可能出现多次 checkout，取最后一次更接近实际构建 head。
-    return commits[-1] if commits else None
+    return resolve_checkout_revision_from_console_log(text).commit
 
 
 def parse_build_log(path: Path) -> BuildLog | None:
@@ -108,15 +114,108 @@ def parse_build_log(path: Path) -> BuildLog | None:
         return None
 
     text = path.read_text(encoding="utf-8", errors="replace")
+    resolution = resolve_checkout_revision_from_console_log(text)
+    branches = {branch for branch in (normalize_branch_name(ref) for ref in resolution.refs) if branch}
     return BuildLog(
         build=build,
         path=path,
         status=parse_status(text),
-        head_commit=parse_head_commit(text),
+        head_commit=resolution.commit,
+        branch=next(iter(branches)) if len(branches) == 1 else None,
+        checkout_ambiguous=resolution.ambiguous,
+        checkout_error="ambiguous trusted checkout commit" if resolution.ambiguous else ("missing trusted checkout commit" if not resolution.commit else None),
+        branch_ambiguous=len(branches) > 1,
     )
 
 
-def load_logs(log_dir: Path, log_glob: str, initial_base_commit: str | None = None) -> list[BuildLog]:
+def load_manifest(path: Path) -> list[BuildLog]:
+    """Load a deliberately small, strictly validated supplemental build history."""
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise ValueError(f"invalid manifest JSON: {exc}") from exc
+    if not isinstance(payload, list):
+        raise ValueError("manifest must be a JSON list")
+    results = {"SUCCESS", "FAILURE", "UNSTABLE", "ABORTED", "NOT_BUILT", "UNKNOWN"}
+    seen: set[int] = set()
+    items: list[BuildLog] = []
+    for entry in payload:
+        if not isinstance(entry, dict) or set(entry) - {"build", "result", "branch", "headCommit", "buildTimestamp"}:
+            raise ValueError("manifest entry has invalid fields")
+        build, result, raw_branch, commit = entry.get("build"), entry.get("result"), entry.get("branch"), entry.get("headCommit")
+        if type(build) is not int or build < 0 or build in seen:
+            raise ValueError("manifest build must be a unique non-negative integer")
+        if not isinstance(result, str) or result.upper() not in results:
+            raise ValueError("manifest result is invalid")
+        branch = normalize_branch_name(raw_branch if isinstance(raw_branch, str) else None)
+        if branch is None:
+            raise ValueError("manifest branch is invalid")
+        if not isinstance(commit, str) or not SHA_RE.fullmatch(commit):
+            raise ValueError("manifest headCommit must be a 40-character SHA")
+        timestamp = entry.get("buildTimestamp")
+        if timestamp is not None and not isinstance(timestamp, str):
+            raise ValueError("manifest buildTimestamp must be a string")
+        seen.add(build)
+        items.append(BuildLog(build, path, result.upper(), commit.lower(), branch=branch, build_timestamp=timestamp, source="manifest"))
+    return items
+
+
+def merge_build_history(logs: list[BuildLog], manifest: list[BuildLog]) -> list[BuildLog]:
+    by_build = {item.build: item for item in logs}
+    for item in manifest:
+        existing = by_build.get(item.build)
+        if existing is not None:
+            if existing.head_commit != item.head_commit or existing.branch != item.branch:
+                raise ValueError(f"manifest conflicts with log for build {item.build}")
+            continue
+        by_build[item.build] = item
+    return sorted(by_build.values(), key=lambda item: item.build)
+
+
+def _apply_history(logs: list[BuildLog], initial_base_commit: str | None, branch: str) -> list[BuildLog]:
+    """Apply the same branch-scoped history rules after a manifest merge."""
+    for item in logs:
+        item.base_commit = item.previous_commit = None
+        item.last_success_build_number = item.previous_build_number = None
+        item.baseline_source = item.skip_reason = None
+    return _assign_history(logs, initial_base_commit, branch)
+
+
+def _assign_history(logs: list[BuildLog], initial_base_commit: str | None, branch: str | None) -> list[BuildLog]:
+    configured_branch = normalize_branch_name(branch) if branch else "dev"
+    baselines: dict[str, tuple[str, int | None, str]] = {}
+    previous: dict[str, tuple[int, str]] = {}
+    if initial_base_commit:
+        baselines[configured_branch] = (initial_base_commit, None, "initial-base-commit")
+    for item in sorted(logs, key=lambda value: value.build):
+        effective_branch = item.branch or configured_branch
+        if item.branch and item.branch != configured_branch:
+            item.skip_reason = f"branch mismatch: log={item.branch} requested={configured_branch}"
+            continue
+        item.branch, item.history_complete = effective_branch, False
+        if item.checkout_ambiguous or item.branch_ambiguous:
+            item.skip_reason = item.checkout_error or "ambiguous branch"; continue
+        if item.status == "SUCCESS":
+            if item.head_commit:
+                baselines[effective_branch] = (item.head_commit, item.build, f"success-{item.source}")
+                previous[effective_branch] = (item.build, item.head_commit)
+            else: item.skip_reason = "success build missing trusted checkout commit"
+            continue
+        if item.status in {"ABORTED", "NOT_BUILT"}:
+            item.skip_reason = f"skip status {item.status}"; continue
+        if not item.head_commit:
+            item.skip_reason = "missing trusted checkout commit"; continue
+        baseline = baselines.get(effective_branch)
+        if not baseline:
+            item.skip_reason = "missing previous successful commit"; continue
+        item.base_commit, item.last_success_build_number, item.baseline_source = baseline
+        item.history_complete = item.baseline_source != "initial-base-commit"
+        if effective_branch in previous: item.previous_build_number, item.previous_commit = previous[effective_branch]
+        previous[effective_branch] = (item.build, item.head_commit)
+    return logs
+
+
+def load_logs(log_dir: Path, log_glob: str, initial_base_commit: str | None = None, branch: str | None = None) -> list[BuildLog]:
     logs: list[BuildLog] = []
 
     for path in sorted(log_dir.glob(log_glob)):
@@ -128,48 +227,7 @@ def load_logs(log_dir: Path, log_glob: str, initial_base_commit: str | None = No
 
     logs.sort(key=lambda x: x.build)
 
-    last_success_commit = initial_base_commit
-    last_success_build_number: int | None = None
-    previous_build_number: int | None = None
-    previous_commit: str | None = None
-
-    for item in logs:
-        if item.status == "SUCCESS":
-            if item.head_commit:
-                last_success_commit = item.head_commit
-                last_success_build_number = item.build
-                previous_build_number = item.build
-                previous_commit = item.head_commit
-            else:
-                item.skip_reason = "success build missing head commit"
-            continue
-
-        if item.status in {"ABORTED", "NOT_BUILT"}:
-            item.skip_reason = f"skip status {item.status}"
-            continue
-
-        if item.status != "FAILURE":
-            item.skip_reason = f"unknown status {item.status}"
-            continue
-
-        if not item.head_commit:
-            item.skip_reason = "missing head commit"
-            continue
-
-        if not last_success_commit:
-            item.skip_reason = "missing previous successful commit"
-            continue
-
-        item.base_commit = last_success_commit
-        item.last_success_build_number = last_success_build_number
-        if previous_build_number is not None:
-            item.previous_build_number = previous_build_number
-            item.previous_commit = previous_commit
-
-        previous_build_number = item.build
-        previous_commit = item.head_commit
-
-    return logs
+    return _assign_history(logs, initial_base_commit, branch)
 
 
 def in_build_range(item: BuildLog, build_from: int | None, build_to: int | None) -> bool:
@@ -197,6 +255,21 @@ def cleanup_previous_outputs(paths: list[Path]) -> list[str]:
 
 def should_skip_for_resume(resume: bool, notice_path: Path) -> bool:
     return resume and notice_path.exists()
+
+
+def validate_resume_notice(path: Path, *, item: BuildLog, repo: str, job: str, branch: str) -> tuple[bool, str | None]:
+    try:
+        notice = CiResponsibilityNotice.model_validate_json(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return False, f"invalid notice: {type(exc).__name__}"
+    expected = {
+        "repo": repo, "job": job, "buildNumber": item.build, "branch": branch,
+        "result": item.status, "baseCommit": item.base_commit, "headCommit": item.head_commit,
+    }
+    for field, value in expected.items():
+        if getattr(notice, field) != value:
+            return False, f"resume metadata mismatch: {field}"
+    return True, None
 
 
 def extract_first_json_object(text: str) -> dict[str, Any] | None:
@@ -379,6 +452,7 @@ def build_analyze_command(
     job: str,
     branch: str,
     build_url_prefix: str,
+    notice_path: Path | None = None,
 ) -> list[str]:
     assert item.base_commit
     assert item.head_commit
@@ -404,6 +478,8 @@ def build_analyze_command(
         str(item.path),
         "--build-url",
         f"{build_url_prefix.rstrip('/')}/{item.build}",
+        "--result",
+        item.status,
     ]
     if item.last_success_build_number is not None:
         command.extend(["--last-success-build", str(item.last_success_build_number)])
@@ -411,6 +487,10 @@ def build_analyze_command(
         command.extend(["--previous-build", str(item.previous_build_number)])
     if item.previous_commit is not None:
         command.extend(["--previous-commit", item.previous_commit])
+    if item.build_timestamp:
+        command.extend(["--build-timestamp", item.build_timestamp])
+    if notice_path is not None:
+        command.extend(["--output-file", str(notice_path)])
     return command
 
 
@@ -424,6 +504,7 @@ def run_analyze_local(
     cwd: Path,
     env: dict[str, str],
     timeout_seconds: int,
+    notice_path: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
     cmd = build_analyze_command(
         item=item,
@@ -431,6 +512,7 @@ def run_analyze_local(
         job=job,
         branch=branch,
         build_url_prefix=build_url_prefix,
+        notice_path=notice_path,
     )
 
     return subprocess.run(
@@ -573,7 +655,7 @@ def main() -> int:
     parser.add_argument("--log-glob", default="*.log")
 
     parser.add_argument("--out-dir", default=None)
-    parser.add_argument("--env-file", default=".env")
+    parser.add_argument("--env-file", default=None)
     parser.add_argument("--env-override", action="store_true")
 
     parser.add_argument("--repo", default="fx-code")
@@ -582,6 +664,7 @@ def main() -> int:
     parser.add_argument("--build-url-prefix", default="local://services/fx-code-unittest")
 
     parser.add_argument("--initial-base-commit", default=None)
+    parser.add_argument("--manifest-file", default=None)
 
     parser.add_argument("--langsmith-project", default=None)
     parser.add_argument("--fetch-trace", action="store_true")
@@ -598,17 +681,18 @@ def main() -> int:
     if args.build_from is not None and args.build_to is not None and args.build_from > args.build_to:
         parser.error("--build-from must be <= --build-to")
 
-    repo_root = Path.cwd()
-    log_dir = Path(args.log_dir).resolve()
+    branch = normalize_branch_name(args.branch)
+    if not branch:
+        parser.error("--branch must be a logical branch name")
+    repo_root = REPO_ROOT
+    log_dir = resolve_user_path(args.log_dir)
 
-    env_file = Path(args.env_file)
-    if not env_file.is_absolute():
-        env_file = repo_root / env_file
+    env_file = resolve_user_path(args.env_file) if args.env_file else resolve_repo_default_path(".env")
 
     load_env_file(env_file, override=args.env_override)
 
     batch_id = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-    out_dir = Path(args.out_dir or f"runs/company-log-batch-{batch_id}").resolve()
+    out_dir = resolve_user_path(args.out_dir) if args.out_dir else resolve_repo_default_path(f"runs/company-log-batch-{batch_id}")
 
     notices_dir = out_dir / "notices"
     stdout_dir = out_dir / "stdout"
@@ -630,26 +714,32 @@ def main() -> int:
         log_dir=log_dir,
         log_glob=args.log_glob,
         initial_base_commit=args.initial_base_commit,
+        branch=branch,
     )
+    if args.manifest_file:
+        manifest_path = resolve_user_path(args.manifest_file)
+        try:
+            manifest = load_manifest(manifest_path)
+            logs_all = merge_build_history(logs_all, manifest)
+            # Recalculate history using the merged, branch-scoped timeline.
+            logs_all = _apply_history(logs_all, args.initial_base_commit, branch)
+        except ValueError as exc:
+            parser.error(str(exc))
     logs = filter_logs_by_build_range(logs_all, args.build_from, args.build_to)
 
-    runnable_failures = [
-        item for item in logs if item.status == "FAILURE" and not item.skip_reason
-    ]
+    runnable_builds_list = [item for item in logs if item.status in {"FAILURE", "UNSTABLE", "UNKNOWN"} and not item.skip_reason]
 
     if args.limit > 0:
-        runnable_failures = runnable_failures[: args.limit]
+        runnable_builds_list = runnable_builds_list[: args.limit]
 
-    runnable_builds = {item.build for item in runnable_failures}
+    runnable_builds = {item.build for item in runnable_builds_list}
 
     index_path = out_dir / "index.jsonl"
     summary_path = out_dir / "summary.csv"
 
-    env = os.environ.copy()
+    env = build_subprocess_env()
 
     # 关键：强制子进程 Python 使用 UTF-8 输出，避免 Windows GBK 导致中文乱码或 UnicodeEncodeError
-    env["PYTHONUTF8"] = "1"
-    env["PYTHONIOENCODING"] = "utf-8"
 
     env["LANGCHAIN_PROJECT"] = project_name
     env["LANGSMITH_PROJECT"] = project_name
@@ -668,17 +758,21 @@ def main() -> int:
     print(f"build_to={args.build_to}")
     print(f"total_logs_all={len(logs_all)}")
     print(f"total_logs_selected={len(logs)}")
-    print(f"runnable_failures={len(runnable_failures)}")
+    print(f"runnable_builds={len(runnable_builds_list)}")
 
     rows: list[dict[str, Any]] = []
 
     with index_path.open("w", encoding="utf-8") as index_file:
         for item in logs:
-            if item.status != "FAILURE" or item.skip_reason:
+            if item.status not in {"FAILURE", "UNSTABLE", "UNKNOWN"} or item.skip_reason:
                 record = {
                     "build": item.build,
                     "status": item.status,
                     "headCommit": item.head_commit,
+                    "branch": item.branch,
+                    "checkoutAmbiguous": item.checkout_ambiguous,
+                    "baselineSource": item.baseline_source,
+                    "historyComplete": item.history_complete,
                     "baseCommit": item.base_commit,
                     "lastSuccessfulBuildNumber": item.last_success_build_number,
                     "previousBuildNumber": item.previous_build_number,
@@ -708,8 +802,9 @@ def main() -> int:
                 item=item,
                 repo=args.repo,
                 job=args.job,
-                branch=args.branch,
+                branch=branch,
                 build_url_prefix=args.build_url_prefix,
+                notice_path=notice_path,
             )
 
             record: dict[str, Any] = {
@@ -717,6 +812,10 @@ def main() -> int:
                 "status": item.status,
                 "baseCommit": item.base_commit,
                 "headCommit": item.head_commit,
+                "branch": item.branch,
+                "checkoutAmbiguous": item.checkout_ambiguous,
+                "baselineSource": item.baseline_source,
+                "historyComplete": item.history_complete,
                 "lastSuccessfulBuildNumber": item.last_success_build_number,
                 "previousBuildNumber": item.previous_build_number,
                 "previousCommit": item.previous_commit,
@@ -740,13 +839,17 @@ def main() -> int:
                 rows.append(record)
                 continue
 
-            if should_skip_for_resume(args.resume, notice_path):
-                record["skipped"] = True
-                record["skipReason"] = "resume: notice already exists"
-                index_file.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
-                rows.append(record)
-                print(f"skip existing: {notice_path}")
-                continue
+            if args.resume and notice_path.exists():
+                valid, reason = validate_resume_notice(notice_path, item=item, repo=args.repo, job=args.job, branch=branch)
+                record["resumeValidated"] = valid
+                record["resumeInvalidReason"] = reason
+                if valid:
+                    record["skipped"] = True
+                    record["skipReason"] = "resume: validated notice"
+                    index_file.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+                    rows.append(record)
+                    continue
+                cleanup_previous_outputs([notice_path])
 
             # Per-build metrics file (defined before cleanup so stale metrics get removed)
             metrics_file = metrics_dir / f"{name}.metrics.jsonl"
@@ -765,11 +868,12 @@ def main() -> int:
                     item=item,
                     repo=args.repo,
                     job=args.job,
-                    branch=args.branch,
+                    branch=branch,
                     build_url_prefix=args.build_url_prefix,
                     cwd=repo_root,
                     env=env,
                     timeout_seconds=args.timeout_seconds,
+                    notice_path=notice_path,
                 )
 
                 stdout_path.write_text(cp.stdout, encoding="utf-8")
@@ -778,12 +882,14 @@ def main() -> int:
                 record["returnCode"] = cp.returncode
                 record["durationSec"] = round(time.perf_counter() - started, 3)
 
-                notice = extract_first_json_object(cp.stdout)
-                if notice is not None:
-                    notice_path.write_text(
-                        json.dumps(notice, ensure_ascii=False, indent=2),
-                        encoding="utf-8",
-                    )
+                try:
+                    notice_model = CiResponsibilityNotice.model_validate_json(notice_path.read_text(encoding="utf-8"))
+                    notice = notice_model.model_dump(mode="json")
+                    if (notice_model.repo != args.repo or notice_model.job != args.job or notice_model.buildNumber != item.build
+                            or notice_model.branch != branch or notice_model.result != item.status
+                            or notice_model.baseCommit != item.base_commit or notice_model.headCommit != item.head_commit):
+                        raise ValueError("notice metadata mismatch")
+                    record["noticeValid"] = True
 
                     owner = notice.get("owner") or {}
                     record["ownerType"] = owner.get("type")
@@ -797,8 +903,10 @@ def main() -> int:
                     record["historyEnabled"] = os.environ.get("CI_AGENT_HISTORY_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
                     record.update(extract_history_stats_from_notice(notice))
                     record.update(extract_responsibility_stats_from_notice(notice))
-                else:
-                    record["noticeParseError"] = True
+                except Exception as exc:
+                    record["noticeValid"] = False
+                    record["errorKind"] = "notice_validation"
+                    record["error"] = f"invalid output notice: {type(exc).__name__}: {exc}"
 
                 if args.fetch_trace:
                     trace_result = fetch_langsmith_trace(
@@ -815,9 +923,10 @@ def main() -> int:
             except subprocess.TimeoutExpired as exc:
                 record["durationSec"] = round(time.perf_counter() - started, 3)
                 record["error"] = f"analyze-local timeout after {args.timeout_seconds}s"
+                record["errorKind"] = "timeout"
                 stdout_path.write_text(exc.stdout or "", encoding="utf-8")
                 stderr_path.write_text(exc.stderr or "", encoding="utf-8")
-                cleanup_warnings = cleanup_previous_outputs([notice_path, trace_path, metrics_file])
+                cleanup_warnings = cleanup_previous_outputs([notice_path, trace_path])
                 if cleanup_warnings:
                     existing = record.get("cleanupWarning")
                     record["cleanupWarning"] = "; ".join(
@@ -827,6 +936,7 @@ def main() -> int:
             except Exception as exc:
                 record["durationSec"] = round(time.perf_counter() - started, 3)
                 record["error"] = str(exc)
+                record["errorKind"] = "execution"
 
             # Read metrics after each build (success, timeout, or exception)
             metrics = read_last_jsonl(metrics_file)
@@ -851,6 +961,14 @@ def main() -> int:
         "skipReason",
         "baseCommit",
         "headCommit",
+        "branch",
+        "checkoutAmbiguous",
+        "baselineSource",
+        "historyComplete",
+        "noticeValid",
+        "resumeValidated",
+        "resumeInvalidReason",
+        "errorKind",
         "lastSuccessfulBuildNumber",
         "previousBuildNumber",
         "previousCommit",
@@ -896,7 +1014,7 @@ def main() -> int:
     print(f"index:   {index_path}")
     print(f"summary: {summary_path}")
 
-    return 0
+    return 1 if any(not row.get("skipped") and (row.get("error") or row.get("returnCode") not in (None, 0) or row.get("noticeValid") is False) for row in rows) else 0
 
 
 if __name__ == "__main__":

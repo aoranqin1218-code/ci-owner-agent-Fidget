@@ -585,7 +585,9 @@ python -m ci_owner_agent serve-feedback --host 0.0.0.0 --port 8765
 
 ### 6.1 批量分析本地日志：`scripts/batch_analyze_company_logs.py`
 
-适用于已经下载到本地的一批 Jenkins console log。脚本会按构建号排序，自动从成功构建推导后续失败构建的 base commit，同时自动追踪上一个构建的 headCommit 作为 focusRange 的 `--previous-commit`，并为每个构建自动启用 metrics 记录 token 与耗时。
+适用于已经下载到本地的一批 Jenkins console log。只信任独立的 `Checking out Revision <40位SHA> (...)` 或 `git checkout -f <40位SHA>` 行；重复同一 SHA 可以接受，两个不同的可信 SHA 会安全拒绝。`GIT_COMMIT`、`HEAD_COMMIT` 和普通文本 SHA 不是 checkout 证据。分支会从 checkout ref 规范化（例如 `refs/remotes/origin/dev` 为 `dev`）；与 `--branch` 不一致或不明确时会拒绝该构建。
+
+`SUCCESS` 只为同一逻辑分支更新基线；`FAILURE`、`UNSTABLE`、`UNKNOWN` 会分析，`ABORTED`/`NOT_BUILT` 跳过。脚本会正式传入 `--output-file`、`--result` 和可用的时间戳，绝不从 stdout 的 JSON 猜测 notice；`--resume` 会校验 notice schema 及任务元数据后才跳过。
 
 示例：
 
@@ -617,11 +619,12 @@ python .\scripts\batch_analyze_company_logs.py `
 | `--branch` | 分支名，默认 `dev`。 |
 | `--build-url-prefix` | 本地 build URL 前缀。 |
 | `--initial-base-commit` | 第一段失败前的已知成功 commit。 |
+| `--manifest-file` | 可选 JSON 历史补充；每项含 `build`、`result`、`branch`、`headCommit` 和可选 `buildTimestamp`，与日志冲突会报错。 |
 | `--build-from` / `--build-to` | 构建号范围过滤。 |
 | `--limit` | 最多执行多少个失败构建。 |
 | `--timeout-seconds` | 单个构建分析超时。 |
 | `--dry-run` | 只生成命令，不执行。 |
-| `--resume` | 已有 notice 时跳过。 |
+| `--resume` | 仅在已有 notice 合法且 repo/job/build/branch/result/base/head 全匹配时跳过。 |
 | `--fetch-trace` | 从 LangSmith 拉取 trace。 |
 | `--trace-wait-seconds` | 等待 trace 出现的最长时间。 |
 
@@ -679,7 +682,7 @@ python .\scripts\batch_analyze_jenkins_builds.py `
 | `--env-file` / `--env-override` | 环境变量文件加载。 |
 | `--fetch-trace` | 拉取 LangSmith trace。 |
 | `--timeout-seconds` | 单个构建超时。 |
-| `--resume` | 已有 notice 时跳过。 |
+| `--resume` | 仅在已有 notice 通过 schema 且 repo/job/build 匹配时跳过。 |
 | `--dry-run` | 只输出命令。 |
 | `--notify` | 分析后发送通知。 |
 | `--notify-dry-run` | 通知 dry-run。 |
@@ -744,7 +747,9 @@ python .\scripts\rerun_analyze_local.py `
 说明：
 - `--base-commit` 为 lastSuccessfulBuild commit，即 fullRange 和 notice.baseCommit。
 - `--previous-commit` 为 focusRange 起点，优先从 Mongo `ci_builds` 查找上一个 build 的 headCommit。
-- 输出目录结构与 `batch_analyze_company_logs.py` 相同：`index.jsonl`、`summary.csv`、`notices/`、`stdout/`、`stderr/`。
+- 每次运行输出 `run-xx/notice.json`、`stdout.log`、`stderr.log`、`metrics.jsonl`、`command.txt`，可选 `trace.json` 和 `trace-summary.json`；notice 不再从 stdout 解析。
+
+三个批量/重跑脚本均可从任意 cwd 启动。显式传入的相对输入、输出和 env 路径相对启动 cwd；未显式提供的默认 `runs/...` 和 `.env` 相对仓库根目录。子进程固定在仓库根目录运行，并将仓库根目录置于 `PYTHONPATH` 首位（保留已有值）。
 ## 7. 输出结果说明
 
 CLI 会输出严格 JSON，主要字段包括：

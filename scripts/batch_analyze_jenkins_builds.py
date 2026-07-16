@@ -11,9 +11,12 @@ import time
 from pathlib import Path
 from typing import Any
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
+_SCRIPT_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_SCRIPT_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_SCRIPT_REPO_ROOT))
+from scripts._runtime import REPO_ROOT, build_subprocess_env, ensure_repo_on_sys_path, resolve_repo_default_path, resolve_user_path
+ensure_repo_on_sys_path()
+from ci_owner_agent.schemas import CiResponsibilityNotice
 
 from scripts.batch_analyze_company_logs import (
     cleanup_previous_outputs,
@@ -99,6 +102,7 @@ def build_analyze_command(
     notify: bool,
     notify_dry_run: bool,
     force_notify: bool,
+    notice_path: Path | None = None,
 ) -> list[str]:
     command = [
         sys.executable,
@@ -120,6 +124,8 @@ def build_analyze_command(
         command.append("--notify-dry-run")
     if force_notify:
         command.append("--force-notify")
+    if notice_path is not None:
+        command.extend(["--output-file", str(notice_path)])
     return command
 
 
@@ -276,6 +282,7 @@ def run_analyze(
     cwd: Path,
     env: dict[str, str],
     timeout_seconds: int,
+    notice_path: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         build_analyze_command(
@@ -286,6 +293,7 @@ def run_analyze(
             notify=notify,
             notify_dry_run=notify_dry_run,
             force_notify=force_notify,
+            notice_path=notice_path,
         ),
         cwd=str(cwd),
         env=env,
@@ -308,7 +316,7 @@ def main() -> int:
     parser.add_argument("--builds", default=None)
     parser.add_argument("--log-tail-lines", type=int, default=200)
     parser.add_argument("--out-dir", default=None)
-    parser.add_argument("--env-file", default=".env")
+    parser.add_argument("--env-file", default=None)
     parser.add_argument("--env-override", action="store_true")
     parser.add_argument("--langsmith-project", default=None)
     parser.add_argument("--fetch-trace", action="store_true")
@@ -326,14 +334,12 @@ def main() -> int:
     except ValueError as exc:
         parser.error(str(exc))
 
-    repo_root = Path.cwd()
-    env_file = Path(args.env_file)
-    if not env_file.is_absolute():
-        env_file = repo_root / env_file
+    repo_root = REPO_ROOT
+    env_file = resolve_user_path(args.env_file) if args.env_file else resolve_repo_default_path(".env")
     load_env_file(env_file, override=args.env_override)
 
     batch_id = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-    out_dir = Path(args.out_dir or f"runs/jenkins-batch-{batch_id}").resolve()
+    out_dir = resolve_user_path(args.out_dir) if args.out_dir else resolve_repo_default_path(f"runs/jenkins-batch-{batch_id}")
     notices_dir = out_dir / "notices"
     stdout_dir = out_dir / "stdout"
     stderr_dir = out_dir / "stderr"
@@ -347,9 +353,7 @@ def main() -> int:
         or os.environ.get("LANGSMITH_PROJECT")
         or f"ci-owner-agent-jenkins-batch-{batch_id}"
     )
-    env = os.environ.copy()
-    env["PYTHONUTF8"] = "1"
-    env["PYTHONIOENCODING"] = "utf-8"
+    env = build_subprocess_env()
     env["LANGCHAIN_PROJECT"] = project_name
     env["LANGSMITH_PROJECT"] = project_name
     env.setdefault("LANGCHAIN_TRACING_V2", "true")
@@ -382,6 +386,7 @@ def main() -> int:
                 notify=args.notify,
                 notify_dry_run=args.notify_dry_run,
                 force_notify=args.force_notify,
+                notice_path=notice_path,
             )
             record: dict[str, Any] = {
                 "build": build,
@@ -403,12 +408,20 @@ def main() -> int:
                 rows.append(record)
                 continue
             if args.resume and notice_path.exists():
-                record["skipped"] = True
-                record["skipReason"] = "resume: notice already exists"
-                index_file.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
-                rows.append(record)
-                print(f"skip existing: {notice_path}")
-                continue
+                try:
+                    notice = CiResponsibilityNotice.model_validate_json(notice_path.read_text(encoding="utf-8"))
+                    valid = notice.repo == args.repo and notice.job == args.job and notice.buildNumber == build
+                except Exception:
+                    valid = False
+                record["resumeValidated"] = valid
+                if valid:
+                    record["skipped"] = True
+                    record["skipReason"] = "resume: validated notice"
+                    index_file.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+                    rows.append(record)
+                    continue
+                record["resumeInvalidReason"] = "invalid notice or metadata mismatch"
+                cleanup_previous_outputs([notice_path])
 
             cleanup_warnings = cleanup_previous_outputs([notice_path, stdout_path, stderr_path, trace_path])
             if cleanup_warnings:
@@ -430,17 +443,22 @@ def main() -> int:
                     cwd=repo_root,
                     env=env,
                     timeout_seconds=args.timeout_seconds,
+                    notice_path=notice_path,
                 )
                 record["durationSeconds"] = round(time.monotonic() - started_monotonic, 3)
                 record["returnCode"] = cp.returncode
                 stdout_path.write_text(cp.stdout, encoding="utf-8")
                 stderr_path.write_text(cp.stderr, encoding="utf-8")
-                notice = extract_first_json_object(cp.stdout)
+                try:
+                    notice = CiResponsibilityNotice.model_validate_json(notice_path.read_text(encoding="utf-8")).model_dump(mode="json")
+                except Exception as exc:
+                    notice = None
+                    record["noticeValid"] = False
+                    record["errorKind"] = "notice_validation"
+                    record["error"] = f"invalid output notice: {type(exc).__name__}: {exc}"
                 if notice is not None:
-                    notice_path.write_text(json.dumps(notice, ensure_ascii=False, indent=2), encoding="utf-8")
+                    record["noticeValid"] = True
                     record.update(notice_record_fields(notice))
-                else:
-                    record["noticeParseError"] = True
 
                 if args.fetch_trace:
                     trace_result = fetch_langsmith_trace(

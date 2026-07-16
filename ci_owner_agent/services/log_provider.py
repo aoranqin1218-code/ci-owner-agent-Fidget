@@ -10,9 +10,9 @@ from typing import Literal
 from ci_owner_agent.schemas import LogTail
 from ci_owner_agent.services.command_runner import truncate_tail_text, truncate_text
 
-FinalStatus = Literal["SUCCESS", "FAILURE", "ABORTED", "UNKNOWN"]
-FINAL_STATUS_RE = re.compile(r"Finished:\s*(SUCCESS|FAILURE|ABORTED)\b", re.IGNORECASE)
-CHECKING_OUT_REVISION_RE = re.compile(r"(?mi)^\s*Checking out Revision\s+(?P<commit>[0-9a-f]{40})(?:\s+\([^)]+\))?\s*$")
+FinalStatus = Literal["SUCCESS", "FAILURE", "UNSTABLE", "ABORTED", "NOT_BUILT", "UNKNOWN"]
+FINAL_STATUS_RE = re.compile(r"Finished:\s*(SUCCESS|FAILURE|UNSTABLE|ABORTED|NOT_BUILT)\b", re.IGNORECASE)
+CHECKING_OUT_REVISION_RE = re.compile(r"(?mi)^\s*Checking out Revision\s+(?P<commit>[0-9a-f]{40})(?:\s+\((?P<ref>[^)]+)\))?\s*$")
 GIT_CHECKOUT_FORCE_RE = re.compile(r"(?mi)^\s*(?:>\s*)?git\s+checkout\s+-f\s+(?P<commit>[0-9a-f]{40})(?:\s+#.*)?$")
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 ERROR_TERMS = [
@@ -59,14 +59,16 @@ def log_detect_final_status(log_content: str) -> FinalStatus:
 class CheckoutCommitResolution:
     commit: str | None
     ambiguous: bool = False
+    refs: tuple[str, ...] = ()
 
 
 def resolve_checkout_revision_from_console_log(text: str) -> CheckoutCommitResolution:
     clean = ANSI_RE.sub("", text)
     candidates = {match.group("commit").lower() for pattern in (CHECKING_OUT_REVISION_RE, GIT_CHECKOUT_FORCE_RE) for match in pattern.finditer(clean)}
+    refs = tuple(sorted({match.group("ref").strip() for match in CHECKING_OUT_REVISION_RE.finditer(clean) if match.group("ref")}))
     if len(candidates) == 1:
-        return CheckoutCommitResolution(candidates.pop())
-    return CheckoutCommitResolution(None, ambiguous=bool(candidates))
+        return CheckoutCommitResolution(candidates.pop(), refs=refs)
+    return CheckoutCommitResolution(None, ambiguous=bool(candidates), refs=refs)
 
 
 def detect_checkout_revision_from_console_log(text: str) -> str | None:

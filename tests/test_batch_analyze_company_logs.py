@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+from pathlib import Path
 
 from scripts.batch_analyze_company_logs import (
     build_analyze_command,
@@ -10,9 +11,20 @@ from scripts.batch_analyze_company_logs import (
     filter_logs_by_build_range,
     load_logs,
     main,
+    parse_build_log,
     read_last_jsonl,
     should_skip_for_resume,
 )
+
+
+def test_real_company_logs_use_trusted_checkout_evidence_and_normalize_branch():
+    root = Path(__file__).resolve().parents[1]
+    for name in ("company-unittest-5116.log", "company-unittest-5136.log", "company-unittest-5137.log"):
+        item = parse_build_log(root / "samples" / "company_log" / name)
+        assert item is not None
+        assert item.head_commit is not None
+        assert item.branch == "dev"
+        assert item.checkout_ambiguous is False
 
 
 def write_log(log_dir, build: int, commit: str, status: str) -> None:

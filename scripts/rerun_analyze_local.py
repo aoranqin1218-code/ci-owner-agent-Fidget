@@ -13,6 +13,12 @@ import time
 from pathlib import Path
 from typing import Any
 
+_SCRIPT_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_SCRIPT_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_SCRIPT_REPO_ROOT))
+from scripts._runtime import REPO_ROOT, build_subprocess_env, ensure_repo_on_sys_path, resolve_repo_default_path, resolve_user_path
+ensure_repo_on_sys_path()
+
 try:
     from dotenv import load_dotenv
     load_dotenv()
@@ -44,7 +50,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
     )
 
-    parser.add_argument("--out-dir", default="./runs/rerun-analyze-local")
+    parser.add_argument("--out-dir", default=None)
     parser.add_argument("--python", default=sys.executable)
     parser.add_argument("--ignore-checkout-commit-mismatch", action="store_true")
     parser.add_argument("--notify", action="store_true")
@@ -111,11 +117,14 @@ def extract_json_object(text: str) -> dict[str, Any] | None:
 def read_notice(path: Path) -> dict[str, Any] | None:
     if not path.exists():
         return None
-    text = path.read_text(encoding="utf-8", errors="replace")
-    return extract_json_object(text)
+    try:
+        from ci_owner_agent.schemas import CiResponsibilityNotice
+        return CiResponsibilityNotice.model_validate_json(path.read_text(encoding="utf-8")).model_dump(mode="json")
+    except Exception:
+        return None
 
 
-def build_command(args: argparse.Namespace) -> list[str]:
+def build_command(args: argparse.Namespace, notice_path: Path | None = None) -> list[str]:
     build_url = args.build_url or f"local://{args.job}/{args.build}"
 
     command = [
@@ -162,6 +171,8 @@ def build_command(args: argparse.Namespace) -> list[str]:
 
     if args.force_notify:
         command += ["--force-notify"]
+    if notice_path is not None:
+        command += ["--output-file", str(notice_path)]
 
     return command
 
@@ -529,11 +540,11 @@ def main() -> int:
     if args.timeout_sec <= 0:
         raise SystemExit("--timeout-sec must be positive")
 
-    console_file = Path(args.console_file)
+    console_file = resolve_user_path(args.console_file)
     if not console_file.exists():
         raise SystemExit(f"console file not found: {console_file}")
 
-    out_dir = Path(args.out_dir)
+    out_dir = resolve_user_path(args.out_dir) if args.out_dir else resolve_repo_default_path("runs/rerun-analyze-local")
     out_dir.mkdir(parents=True, exist_ok=True)
 
     batch_id = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -558,21 +569,23 @@ def main() -> int:
         run_dir = out_dir / run_name
         run_dir.mkdir(parents=True, exist_ok=True)
 
-        stdout_file = run_dir / "stdout.json"
+        notice_file = run_dir / "notice.json"
+        stdout_file = run_dir / "stdout.log"
         stderr_file = run_dir / "stderr.log"
         metrics_file = run_dir / "metrics.jsonl"
         command_file = run_dir / "command.txt"
         trace_file = run_dir / "trace.json"
         trace_summary_file = run_dir / "trace-summary.json"
 
+        run_args = argparse.Namespace(**vars(args))
+        run_args.console_file = str(console_file)
+        run_command = build_command(run_args, notice_file)
         command_file.write_text(
-            " ".join(f'"{part}"' if " " in part else part for part in command),
+            " ".join(f'"{part}"' if " " in part else part for part in run_command),
             encoding="utf-8",
         )
 
-        env = os.environ.copy()
-        env["PYTHONUTF8"] = "1"
-        env["PYTHONIOENCODING"] = "utf-8"
+        env = build_subprocess_env()
         env["CI_AGENT_METRICS_ENABLED"] = "true"
         env["CI_AGENT_METRICS_FILE"] = str(metrics_file)
 
@@ -607,13 +620,14 @@ def main() -> int:
                 preexec_fn = os.setsid
 
             process = subprocess.Popen(
-                command,
+                run_command,
                 stdout=stdout_fp,
                 stderr=stderr_fp,
                 env=env,
                 text=True,
                 creationflags=creationflags,
                 preexec_fn=preexec_fn,
+                cwd=str(REPO_ROOT),
             )
 
             timed_out = False
@@ -649,7 +663,7 @@ def main() -> int:
             )
 
         metrics = read_last_jsonl(metrics_file)
-        notice = read_notice(stdout_file)
+        notice = read_notice(notice_file)
         notice_summary = summarize_notice(notice)
 
         row = {
@@ -673,6 +687,7 @@ def main() -> int:
             "traceUsageDictCount": trace_result.get("usageDictCount") if trace_result else None,
             "traceError": trace_result.get("error") if trace_result and not trace_result.get("ok") else None,
             "stdoutFile": str(stdout_file),
+            "noticeFile": str(notice_file),
             "stderrFile": str(stderr_file),
             "metricsFile": str(metrics_file),
             "traceFile": str(trace_file) if args.fetch_trace else None,
