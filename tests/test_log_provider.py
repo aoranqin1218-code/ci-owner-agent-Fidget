@@ -1,6 +1,30 @@
 from __future__ import annotations
 
-from ci_owner_agent.services.log_provider import LocalFileLogProvider
+import pytest
+
+from ci_owner_agent.services.log_provider import LocalFileLogProvider, resolve_final_status_from_console_log
+
+
+@pytest.mark.parametrize(
+    ("text", "status", "detected", "raw", "unsupported"),
+    [
+        ("no final line", "UNKNOWN", False, None, None),
+        ("Finished: FAILURE", "FAILURE", True, "FAILURE", None),
+        ("Finished: UNKNOWN", "UNKNOWN", True, "UNKNOWN", None),
+        ("Finished: NOT_BUILT", "NOT_BUILT", True, "NOT_BUILT", None),
+        ("Finished: CANCELLED", "UNKNOWN", True, "CANCELLED", "CANCELLED"),
+        ("2026-07-16T18:00:00.123+08:00 Finished: UNSTABLE", "UNSTABLE", True, "UNSTABLE", None),
+        ("[2026-07-16T18:00:00Z] Finished: SUCCESS", "SUCCESS", True, "SUCCESS", None),
+        ("\x1b[32mFinished: FAILURE\x1b[0m", "FAILURE", True, "FAILURE", None),
+        ("[INFO] Finished: SUCCESS", "UNKNOWN", False, None, None),
+        ("message: Finished: FAILURE", "UNKNOWN", False, None, None),
+        ("Finished: SUCCESS\nFinished: failure", "FAILURE", True, "FAILURE", None),
+    ],
+)
+def test_resolve_final_status(text, status, detected, raw, unsupported):
+    result = resolve_final_status_from_console_log(text)
+    assert (result.status, result.detected, result.raw_status, result.unsupported_status) == (status, detected, raw, unsupported)
+    assert bool(result.error) is bool(unsupported)
 
 
 def provider(tmp_path, lines: list[str]) -> LocalFileLogProvider:

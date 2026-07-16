@@ -53,7 +53,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--previous-commit", default=None)
     parser.add_argument(
         "--result",
-        choices=["SUCCESS", "FAILURE", "UNSTABLE", "ABORTED", "UNKNOWN"],
+        choices=["SUCCESS", "FAILURE", "UNSTABLE", "ABORTED", "NOT_BUILT", "UNKNOWN"],
         default=None,
     )
 
@@ -675,12 +675,17 @@ def main() -> int:
                     timed_out = True
                     exit_code = None
                     kill_process_tree(process)
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait(timeout=5)
         except Exception as exc:
             duration_sec = round(time.perf_counter() - started, 3)
             rows.append({
                 "run": run_index, "status": "FAILED", "durationSec": duration_sec,
                 "errorKind": "execution", "error": f"{type(exc).__name__}: {exc}",
-                "noticeValid": False, "noticeValidationError": "process did not start",
+                "noticeValid": False, "noticeValidationError": "process execution failed",
                 "stdoutFile": str(stdout_file), "noticeFile": str(notice_file), "stderrFile": str(stderr_file),
                 "metricsFile": str(metrics_file), "traceFile": str(trace_file) if args.fetch_trace else None,
                 "traceSummaryFile": str(trace_summary_file) if args.fetch_trace else None,

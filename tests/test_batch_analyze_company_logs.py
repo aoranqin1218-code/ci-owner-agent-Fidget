@@ -165,6 +165,20 @@ def test_build_from_greater_than_build_to_errors(tmp_path, monkeypatch):
         main()
 
 
+def test_main_conflicting_checkout_sha_returns_validation_failure(tmp_path, monkeypatch):
+    log_dir, out_dir = tmp_path / "logs", tmp_path / "out"
+    log_dir.mkdir()
+    (log_dir / "company-unittest-1.log").write_text(
+        f"Checking out Revision {'a' * 40} (refs/remotes/origin/dev)\n> git checkout -f {'b' * 40}\nFinished: FAILURE\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("sys.argv", ["batch", "--log-dir", str(log_dir), "--out-dir", str(out_dir), "--initial-base-commit", "c" * 40, "--dry-run"])
+    assert main() == 1
+    record = __import__("json").loads((out_dir / "index.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert record["validationFailed"] is True
+    assert record["errorKind"] == "checkout_validation"
+
+
 def test_extract_history_stats_from_structured_notice():
     stats = extract_history_stats_from_notice(
         {

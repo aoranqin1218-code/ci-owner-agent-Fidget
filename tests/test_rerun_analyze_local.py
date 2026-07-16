@@ -1,5 +1,6 @@
 import argparse
 import json
+import subprocess
 from ci_owner_agent.schemas import CiResponsibilityNotice, Owner
 from scripts import rerun_analyze_local
 from scripts.rerun_analyze_local import build_command, read_notice, validate_notice
@@ -111,3 +112,48 @@ def test_rerun_unsupported_status_writes_structured_summary(tmp_path, monkeypatc
     assert rerun_analyze_local.main() == 1
     rows = json.loads((out_dir / "summary.json").read_text(encoding="utf-8"))
     assert rows[0]["errorKind"] == "status_validation"
+
+
+def test_rerun_explicit_not_built_uses_structured_failure(tmp_path, monkeypatch):
+    console = tmp_path / "console.log"
+    console.write_text("Finished: NOT_BUILT\n", encoding="utf-8")
+    out_dir = tmp_path / "runs"
+    monkeypatch.setattr(
+        "sys.argv",
+        ["rerun", "--repo", "fx-code", "--job", "j", "--build", "1", "--base-commit", "base", "--head-commit", "head",
+         "--console-file", str(console), "--out-dir", str(out_dir), "--result", "NOT_BUILT"],
+    )
+    assert rerun_analyze_local.main() == 1
+    rows = json.loads((out_dir / "summary.json").read_text(encoding="utf-8"))
+    assert rows[0]["errorKind"] == "status_validation"
+
+
+def test_rerun_timeout_reaps_process_and_returns_failure(tmp_path, monkeypatch):
+    console = tmp_path / "console.log"
+    console.write_text("Finished: FAILURE\n", encoding="utf-8")
+    out_dir = tmp_path / "runs"
+    waits = []
+
+    class FakeProcess:
+        pid = 123
+        def wait(self, timeout=None):
+            waits.append(timeout)
+            if len(waits) == 1:
+                raise subprocess.TimeoutExpired("fake", timeout)
+            return -1
+        def poll(self):
+            return None
+        def kill(self):
+            return None
+
+    monkeypatch.setattr(rerun_analyze_local.subprocess, "Popen", lambda *a, **k: FakeProcess())
+    monkeypatch.setattr(rerun_analyze_local, "kill_process_tree", lambda process: None)
+    monkeypatch.setattr(
+        "sys.argv",
+        ["rerun", "--runs", "1", "--timeout-sec", "1", "--repo", "fx-code", "--job", "j", "--build", "1",
+         "--base-commit", "base", "--head-commit", "head", "--console-file", str(console), "--out-dir", str(out_dir)],
+    )
+    assert rerun_analyze_local.main() == 1
+    assert waits == [1, 5]
+    rows = json.loads((out_dir / "summary.json").read_text(encoding="utf-8"))
+    assert rows[0]["status"] == "TIMEOUT" and rows[0]["errorKind"] == "timeout"
