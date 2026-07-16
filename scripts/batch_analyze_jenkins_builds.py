@@ -81,6 +81,7 @@ SUMMARY_FIELDS = [
     "successMarkerFile",
     "successMarkerValid",
     "successMarkerError",
+    "executionSkipped",
     "noticeValidationError",
     "terminationReaped",
     "terminationWarning",
@@ -314,6 +315,22 @@ def run_analyze(
     return run_process_bounded(command, cwd=cwd, env=env, timeout_seconds=timeout_seconds)
 
 
+def validate_resume_artifacts(
+    notice_path: Path, *, marker_path: Path, build: int, repo: str, job: str
+) -> tuple[bool, str | None]:
+    marker_expected = {"workflow": "jenkins", "repo": repo, "job": job, "buildNumber": build}
+    try:
+        notice = CiResponsibilityNotice.model_validate_json(notice_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return validate_success_marker(marker_path, notice_path, marker_expected)
+    except Exception as exc:
+        return False, f"invalid notice: {type(exc).__name__}"
+    for field, value in {"repo": repo, "job": job, "buildNumber": build}.items():
+        if getattr(notice, field) != value:
+            return False, f"resume metadata mismatch: {field}"
+    return validate_success_marker(marker_path, notice_path, marker_expected)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--job", required=True)
@@ -410,30 +427,26 @@ def main() -> int:
                 "traceFile": str(trace_path),
                 "command": command,
                 "skipped": False,
+                "executionSkipped": False,
             }
             print(f"\n=== build {build} ===")
             print("cmd=" + " ".join(command))
 
             if args.dry_run:
                 record["dryRun"] = True
+                record["executionSkipped"] = True
                 index_file.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
                 rows.append(record)
                 continue
-            if args.resume and (notice_path.exists() or marker_path.exists()):
-                try:
-                    notice = CiResponsibilityNotice.model_validate_json(notice_path.read_text(encoding="utf-8"))
-                    valid = notice.repo == args.repo and notice.job == args.job and notice.buildNumber == build
-                    reason = None if valid else "notice metadata mismatch"
-                    if valid:
-                        valid, reason = validate_success_marker(marker_path, notice_path, {"workflow": "jenkins", "repo": args.repo, "job": args.job, "buildNumber": build})
-                except Exception as exc:
-                    valid = False
-                    reason = f"invalid notice: {type(exc).__name__}"
+            if args.resume:
+                valid, reason = validate_resume_artifacts(
+                    notice_path, marker_path=marker_path, build=build, repo=args.repo, job=args.job
+                )
                 record["resumeValidated"] = valid
                 if valid:
-                    record.update({"resumable": True, "successMarkerValid": True})
-                    record["skipped"] = True
-                    record["skipReason"] = "resume: validated notice"
+                    record.update({"resumable": True, "successMarkerValid": True, "noticeValid": True, "returnCode": 0,
+                                   "skipped": True, "executionSkipped": True,
+                                   "skipReason": "resume: validated successful execution", "resumeInvalidReason": None})
                     index_file.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
                     rows.append(record)
                     continue

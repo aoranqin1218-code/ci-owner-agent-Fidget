@@ -6,7 +6,9 @@ import json
 import os
 import sys
 import time
+import csv
 from scripts import batch_analyze_company_logs as company_batch
+from scripts import _runtime
 
 FIXTURE = Path(__file__).parent / "fixtures" / "fake_analyze_launcher.py"
 
@@ -31,7 +33,6 @@ from scripts.batch_analyze_company_logs import (
     main,
     parse_build_log,
     read_last_jsonl,
-    should_skip_for_resume,
 )
 
 
@@ -86,14 +87,6 @@ def test_cleanup_previous_outputs_ignores_missing_files(tmp_path):
     warnings = cleanup_previous_outputs(paths)
     assert warnings == []
     assert all(not path.exists() for path in paths)
-
-
-def test_resume_skip_decision_preserves_existing_notice(tmp_path):
-    notice_path = tmp_path / "build.notice.json"
-    notice_path.write_text("old notice", encoding="utf-8")
-    assert should_skip_for_resume(True, notice_path) is True
-    assert should_skip_for_resume(False, notice_path) is False
-    assert notice_path.exists()
 
 
 def test_batch_analyze_passes_last_success_build(tmp_path):
@@ -281,6 +274,220 @@ def test_company_marker_write_failure_is_fail_closed(tmp_path, monkeypatch):
     assert main() == 1
     record = json.loads((out / "index.jsonl").read_text(encoding="utf-8").splitlines()[0])
     assert record["noticeValid"] is True and record["errorKind"] == "resume_marker" and record["resumable"] is False
+
+
+def test_company_marker_write_failure_does_not_leave_old_marker(tmp_path, monkeypatch):
+    log_dir, out = tmp_path / "logs", tmp_path / "out"
+    log_dir.mkdir()
+    (log_dir / "company-unittest-2.log").write_text(
+        f"Checking out Revision {'b' * 40} (refs/remotes/origin/dev)\nFinished: FAILURE\n", encoding="utf-8"
+    )
+    argv = ["batch", "--log-dir", str(log_dir), "--out-dir", str(out), "--initial-base-commit", "a" * 40,
+            "--python", str(make_fake_python(tmp_path))]
+    monkeypatch.setenv("FAKE_ANALYZE_MODE", "success")
+    monkeypatch.setattr("sys.argv", argv)
+    assert main() == 0
+    old_marker = next((out / "notices").glob("*.success.json"))
+    monkeypatch.setattr(company_batch, "write_success_marker_atomic", lambda *a, **k: (_ for _ in ()).throw(OSError("denied")))
+    monkeypatch.setattr("sys.argv", argv)
+    assert main() == 1
+    record = json.loads((out / "index.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert record["errorKind"] == "resume_marker" and record["resumable"] is False
+    assert not old_marker.exists() and not list((out / "notices").glob("*.success.json"))
+
+
+@pytest.mark.parametrize("resume", [False, True])
+def test_company_marker_cleanup_failure_is_fail_closed(tmp_path, monkeypatch, resume):
+    log_dir, out = tmp_path / "logs", tmp_path / "out"
+    log_dir.mkdir()
+    (log_dir / "company-unittest-2.log").write_text(
+        f"Checking out Revision {'b' * 40} (refs/remotes/origin/dev)\nFinished: FAILURE\n", encoding="utf-8"
+    )
+    argv = ["batch", "--log-dir", str(log_dir), "--out-dir", str(out), "--initial-base-commit", "a" * 40,
+            "--python", str(make_fake_python(tmp_path))]
+    monkeypatch.setenv("FAKE_ANALYZE_MODE", "success")
+    monkeypatch.setattr("sys.argv", argv)
+    assert main() == 0
+    marker = next((out / "notices").glob("*.success.json"))
+    if resume:
+        payload = json.loads(marker.read_text(encoding="utf-8")); payload["workflow"] = "wrong"
+        marker.write_text(json.dumps(payload), encoding="utf-8")
+
+    def cleanup(paths):
+        warnings = []
+        for path in paths:
+            if path == marker:
+                warnings.append(f"failed to remove {path}: locked marker")
+            else:
+                path.unlink(missing_ok=True)
+        return warnings
+
+    monkeypatch.setattr(company_batch, "cleanup_previous_outputs", cleanup)
+    monkeypatch.setattr(company_batch, "run_analyze_local", lambda **k: (_ for _ in ()).throw(AssertionError("child must not start")))
+    monkeypatch.setattr("sys.argv", [*argv, "--resume"] if resume else argv)
+    assert main() == 1
+    record = json.loads((out / "index.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert record["errorKind"] == "cleanup" and record["noticeValid"] is False and record["resumable"] is False
+    assert str(marker) in record["cleanupWarning"] and marker.exists()
+    if resume:
+        assert record["resumeValidated"] is False
+        assert record["resumeInvalidReason"] == "success marker metadata mismatch: workflow"
+
+
+def test_company_valid_resume_row_is_complete(tmp_path, monkeypatch):
+    log_dir, out = tmp_path / "logs", tmp_path / "out"
+    log_dir.mkdir()
+    (log_dir / "company-unittest-2.log").write_text(f"Checking out Revision {'b' * 40} (refs/remotes/origin/dev)\nFinished: FAILURE\n", encoding="utf-8")
+    argv = ["batch", "--log-dir", str(log_dir), "--out-dir", str(out), "--initial-base-commit", "a" * 40, "--python", str(make_fake_python(tmp_path))]
+    monkeypatch.setenv("FAKE_ANALYZE_MODE", "success")
+    monkeypatch.setattr("sys.argv", argv); assert main() == 0
+    monkeypatch.setattr(company_batch, "run_analyze_local", lambda **k: (_ for _ in ()).throw(AssertionError("must skip")))
+    monkeypatch.setattr("sys.argv", [*argv, "--resume"]); assert main() == 0
+    record = json.loads((out / "index.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    expected = {
+        "skipped": True, "executionSkipped": True, "resumeValidated": True, "resumable": True,
+        "successMarkerValid": True, "noticeValid": True, "returnCode": 0,
+        "skipReason": "resume: validated successful execution",
+    }
+    assert {key: record[key] for key in expected} == expected
+    assert record["skipReason"] == "resume: validated successful execution"
+    with (out / "summary.csv").open(encoding="utf-8-sig", newline="") as file:
+        row = next(csv.DictReader(file))
+    assert row["skipped"] == "True" and row["executionSkipped"] == "True"
+    assert row["resumeValidated"] == "True" and row["noticeValid"] == "True" and row["returnCode"] == "0"
+
+
+def test_company_digest_read_error_reexecutes(tmp_path, monkeypatch):
+    log_dir, out = tmp_path / "logs", tmp_path / "out"
+    log_dir.mkdir()
+    (log_dir / "company-unittest-2.log").write_text(f"Checking out Revision {'b' * 40} (refs/remotes/origin/dev)\nFinished: FAILURE\n", encoding="utf-8")
+    argv = ["batch", "--log-dir", str(log_dir), "--out-dir", str(out), "--initial-base-commit", "a" * 40, "--python", str(make_fake_python(tmp_path))]
+    monkeypatch.setenv("FAKE_ANALYZE_MODE", "success"); monkeypatch.setattr("sys.argv", argv); assert main() == 0
+    monkeypatch.setattr(_runtime, "sha256_file", lambda path: (_ for _ in ()).throw(PermissionError("locked")))
+    monkeypatch.setattr("sys.argv", [*argv, "--resume"]); assert main() == 0
+    record = json.loads((out / "index.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert record["resumeValidated"] is False
+    assert "failed to hash notice for success marker: PermissionError" in record["resumeInvalidReason"]
+
+
+def test_company_digest_error_cleanup_failure_continues_next_build(tmp_path, monkeypatch):
+    log_dir, out = tmp_path / "logs", tmp_path / "out"
+    log_dir.mkdir()
+    for build, commit in ((2, "b" * 40), (3, "c" * 40)):
+        (log_dir / f"company-unittest-{build}.log").write_text(
+            f"Checking out Revision {commit} (refs/remotes/origin/dev)\nFinished: FAILURE\n", encoding="utf-8"
+        )
+    argv = ["batch", "--log-dir", str(log_dir), "--out-dir", str(out), "--initial-base-commit", "a" * 40,
+            "--python", str(make_fake_python(tmp_path))]
+    monkeypatch.setenv("FAKE_ANALYZE_MODE", "success")
+    monkeypatch.setattr("sys.argv", argv)
+    assert main() == 0
+    monkeypatch.setattr(_runtime, "sha256_file", lambda path: (_ for _ in ()).throw(PermissionError("locked")))
+
+    def cleanup(paths):
+        warnings = []
+        for path in paths:
+            if "_2_" in path.name and path.name.endswith(".success.json"):
+                warnings.append(f"failed to remove {path}: locked marker")
+            else:
+                path.unlink(missing_ok=True)
+        return warnings
+
+    monkeypatch.setattr(company_batch, "cleanup_previous_outputs", cleanup)
+    monkeypatch.setattr("sys.argv", [*argv, "--resume"])
+    assert main() == 1
+    records = [json.loads(line) for line in (out / "index.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert records[0]["resumeValidated"] is False and records[0]["errorKind"] == "cleanup"
+    assert "PermissionError" in records[0]["resumeInvalidReason"] and "locked marker" in records[0]["cleanupWarning"]
+    assert records[1]["returnCode"] == 0 and records[1]["noticeValid"] is True and records[1]["resumable"] is True
+
+
+def test_company_timeout_residual_notice_is_not_resumed(tmp_path, monkeypatch):
+    log_dir, out = tmp_path / "logs", tmp_path / "out"
+    log_dir.mkdir()
+    (log_dir / "company-unittest-2.log").write_text(
+        f"Checking out Revision {'b' * 40} (refs/remotes/origin/dev)\nFinished: FAILURE\n", encoding="utf-8"
+    )
+    argv = ["batch", "--log-dir", str(log_dir), "--out-dir", str(out), "--initial-base-commit", "a" * 40,
+            "--python", str(make_fake_python(tmp_path)), "--timeout-seconds", "1"]
+    original_cleanup = company_batch.cleanup_previous_outputs
+    calls = 0
+
+    def leave_timeout_notice(paths):
+        nonlocal calls
+        calls += 1
+        return original_cleanup(paths) if calls == 1 else [f"failed to remove {paths[0]}: locked"]
+
+    monkeypatch.setattr(company_batch, "cleanup_previous_outputs", leave_timeout_notice)
+    monkeypatch.setenv("FAKE_ANALYZE_MODE", "write_then_timeout")
+    monkeypatch.setattr("sys.argv", argv)
+    assert main() == 1
+    first = json.loads((out / "index.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    notice = Path(first["noticeFile"])
+    assert first["errorKind"] == "timeout" and first["resumable"] is False and notice.exists()
+    assert not Path(first["successMarkerFile"]).exists() and "failed to remove" in first["cleanupWarning"]
+
+    monkeypatch.setattr(company_batch, "cleanup_previous_outputs", original_cleanup)
+    monkeypatch.setenv("FAKE_ANALYZE_MODE", "success")
+    monkeypatch.setattr("sys.argv", [*argv, "--resume"])
+    assert main() == 0
+    second = json.loads((out / "index.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert second["resumeValidated"] is False and second["resumeInvalidReason"] == "success marker missing"
+    assert second["executionSkipped"] is False and second["returnCode"] == 0 and second["resumable"] is True
+
+
+@pytest.mark.parametrize(
+    ("case", "expected_reason"),
+    [
+        ("missing_marker", "success marker missing"),
+        ("invalid_json", "invalid success marker JSON: JSONDecodeError"),
+        ("not_object", "invalid success marker JSON: ValueError"),
+        ("schemaVersion", "success marker metadata mismatch: schemaVersion"),
+        ("kind", "success marker metadata mismatch: kind"),
+        ("workflow", "success marker metadata mismatch: workflow"),
+        ("returnCode", "success marker metadata mismatch: returnCode"),
+        ("repo", "success marker metadata mismatch: repo"),
+        ("job", "success marker metadata mismatch: job"),
+        ("buildNumber", "success marker metadata mismatch: buildNumber"),
+        ("branch", "success marker metadata mismatch: branch"),
+        ("result", "success marker metadata mismatch: result"),
+        ("baseCommit", "success marker metadata mismatch: baseCommit"),
+        ("headCommit", "success marker metadata mismatch: headCommit"),
+        ("noticeFile", "success marker metadata mismatch: noticeFile"),
+        ("noticeSha256", "success marker notice digest mismatch"),
+        ("notice_missing", "notice missing for success marker"),
+    ],
+)
+def test_company_invalid_marker_matrix_reexecutes(tmp_path, monkeypatch, case, expected_reason):
+    log_dir, out = tmp_path / "logs", tmp_path / "out"
+    log_dir.mkdir()
+    (log_dir / "company-unittest-2.log").write_text(
+        f"Checking out Revision {'b' * 40} (refs/remotes/origin/dev)\nFinished: FAILURE\n", encoding="utf-8"
+    )
+    argv = ["batch", "--log-dir", str(log_dir), "--out-dir", str(out), "--initial-base-commit", "a" * 40,
+            "--python", str(make_fake_python(tmp_path))]
+    monkeypatch.setenv("FAKE_ANALYZE_MODE", "success")
+    monkeypatch.setattr("sys.argv", argv)
+    assert main() == 0
+    notice = next((out / "notices").glob("*.notice.json"))
+    marker = next((out / "notices").glob("*.success.json"))
+    if case == "missing_marker":
+        marker.unlink()
+    elif case == "invalid_json":
+        marker.write_text("{invalid", encoding="utf-8")
+    elif case == "not_object":
+        marker.write_text("[]", encoding="utf-8")
+    elif case == "notice_missing":
+        notice.unlink()
+    else:
+        payload = json.loads(marker.read_text(encoding="utf-8"))
+        payload[case] = "0" * 64 if case == "noticeSha256" else (3 if case in {"schemaVersion", "returnCode", "buildNumber"} else "wrong")
+        marker.write_text(json.dumps(payload), encoding="utf-8")
+    monkeypatch.setattr("sys.argv", [*argv, "--resume"])
+    assert main() == 0
+    record = json.loads((out / "index.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert record["resumeValidated"] is False and expected_reason in record["resumeInvalidReason"]
+    assert record["executionSkipped"] is False and record["returnCode"] == 0 and record["successMarkerValid"] is True
 
 
 def test_company_descendant_stops_after_timeout(tmp_path, monkeypatch):

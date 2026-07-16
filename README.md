@@ -626,7 +626,7 @@ python .\scripts\batch_analyze_company_logs.py `
 | `--limit` | 最多执行多少个失败构建。 |
 | `--timeout-seconds` | 单个构建分析超时。 |
 | `--dry-run` | 只生成命令，不执行。 |
-| `--resume` | 仅在已有 notice 合法且 repo/job/build/branch/result/base/head 全匹配时跳过。 |
+| `--resume` | 仅在 notice 合法、repo/job/build/branch/result/base/head 全匹配，且父进程 success marker 的 metadata 与 notice digest 均有效时跳过。 |
 | `--fetch-trace` | 从 LangSmith 拉取 trace。 |
 | `--trace-wait-seconds` | 等待 trace 出现的最长时间。 |
 
@@ -647,7 +647,9 @@ runs/company-log-batch-xxxx/
 
 company 和 Jenkins batch 在 notice/stdout/stderr/metrics/trace 旧产物清理失败时采用 fail-closed：当前 build 不启动子进程、不读取残留产物，记录 `errorKind=cleanup` 后继续后续 build，批次最终返回非零。Jenkins batch 可用 `--python` 指定子解释器；notice 缺失、schema 无效和 repo/job/build metadata 不匹配分别记录稳定错误类型。
 
-`noticeValid=true` 只表示 notice 文件自身有效。`--resume` 还要求父进程在 returnCode=0、notice 校验成功且没有执行错误后原子写入同目录的 `.success.json` marker；marker 通过 SHA-256 与 notice 的具体内容绑定。legacy notice-only、marker 缺失/损坏、metadata 或 digest 不匹配都会重新执行，marker 清理或写入失败采用 fail-closed。
+`noticeValid=true` 只表示 notice 文件自身有效。`--resume` 还要求父进程在 returnCode=0、notice 校验成功且没有执行错误后原子写入同目录的 `.success.json` marker；marker 通过 SHA-256 与 notice 的具体内容绑定。legacy notice-only、marker 缺失/损坏、metadata 或 digest 不匹配都会重新执行，marker 清理或写入失败采用 fail-closed。校验期间 marker/notice 消失或不可读也只会使当前 resume 无效，不会让单个 build 的文件异常中断整个 batch；清理成功后会重新执行，清理失败则记录 `errorKind=cleanup` 并继续后续 build。timeout 遗留的 schema 合法 notice 因没有 success marker，不能用于 resume。
+
+合法 resume row 会明确输出 `noticeValid=true`、来源 `returnCode=0`、`resumeValidated=true`、`resumable=true`、`successMarkerValid=true`、`skipped=true` 和 `executionSkipped=true`；`executionSkipped` 表示本次 batch 没有重新启动分析子进程。普通执行为 `executionSkipped=false`，dry-run 为 `executionSkipped=true`，但仍只使用既有 `dryRun` 契约，不伪造一次已验证的历史成功执行。这些字段同时写入 `index.jsonl` 与 `summary.csv`。success marker 用于拒绝失败执行、残留或部分写入造成的不一致状态，不用于防御拥有同一输出目录写权限的恶意写入者。
 
 company 与 Jenkins batch 使用共享的有界进程组 timeout 管理：POSIX 终止独立进程组，Windows 使用带超时的 `taskkill /T /F` 并在失败时 fallback kill。终止或最终回收问题写入 `terminationReaped` / `terminationWarning`，不会把 timeout 改写为 execution；timeout 后 notice、metrics 和 trace 都不可信。company 子进程非零退出稳定记录 `errorKind=execution`。
 
@@ -692,7 +694,7 @@ python .\scripts\batch_analyze_jenkins_builds.py `
 | `--env-file` / `--env-override` | 环境变量文件加载。 |
 | `--fetch-trace` | 拉取 LangSmith trace。 |
 | `--timeout-seconds` | 单个构建超时。 |
-| `--resume` | 仅在已有 notice 通过 schema 且 repo/job/build 匹配时跳过。 |
+| `--resume` | 仅在 notice 通过 schema、repo/job/build 匹配，且父进程 success marker 的 metadata 与 notice digest 均有效时跳过。 |
 | `--dry-run` | 只输出命令。 |
 | `--notify` | 分析后发送通知。 |
 | `--notify-dry-run` | 通知 dry-run。 |

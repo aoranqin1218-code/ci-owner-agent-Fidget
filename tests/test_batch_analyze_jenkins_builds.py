@@ -3,10 +3,12 @@ from __future__ import annotations
 import sys
 import os
 import json
+import csv
 from pathlib import Path
 import pytest
 
 from scripts import batch_analyze_jenkins_builds as jenkins_batch
+from scripts import _runtime
 from scripts._runtime import BoundedProcessTimeout, ProcessTerminationResult
 
 from scripts.batch_analyze_jenkins_builds import (
@@ -115,7 +117,169 @@ def test_jenkins_valid_resume_skips_child(tmp_path, monkeypatch):
     monkeypatch.setattr("sys.argv", [*argv, "--resume"])
     assert main() == 0
     record = json.loads((out / "index.jsonl").read_text(encoding="utf-8").splitlines()[0])
-    assert record["resumeValidated"] is True and record["skipped"] is True
+    expected = {
+        "skipped": True, "executionSkipped": True, "resumeValidated": True, "resumable": True,
+        "successMarkerValid": True, "noticeValid": True, "returnCode": 0,
+        "skipReason": "resume: validated successful execution",
+    }
+    assert {key: record[key] for key in expected} == expected
+    with (out / "summary.csv").open(encoding="utf-8-sig", newline="") as file:
+        row = next(csv.DictReader(file))
+    assert row["skipped"] == "True" and row["executionSkipped"] == "True"
+    assert row["resumeValidated"] == "True" and row["noticeValid"] == "True" and row["returnCode"] == "0"
+
+
+def test_jenkins_digest_read_error_reexecutes(tmp_path, monkeypatch):
+    out = tmp_path / "out"
+    argv = ["jenkins", "--job", "job", "--repo", "repo", "--builds", "13", "--out-dir", str(out),
+            "--python", str(make_fake_python(tmp_path))]
+    monkeypatch.setenv("FAKE_ANALYZE_MODE", "success")
+    monkeypatch.setattr("sys.argv", argv)
+    assert main() == 0
+    monkeypatch.setattr(_runtime, "sha256_file", lambda path: (_ for _ in ()).throw(PermissionError("locked")))
+    monkeypatch.setattr("sys.argv", [*argv, "--resume"])
+    assert main() == 0
+    record = json.loads((out / "index.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert record["resumeValidated"] is False
+    assert "failed to hash notice for success marker: PermissionError" in record["resumeInvalidReason"]
+    assert record["executionSkipped"] is False and record["returnCode"] == 0
+
+
+def test_jenkins_marker_write_failure_is_fail_closed_and_reexecutes(tmp_path, monkeypatch):
+    out = tmp_path / "out"
+    argv = ["jenkins", "--job", "job", "--repo", "repo", "--builds", "13", "--out-dir", str(out),
+            "--python", str(make_fake_python(tmp_path))]
+    monkeypatch.setenv("FAKE_ANALYZE_MODE", "success")
+    original = jenkins_batch.write_success_marker_atomic
+    monkeypatch.setattr(jenkins_batch, "write_success_marker_atomic", lambda *a, **k: (_ for _ in ()).throw(OSError("denied")))
+    monkeypatch.setattr("sys.argv", argv)
+    assert main() == 1
+    record = json.loads((out / "index.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert record["returnCode"] == 0 and record["noticeValid"] is True and record["errorKind"] == "resume_marker"
+    assert record["successMarkerValid"] is False and record["successMarkerError"] == "denied" and record["resumable"] is False
+    assert not list((out / "notices").glob("*.success.json"))
+    monkeypatch.setattr(jenkins_batch, "write_success_marker_atomic", original)
+    monkeypatch.setattr("sys.argv", [*argv, "--resume"])
+    assert main() == 0
+    resumed = json.loads((out / "index.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert resumed["resumeValidated"] is False and resumed["resumeInvalidReason"] == "success marker missing"
+    assert resumed["executionSkipped"] is False and resumed["resumable"] is True
+    old_marker = next((out / "notices").glob("*.success.json"))
+    monkeypatch.setattr(jenkins_batch, "write_success_marker_atomic", lambda *a, **k: (_ for _ in ()).throw(OSError("denied again")))
+    monkeypatch.setattr("sys.argv", argv)
+    assert main() == 1
+    final = json.loads((out / "index.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert final["errorKind"] == "resume_marker" and final["resumable"] is False
+    assert not old_marker.exists() and not list((out / "notices").glob("*.success.json"))
+
+
+@pytest.mark.parametrize("resume", [False, True])
+def test_jenkins_marker_cleanup_failure_is_fail_closed(tmp_path, monkeypatch, resume):
+    out = tmp_path / "out"
+    argv = ["jenkins", "--job", "job", "--repo", "repo", "--builds", "13", "--out-dir", str(out),
+            "--python", str(make_fake_python(tmp_path))]
+    monkeypatch.setenv("FAKE_ANALYZE_MODE", "success")
+    monkeypatch.setattr("sys.argv", argv)
+    assert main() == 0
+    marker = next((out / "notices").glob("*.success.json"))
+    if resume:
+        payload = json.loads(marker.read_text(encoding="utf-8")); payload["workflow"] = "wrong"
+        marker.write_text(json.dumps(payload), encoding="utf-8")
+
+    def cleanup(paths):
+        warnings = []
+        for path in paths:
+            if path == marker:
+                warnings.append(f"failed to remove {path}: locked marker")
+            else:
+                path.unlink(missing_ok=True)
+        return warnings
+
+    monkeypatch.setattr(jenkins_batch, "cleanup_previous_outputs", cleanup)
+    monkeypatch.setattr(jenkins_batch, "run_analyze", lambda **k: (_ for _ in ()).throw(AssertionError("child must not start")))
+    monkeypatch.setattr("sys.argv", [*argv, "--resume"] if resume else argv)
+    assert main() == 1
+    record = json.loads((out / "index.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert record["errorKind"] == "cleanup" and record["noticeValid"] is False and record["resumable"] is False
+    assert str(marker) in record["cleanupWarning"] and marker.exists()
+    if resume:
+        assert record["resumeValidated"] is False
+        assert record["resumeInvalidReason"] == "success marker metadata mismatch: workflow"
+
+
+def test_jenkins_timeout_residual_notice_is_not_resumed(tmp_path, monkeypatch):
+    out = tmp_path / "out"
+    argv = ["jenkins", "--job", "job", "--repo", "repo", "--builds", "13", "--out-dir", str(out),
+            "--python", str(make_fake_python(tmp_path)), "--timeout-seconds", "1"]
+    original_cleanup = jenkins_batch.cleanup_previous_outputs
+    calls = 0
+
+    def leave_timeout_notice(paths):
+        nonlocal calls
+        calls += 1
+        return original_cleanup(paths) if calls == 1 else [f"failed to remove {paths[0]}: locked"]
+
+    monkeypatch.setattr(jenkins_batch, "cleanup_previous_outputs", leave_timeout_notice)
+    monkeypatch.setenv("FAKE_ANALYZE_MODE", "write_then_timeout")
+    monkeypatch.setattr("sys.argv", argv)
+    assert main() == 1
+    first = json.loads((out / "index.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    notice = Path(first["noticeFile"])
+    assert first["errorKind"] == "timeout" and first["resumable"] is False and notice.exists()
+    assert not Path(first["successMarkerFile"]).exists() and "failed to remove" in first["cleanupWarning"]
+    monkeypatch.setattr(jenkins_batch, "cleanup_previous_outputs", original_cleanup)
+    monkeypatch.setenv("FAKE_ANALYZE_MODE", "success")
+    monkeypatch.setattr("sys.argv", [*argv, "--resume"])
+    assert main() == 0
+    second = json.loads((out / "index.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert second["resumeValidated"] is False and second["resumeInvalidReason"] == "success marker missing"
+    assert second["executionSkipped"] is False and second["returnCode"] == 0 and second["resumable"] is True
+
+
+@pytest.mark.parametrize(
+    ("case", "expected_reason"),
+    [
+        ("missing_marker", "success marker missing"),
+        ("invalid_json", "invalid success marker JSON: JSONDecodeError"),
+        ("not_object", "invalid success marker JSON: ValueError"),
+        ("schemaVersion", "success marker metadata mismatch: schemaVersion"),
+        ("kind", "success marker metadata mismatch: kind"),
+        ("workflow", "success marker metadata mismatch: workflow"),
+        ("returnCode", "success marker metadata mismatch: returnCode"),
+        ("repo", "success marker metadata mismatch: repo"),
+        ("job", "success marker metadata mismatch: job"),
+        ("buildNumber", "success marker metadata mismatch: buildNumber"),
+        ("noticeFile", "success marker metadata mismatch: noticeFile"),
+        ("noticeSha256", "success marker notice digest mismatch"),
+        ("notice_missing", "notice missing for success marker"),
+    ],
+)
+def test_jenkins_invalid_marker_matrix_reexecutes(tmp_path, monkeypatch, case, expected_reason):
+    out = tmp_path / "out"
+    argv = ["jenkins", "--job", "job", "--repo", "repo", "--builds", "13", "--out-dir", str(out),
+            "--python", str(make_fake_python(tmp_path))]
+    monkeypatch.setenv("FAKE_ANALYZE_MODE", "success")
+    monkeypatch.setattr("sys.argv", argv)
+    assert main() == 0
+    notice = next((out / "notices").glob("*.notice.json"))
+    marker = next((out / "notices").glob("*.success.json"))
+    if case == "missing_marker":
+        marker.unlink()
+    elif case == "invalid_json":
+        marker.write_text("{invalid", encoding="utf-8")
+    elif case == "not_object":
+        marker.write_text("[]", encoding="utf-8")
+    elif case == "notice_missing":
+        notice.unlink()
+    else:
+        payload = json.loads(marker.read_text(encoding="utf-8"))
+        payload[case] = "0" * 64 if case == "noticeSha256" else (3 if case in {"schemaVersion", "returnCode", "buildNumber"} else "wrong")
+        marker.write_text(json.dumps(payload), encoding="utf-8")
+    monkeypatch.setattr("sys.argv", [*argv, "--resume"])
+    assert main() == 0
+    record = json.loads((out / "index.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert record["resumeValidated"] is False and expected_reason in record["resumeInvalidReason"]
+    assert record["executionSkipped"] is False and record["returnCode"] == 0 and record["successMarkerValid"] is True
 
 
 @pytest.mark.parametrize("invalid_content", ["{invalid", '{"repo":"repo"}'])

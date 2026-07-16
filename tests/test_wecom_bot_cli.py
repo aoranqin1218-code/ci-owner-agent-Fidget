@@ -20,6 +20,12 @@ def _isolated_subprocess_env(extra_env: dict[str, str] | None = None) -> dict[st
         "CI_AGENT_WECOM_BOT_LLM_ENABLED": "false",
         "CI_AGENT_WECOM_BOT_LLM_MAX_INPUT_CHARS": "2000",
     }
+    if os.name == "nt":
+        # Python's asyncio/_overlapped import needs the Windows runtime and
+        # Winsock provider environment even though application config is isolated.
+        for name in ("SYSTEMROOT", "WINDIR", "COMSPEC", "PATH", "PATHEXT", "TEMP", "TMP"):
+            if value := os.environ.get(name):
+                env[name] = value
     if extra_env:
         env.update(extra_env)
     return env

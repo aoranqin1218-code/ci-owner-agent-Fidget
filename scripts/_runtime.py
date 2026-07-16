@@ -80,9 +80,17 @@ def load_success_marker(marker_path: Path) -> dict:
 
 
 def validate_success_marker(marker_path: Path, notice_path: Path, expected: dict) -> tuple[bool, str | None]:
-    if not notice_path.exists():
+    try:
+        notice_exists = notice_path.exists()
+    except Exception as exc:
+        return False, f"failed to inspect notice for success marker: {type(exc).__name__}: {exc}"
+    if not notice_exists:
         return False, "notice missing for success marker"
-    if not marker_path.exists():
+    try:
+        marker_exists = marker_path.exists()
+    except Exception as exc:
+        return False, f"failed to inspect success marker: {type(exc).__name__}: {exc}"
+    if not marker_exists:
         return False, "success marker missing"
     try:
         marker = load_success_marker(marker_path)
@@ -93,7 +101,11 @@ def validate_success_marker(marker_path: Path, notice_path: Path, expected: dict
     for field, value in required.items():
         if marker.get(field) != value:
             return False, f"success marker metadata mismatch: {field}"
-    if marker.get("noticeSha256") != sha256_file(notice_path):
+    try:
+        notice_digest = sha256_file(notice_path)
+    except Exception as exc:
+        return False, f"failed to hash notice for success marker: {type(exc).__name__}: {exc}"
+    if marker.get("noticeSha256") != notice_digest:
         return False, "success marker notice digest mismatch"
     return True, None
 

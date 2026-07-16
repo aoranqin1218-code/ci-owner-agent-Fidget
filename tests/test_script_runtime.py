@@ -143,3 +143,92 @@ def test_success_marker_replace_failure_cleans_temp(tmp_path, monkeypatch):
     with pytest.raises(OSError):
         _runtime.write_success_marker_atomic(marker, {"x": 1})
     assert not marker.exists() and not list(tmp_path.glob(".*.tmp"))
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected_reason"),
+    [
+        (lambda marker, payload: marker.write_text("{invalid", encoding="utf-8"), "invalid success marker JSON: JSONDecodeError"),
+        (lambda marker, payload: marker.write_text("[]", encoding="utf-8"), "invalid success marker JSON: ValueError"),
+        (lambda marker, payload: marker.write_text(json.dumps({**payload, "schemaVersion": 2}), encoding="utf-8"), "success marker metadata mismatch: schemaVersion"),
+        (lambda marker, payload: marker.write_text(json.dumps({**payload, "kind": "wrong"}), encoding="utf-8"), "success marker metadata mismatch: kind"),
+        (lambda marker, payload: marker.write_text(json.dumps({**payload, "workflow": "wrong"}), encoding="utf-8"), "success marker metadata mismatch: workflow"),
+        (lambda marker, payload: marker.write_text(json.dumps({**payload, "returnCode": 3}), encoding="utf-8"), "success marker metadata mismatch: returnCode"),
+        (lambda marker, payload: marker.write_text(json.dumps({**payload, "noticeFile": "wrong.json"}), encoding="utf-8"), "success marker metadata mismatch: noticeFile"),
+        (lambda marker, payload: marker.write_text(json.dumps({**payload, "noticeSha256": "0" * 64}), encoding="utf-8"), "success marker notice digest mismatch"),
+    ],
+)
+def test_success_marker_invalid_matrix_is_fail_closed(tmp_path, mutation, expected_reason):
+    notice = tmp_path / "notice.json"
+    marker = _runtime.success_marker_path(notice)
+    notice.write_text("{}", encoding="utf-8")
+    payload = {
+        "schemaVersion": 1, "kind": "ci-owner-agent-resume-success", "workflow": "test",
+        "returnCode": 0, "noticeFile": notice.name, "noticeSha256": _runtime.sha256_file(notice),
+    }
+    mutation(marker, payload)
+    valid, reason = _runtime.validate_success_marker(marker, notice, {"workflow": "test"})
+    assert valid is False and reason is not None and expected_reason in reason
+
+
+def test_success_marker_notice_hash_errors_are_fail_closed(tmp_path, monkeypatch):
+    notice = tmp_path / "notice.json"
+    marker = _runtime.success_marker_path(notice)
+    notice.write_text("{}", encoding="utf-8")
+    marker.write_text(json.dumps({
+        "schemaVersion": 1, "kind": "ci-owner-agent-resume-success", "workflow": "test",
+        "returnCode": 0, "noticeFile": notice.name, "noticeSha256": "unused",
+    }), encoding="utf-8")
+    monkeypatch.setattr(_runtime, "sha256_file", lambda path: (_ for _ in ()).throw(PermissionError("locked")))
+    assert _runtime.validate_success_marker(marker, notice, {"workflow": "test"}) == (
+        False, "failed to hash notice for success marker: PermissionError: locked"
+    )
+
+
+def test_success_marker_notice_disappearing_before_hash_is_fail_closed(tmp_path, monkeypatch):
+    notice = tmp_path / "notice.json"
+    marker = _runtime.success_marker_path(notice)
+    notice.write_text("{}", encoding="utf-8")
+    marker.write_text(json.dumps({
+        "schemaVersion": 1, "kind": "ci-owner-agent-resume-success", "workflow": "test",
+        "returnCode": 0, "noticeFile": notice.name, "noticeSha256": "unused",
+    }), encoding="utf-8")
+
+    def disappear(path):
+        path.unlink()
+        return _runtime.hashlib.sha256(path.read_bytes()).hexdigest()
+
+    monkeypatch.setattr(_runtime, "sha256_file", disappear)
+    valid, reason = _runtime.validate_success_marker(marker, notice, {"workflow": "test"})
+    assert valid is False and reason is not None
+    assert "failed to hash notice for success marker: FileNotFoundError" in reason
+
+
+def test_success_marker_exists_errors_are_fail_closed(tmp_path):
+    class UnreadablePath:
+        name = "artifact.json"
+
+        def exists(self):
+            raise PermissionError("locked")
+
+    marker = tmp_path / "marker.json"
+    notice = tmp_path / "notice.json"
+    notice.write_text("{}", encoding="utf-8")
+    assert _runtime.validate_success_marker(marker, UnreadablePath(), {}) == (
+        False, "failed to inspect notice for success marker: PermissionError: locked"
+    )
+    assert _runtime.validate_success_marker(UnreadablePath(), notice, {}) == (
+        False, "failed to inspect success marker: PermissionError: locked"
+    )
+
+
+def test_success_marker_files_disappearing_during_validation_are_fail_closed(tmp_path, monkeypatch):
+    notice = tmp_path / "notice.json"
+    marker = _runtime.success_marker_path(notice)
+    notice.write_text("{}", encoding="utf-8")
+    marker.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(
+        _runtime, "load_success_marker", lambda path: (_ for _ in ()).throw(FileNotFoundError("gone"))
+    )
+    valid, reason = _runtime.validate_success_marker(marker, notice, {})
+    assert valid is False and reason == "invalid success marker JSON: FileNotFoundError: gone"

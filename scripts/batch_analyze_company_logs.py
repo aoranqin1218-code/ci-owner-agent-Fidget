@@ -292,19 +292,17 @@ def cleanup_previous_outputs(paths: list[Path]) -> list[str]:
     return warnings
 
 
-def should_skip_for_resume(resume: bool, notice_path: Path) -> bool:
-    return resume and notice_path.exists()
-
-
 def validate_resume_notice(path: Path, *, marker_path: Path, item: BuildLog, repo: str, job: str, branch: str) -> tuple[bool, str | None]:
-    try:
-        notice = CiResponsibilityNotice.model_validate_json(path.read_text(encoding="utf-8"))
-    except Exception as exc:
-        return False, f"invalid notice: {type(exc).__name__}"
     expected = {
         "repo": repo, "job": job, "buildNumber": item.build, "branch": branch,
         "result": item.status, "baseCommit": item.base_commit, "headCommit": item.head_commit,
     }
+    try:
+        notice = CiResponsibilityNotice.model_validate_json(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return validate_success_marker(marker_path, path, {"workflow": "company", **expected})
+    except Exception as exc:
+        return False, f"invalid notice: {type(exc).__name__}"
     for field, value in expected.items():
         if getattr(notice, field) != value:
             return False, f"resume metadata mismatch: {field}"
@@ -872,6 +870,7 @@ def main() -> int:
                 "traceFile": str(trace_path),
                 "command": command,
                 "skipped": False,
+                "executionSkipped": False,
             }
 
             print(f"\n=== build {item.build} ===")
@@ -881,21 +880,21 @@ def main() -> int:
 
             if args.dry_run:
                 record["dryRun"] = True
+                record["executionSkipped"] = True
                 index_file.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
                 rows.append(record)
                 continue
 
             metrics_file = metrics_dir / f"{name}.metrics.jsonl"
 
-            if args.resume and (notice_path.exists() or marker_path.exists()):
+            if args.resume:
                 valid, reason = validate_resume_notice(notice_path, marker_path=marker_path, item=item, repo=args.repo, job=args.job, branch=branch)
                 record["resumeValidated"] = valid
                 record["resumeInvalidReason"] = reason
                 if valid:
-                    record["resumable"] = True
-                    record["successMarkerValid"] = True
-                    record["skipped"] = True
-                    record["skipReason"] = "resume: validated notice"
+                    record.update({"resumable": True, "successMarkerValid": True, "noticeValid": True, "returnCode": 0,
+                                   "skipped": True, "executionSkipped": True,
+                                   "skipReason": "resume: validated successful execution", "resumeInvalidReason": None})
                     index_file.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
                     rows.append(record)
                     continue
@@ -1055,6 +1054,7 @@ def main() -> int:
         "successMarkerFile",
         "successMarkerValid",
         "successMarkerError",
+        "executionSkipped",
         "resumeValidated",
         "resumeInvalidReason",
         "errorKind",
