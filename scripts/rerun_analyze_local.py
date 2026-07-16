@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import argparse
 import csv
@@ -10,13 +10,42 @@ import signal
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-try:
-    from dotenv import load_dotenv
-    load_dotenv()
-except Exception:
+_SCRIPT_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_SCRIPT_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_SCRIPT_REPO_ROOT))
+from scripts._runtime import REPO_ROOT, build_subprocess_env, ensure_repo_on_sys_path, resolve_repo_default_path, resolve_user_path
+ensure_repo_on_sys_path()
+from scripts.batch_analyze_company_logs import cleanup_previous_outputs, load_env_file
+from ci_owner_agent.schemas import CiResponsibilityNotice
+from ci_owner_agent.services.branch_normalization import normalize_branch_name
+from ci_owner_agent.services.log_provider import resolve_final_status_from_console_log
+
+SUMMARY_FIELDS = [
+    "run", "status", "exitCode", "durationSec", "errorKind", "error", "noticeValid", "noticeValidationError",
+    "noticeResult", "noticeOwner", "hasHighConfidenceOwner", "responsibilityItemCount", "inheritedOwnerCount",
+    "currentBuildOwnerCount", "noOwnerItemCount", "metricsDurationMs", "llmCalls", "inputTokens", "outputTokens",
+    "totalTokens", "tokenWarning", "stageCount", "traceOk", "traceUrl", "traceError", "stdoutFile",
+    "noticeFile", "stderrFile", "metricsFile", "traceFile", "traceSummaryFile", "traceChildRunCount",
+    "traceToolRunCount", "traceLlmRunCount", "traceUsageDictCount",
+    "terminationReaped", "terminationWarning", "cleanupWarning",
+]
+
+
+@dataclass(frozen=True)
+class ProcessTerminationResult:
+    reaped: bool
+    warning: str | None = None
+
+
+class RunPreparationError(RuntimeError):
+    pass
+
+
+class RunCleanupError(RuntimeError):
     pass
 
 def parse_args() -> argparse.Namespace:
@@ -40,11 +69,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--previous-commit", default=None)
     parser.add_argument(
         "--result",
-        choices=["SUCCESS", "FAILURE", "UNSTABLE", "ABORTED", "UNKNOWN"],
+        choices=["SUCCESS", "FAILURE", "UNSTABLE", "ABORTED", "NOT_BUILT", "UNKNOWN"],
         default=None,
     )
 
-    parser.add_argument("--out-dir", default="./runs/rerun-analyze-local")
+    parser.add_argument("--out-dir", default=None)
+    parser.add_argument("--env-file", default=None)
+    parser.add_argument("--env-override", action="store_true")
     parser.add_argument("--python", default=sys.executable)
     parser.add_argument("--ignore-checkout-commit-mismatch", action="store_true")
     parser.add_argument("--notify", action="store_true")
@@ -76,6 +107,37 @@ def kill_process_tree(process: subprocess.Popen) -> None:
             process.kill()
 
 
+def terminate_timed_out_process(process: subprocess.Popen, *, grace_seconds: float = 5) -> ProcessTerminationResult:
+    warnings: list[str] = []
+    try:
+        kill_process_tree(process)
+    except (ProcessLookupError, ChildProcessError):
+        return ProcessTerminationResult(True)
+    except Exception as exc:
+        warnings.append(f"tree termination failed: {type(exc).__name__}: {exc}")
+    try:
+        process.wait(timeout=grace_seconds)
+        return ProcessTerminationResult(True, "; ".join(warnings) or None)
+    except (ProcessLookupError, ChildProcessError):
+        return ProcessTerminationResult(True, "; ".join(warnings) or None)
+    except Exception as exc:
+        warnings.append(f"initial reap failed: {type(exc).__name__}: {exc}")
+    try:
+        process.kill()
+    except (ProcessLookupError, ChildProcessError):
+        pass
+    except Exception as exc:
+        warnings.append(f"fallback kill failed: {type(exc).__name__}: {exc}")
+    try:
+        process.wait(timeout=grace_seconds)
+        return ProcessTerminationResult(True, "; ".join(warnings) or None)
+    except (ProcessLookupError, ChildProcessError):
+        return ProcessTerminationResult(True, "; ".join(warnings) or None)
+    except Exception as exc:
+        warnings.append(f"final reap failed: {type(exc).__name__}: {exc}")
+        return ProcessTerminationResult(False, "; ".join(warnings))
+
+
 def read_last_jsonl(path: Path) -> dict[str, Any] | None:
     if not path.exists():
         return None
@@ -94,28 +156,80 @@ def read_last_jsonl(path: Path) -> dict[str, Any] | None:
         return None
 
 
-def extract_json_object(text: str) -> dict[str, Any] | None:
-    decoder = json.JSONDecoder()
-    for index, ch in enumerate(text):
-        if ch != "{":
-            continue
-        try:
-            obj, _ = decoder.raw_decode(text[index:])
-        except json.JSONDecodeError:
-            continue
-        if isinstance(obj, dict):
-            return obj
+def read_notice(path: Path) -> tuple[dict[str, Any] | None, str | None]:
+    if not path.exists():
+        return None, "notice file missing"
+    try:
+        notice = CiResponsibilityNotice.model_validate_json(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return None, f"invalid notice: {type(exc).__name__}: {exc}"
+    return notice.model_dump(mode="json"), None
+
+
+def validate_notice(notice: dict[str, Any] | None, args: argparse.Namespace) -> str | None:
+    if notice is None:
+        return "notice unavailable"
+    expected = {"repo": args.repo, "job": args.job, "buildNumber": args.build, "baseCommit": args.base_commit, "headCommit": args.head_commit, "result": args.result}
+    if args.branch is not None:
+        expected["branch"] = args.branch
+    for field, value in expected.items():
+        if notice.get(field) != value:
+            return f"notice metadata mismatch: {field}"
     return None
 
 
-def read_notice(path: Path) -> dict[str, Any] | None:
-    if not path.exists():
-        return None
-    text = path.read_text(encoding="utf-8", errors="replace")
-    return extract_json_object(text)
+def write_summaries(out_dir: Path, rows: list[dict[str, Any]]) -> bool:
+    try:
+        with (out_dir / "summary.csv").open("w", encoding="utf-8-sig", newline="") as fp:
+            writer = csv.DictWriter(fp, fieldnames=SUMMARY_FIELDS, extrasaction="ignore")
+            writer.writeheader()
+            writer.writerows(rows)
+        (out_dir / "summary.json").write_text(json.dumps(rows, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+        return True
+    except Exception as exc:
+        print(f"ERROR: failed to write rerun summaries: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return False
 
 
-def build_command(args: argparse.Namespace) -> list[str]:
+def prepare_run(*, run_index: int, args: argparse.Namespace, console_file: Path, out_dir: Path, project_name: str) -> dict[str, Any]:
+    run_dir = out_dir / f"run-{run_index:02d}"
+    paths = {
+        "notice_file": run_dir / "notice.json", "stdout_file": run_dir / "stdout.log",
+        "stderr_file": run_dir / "stderr.log", "metrics_file": run_dir / "metrics.jsonl",
+        "command_file": run_dir / "command.txt", "trace_file": run_dir / "trace.json",
+        "trace_summary_file": run_dir / "trace-summary.json",
+    }
+    try:
+        run_dir.mkdir(parents=True, exist_ok=True)
+    except Exception as exc:
+        raise RunPreparationError(f"run directory creation failed: {exc}") from exc
+    try:
+        warnings = cleanup_previous_outputs(list(paths.values()))
+    except Exception as exc:
+        raise RunCleanupError(f"output cleanup failed: {exc}") from exc
+    if warnings:
+        raise RunCleanupError("; ".join(warnings))
+    try:
+        run_args = argparse.Namespace(**vars(args))
+        run_args.console_file = str(console_file)
+        command = build_command(run_args, paths["notice_file"])
+        paths["command_file"].write_text(" ".join(f'"{part}"' if " " in part else part for part in command), encoding="utf-8")
+        env = build_subprocess_env()
+    except Exception as exc:
+        raise RunPreparationError(f"run preparation failed: {exc}") from exc
+    env["CI_AGENT_METRICS_ENABLED"] = "true"
+    env["CI_AGENT_METRICS_FILE"] = str(paths["metrics_file"])
+    if not args.notify:
+        env["CI_AGENT_WECOM_NOTIFY_ENABLED"] = "false"
+    if args.fetch_trace:
+        env["LANGCHAIN_PROJECT"] = project_name
+        env["LANGSMITH_PROJECT"] = project_name
+        env.setdefault("LANGCHAIN_TRACING_V2", "true")
+        env.setdefault("LANGSMITH_TRACING", "true")
+    return {**paths, "command": command, "env": env}
+
+
+def build_command(args: argparse.Namespace, notice_path: Path | None = None) -> list[str]:
     build_url = args.build_url or f"local://{args.job}/{args.build}"
 
     command = [
@@ -162,6 +276,8 @@ def build_command(args: argparse.Namespace) -> list[str]:
 
     if args.force_notify:
         command += ["--force-notify"]
+    if notice_path is not None:
+        command += ["--output-file", str(notice_path)]
 
     return command
 
@@ -321,7 +437,7 @@ def run_to_dict(run: Any) -> dict[str, Any]:
         if value is not None:
             data[field] = to_jsonable(value)
 
-    # 鏈変簺 LangSmith Run 鎶?metadata 鏀惧湪 extra.metadata
+    # Some LangSmith Run objects store metadata under extra.metadata.
     if "metadata" not in data:
         metadata = get_run_metadata(run)
         if metadata:
@@ -529,12 +645,35 @@ def main() -> int:
     if args.timeout_sec <= 0:
         raise SystemExit("--timeout-sec must be positive")
 
-    console_file = Path(args.console_file)
+    out_dir = resolve_user_path(args.out_dir) if args.out_dir else resolve_repo_default_path("runs/rerun-analyze-local")
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    def status_failure(error: str) -> int:
+        row = {"run": 0, "status": "FAILED", "errorKind": "status_validation", "error": error,
+               "noticeValid": False, "noticeValidationError": error}
+        write_summaries(out_dir, [row])
+        print(error, file=sys.stderr)
+        return 1
+
+    console_file = resolve_user_path(args.console_file)
     if not console_file.exists():
         raise SystemExit(f"console file not found: {console_file}")
+    if args.branch is not None:
+        args.branch = normalize_branch_name(args.branch)
+        if args.branch is None:
+            return status_failure("invalid branch")
+    status_resolution = resolve_final_status_from_console_log(console_file.read_text(encoding="utf-8", errors="replace"))
+    if status_resolution.error:
+        return status_failure(status_resolution.error)
+    detected_result = status_resolution.status
+    if args.result is not None and args.result != detected_result:
+        return status_failure(f"status validation failed: requested {args.result}, log reports {detected_result}")
+    args.result = detected_result
+    if args.result not in {"FAILURE", "UNSTABLE", "UNKNOWN"}:
+        return status_failure("rerun-analyze-local only supports FAILURE, UNSTABLE and UNKNOWN")
+    env_file = resolve_user_path(args.env_file) if args.env_file else resolve_repo_default_path(".env")
+    load_env_file(env_file, override=args.env_override)
 
-    out_dir = Path(args.out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
 
     batch_id = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
     project_name = (
@@ -556,34 +695,23 @@ def main() -> int:
     for run_index in range(1, args.runs + 1):
         run_name = f"run-{run_index:02d}"
         run_dir = out_dir / run_name
-        run_dir.mkdir(parents=True, exist_ok=True)
-
-        stdout_file = run_dir / "stdout.json"
+        notice_file = run_dir / "notice.json"
+        stdout_file = run_dir / "stdout.log"
         stderr_file = run_dir / "stderr.log"
         metrics_file = run_dir / "metrics.jsonl"
-        command_file = run_dir / "command.txt"
         trace_file = run_dir / "trace.json"
         trace_summary_file = run_dir / "trace-summary.json"
-
-        command_file.write_text(
-            " ".join(f'"{part}"' if " " in part else part for part in command),
-            encoding="utf-8",
-        )
-
-        env = os.environ.copy()
-        env["PYTHONUTF8"] = "1"
-        env["PYTHONIOENCODING"] = "utf-8"
-        env["CI_AGENT_METRICS_ENABLED"] = "true"
-        env["CI_AGENT_METRICS_FILE"] = str(metrics_file)
-
-        if not args.notify:
-            env["CI_AGENT_WECOM_NOTIFY_ENABLED"] = "false"
-
-        if args.fetch_trace:
-            env["LANGCHAIN_PROJECT"] = project_name
-            env["LANGSMITH_PROJECT"] = project_name
-            env.setdefault("LANGCHAIN_TRACING_V2", "true")
-            env.setdefault("LANGSMITH_TRACING", "true")
+        try:
+            prepared = prepare_run(run_index=run_index, args=args, console_file=console_file, out_dir=out_dir, project_name=project_name)
+            run_command, env = prepared["command"], prepared["env"]
+        except (RunCleanupError, RunPreparationError) as exc:
+            message = f"{type(exc).__name__}: {exc}"
+            kind = "cleanup" if isinstance(exc, RunCleanupError) else "prepare"
+            rows.append({"run": run_index, "status": "FAILED", "errorKind": kind, "error": message,
+                         "noticeValid": False, "noticeValidationError": f"{kind} failed",
+                         "stdoutFile": str(stdout_file), "stderrFile": str(stderr_file), "noticeFile": str(notice_file),
+                         "metricsFile": str(metrics_file), "traceFile": str(trace_file), "traceSummaryFile": str(trace_summary_file)})
+            continue
 
         print(f"========== {run_name} / {args.runs} ==========")
         print(f"stdout : {stdout_file}")
@@ -594,47 +722,62 @@ def main() -> int:
 
         started_at = dt.datetime.now(dt.timezone.utc)
         started = time.perf_counter()
+        termination_warning: str | None = None
+        termination_reaped: bool | None = None
 
-        with stdout_file.open("w", encoding="utf-8", errors="replace") as stdout_fp, stderr_file.open(
-            "w", encoding="utf-8", errors="replace"
-        ) as stderr_fp:
-            creationflags = 0
-            preexec_fn = None
+        try:
+            with stdout_file.open("w", encoding="utf-8", errors="replace") as stdout_fp, stderr_file.open(
+                "w", encoding="utf-8", errors="replace"
+            ) as stderr_fp:
+                creationflags = 0
+                preexec_fn = None
 
-            if platform.system().lower().startswith("win"):
-                creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
-            else:
-                preexec_fn = os.setsid
+                if platform.system().lower().startswith("win"):
+                    creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
+                else:
+                    preexec_fn = os.setsid
 
-            process = subprocess.Popen(
-                command,
-                stdout=stdout_fp,
-                stderr=stderr_fp,
-                env=env,
-                text=True,
-                creationflags=creationflags,
-                preexec_fn=preexec_fn,
-            )
+                process = subprocess.Popen(
+                    run_command, stdout=stdout_fp, stderr=stderr_fp, env=env, text=True,
+                    creationflags=creationflags, preexec_fn=preexec_fn, cwd=str(REPO_ROOT),
+                )
 
-            timed_out = False
-            try:
-                exit_code = process.wait(timeout=args.timeout_sec)
-            except subprocess.TimeoutExpired:
-                timed_out = True
-                exit_code = None
-                kill_process_tree(process)
+                timed_out = False
+                try:
+                    exit_code = process.wait(timeout=args.timeout_sec)
+                except subprocess.TimeoutExpired:
+                    timed_out = True
+                    exit_code = None
+                    termination_result = terminate_timed_out_process(process)
+                    termination_reaped = termination_result.reaped
+                    termination_warning = termination_result.warning
+        except Exception as exc:
+            duration_sec = round(time.perf_counter() - started, 3)
+            rows.append({
+                "run": run_index, "status": "FAILED", "durationSec": duration_sec,
+                "errorKind": "execution", "error": f"{type(exc).__name__}: {exc}",
+                "noticeValid": False, "noticeValidationError": "process execution failed",
+                "stdoutFile": str(stdout_file), "noticeFile": str(notice_file), "stderrFile": str(stderr_file),
+                "metricsFile": str(metrics_file), "traceFile": str(trace_file) if args.fetch_trace else None,
+                "traceSummaryFile": str(trace_summary_file) if args.fetch_trace else None,
+            })
+            continue
 
         duration_sec = round(time.perf_counter() - started, 3)
 
+        error_kind: str | None = None
+        error: str | None = None
         if timed_out:
             status = "TIMEOUT"
+            error_kind, error = "timeout", f"analyze-local timeout after {args.timeout_sec}s"
         elif exit_code == 0:
             status = "OK"
         else:
             status = "FAILED"
+            error_kind, error = "execution", f"analyze-local exited with {exit_code}"
 
         trace_result: dict[str, Any] | None = None
-        if args.fetch_trace:
+        if args.fetch_trace and not timed_out:
             trace_result = fetch_langsmith_trace(
                 job=args.job,
                 repo=args.repo,
@@ -648,8 +791,13 @@ def main() -> int:
                 wait_seconds=args.trace_wait_sec,
             )
 
-        metrics = read_last_jsonl(metrics_file)
-        notice = read_notice(stdout_file)
+        metrics = None if timed_out else read_last_jsonl(metrics_file)
+        notice, read_error = (None, "analysis outputs are untrusted because execution timed out") if timed_out else read_notice(notice_file)
+        notice_error = read_error or validate_notice(notice, args)
+        if not timed_out and exit_code == 0 and notice_error:
+            status = "FAILED"
+            error = notice_error
+            error_kind = "notice_missing" if read_error == "notice file missing" else ("notice_schema" if read_error else "notice_metadata")
         notice_summary = summarize_notice(notice)
 
         row = {
@@ -673,10 +821,17 @@ def main() -> int:
             "traceUsageDictCount": trace_result.get("usageDictCount") if trace_result else None,
             "traceError": trace_result.get("error") if trace_result and not trace_result.get("ok") else None,
             "stdoutFile": str(stdout_file),
+            "noticeFile": str(notice_file),
+            "noticeValid": False if timed_out else notice_error is None,
+            "noticeValidationError": notice_error,
+            "errorKind": error_kind,
+            "error": error,
             "stderrFile": str(stderr_file),
             "metricsFile": str(metrics_file),
             "traceFile": str(trace_file) if args.fetch_trace else None,
             "traceSummaryFile": str(trace_summary_file) if args.fetch_trace else None,
+            "terminationWarning": termination_warning,
+            "terminationReaped": termination_reaped,
         }
 
         rows.append(row)
@@ -694,14 +849,7 @@ def main() -> int:
 
     summary_csv = out_dir / "summary.csv"
     summary_json = out_dir / "summary.json"
-
-    fieldnames = list(rows[0].keys()) if rows else []
-    with summary_csv.open("w", encoding="utf-8-sig", newline="") as fp:
-        writer = csv.DictWriter(fp, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(rows)
-
-    summary_json.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
+    summaries_written = write_summaries(out_dir, rows)
 
     ok_count = sum(1 for row in rows if row["status"] == "OK")
     timeout_count = sum(1 for row in rows if row["status"] == "TIMEOUT")
@@ -715,7 +863,7 @@ def main() -> int:
     print(f"Summary CSV : {summary_csv}")
     print(f"Summary JSON: {summary_json}")
 
-    return 0
+    return 0 if summaries_written and rows and all(row.get("status") == "OK" for row in rows) else 1
 
 
 if __name__ == "__main__":

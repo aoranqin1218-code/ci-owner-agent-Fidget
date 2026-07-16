@@ -10,9 +10,11 @@ from typing import Literal
 from ci_owner_agent.schemas import LogTail
 from ci_owner_agent.services.command_runner import truncate_tail_text, truncate_text
 
-FinalStatus = Literal["SUCCESS", "FAILURE", "ABORTED", "UNKNOWN"]
-FINAL_STATUS_RE = re.compile(r"Finished:\s*(SUCCESS|FAILURE|ABORTED)\b", re.IGNORECASE)
-CHECKING_OUT_REVISION_RE = re.compile(r"(?mi)^\s*Checking out Revision\s+(?P<commit>[0-9a-f]{40})(?:\s+\([^)]+\))?\s*$")
+FinalStatus = Literal["SUCCESS", "FAILURE", "UNSTABLE", "ABORTED", "NOT_BUILT", "UNKNOWN"]
+FINAL_STATUS_RE = re.compile(
+    r"(?mix)^\s*(?:\[\d{4}-\d{2}-\d{2}[T\s]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?\]\s*|\d{4}-\d{2}-\d{2}[T\s]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?\s*)?Finished:\s*(?P<status>[A-Za-z_]+)\b"
+)
+CHECKING_OUT_REVISION_RE = re.compile(r"(?mi)^\s*Checking out Revision\s+(?P<commit>[0-9a-f]{40})(?:\s+\((?P<ref>[^)]+)\))?\s*$")
 GIT_CHECKOUT_FORCE_RE = re.compile(r"(?mi)^\s*(?:>\s*)?git\s+checkout\s+-f\s+(?P<commit>[0-9a-f]{40})(?:\s+#.*)?$")
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 ERROR_TERMS = [
@@ -48,25 +50,43 @@ FOOTER_TERMS = [
 ]
 
 
-def log_detect_final_status(log_content: str) -> FinalStatus:
-    matches = list(FINAL_STATUS_RE.finditer(log_content))
+@dataclass(frozen=True)
+class FinalStatusResolution:
+    status: FinalStatus
+    detected: bool
+    raw_status: str | None = None
+    unsupported_status: str | None = None
+    error: str | None = None
+
+
+def resolve_final_status_from_console_log(log_content: str) -> FinalStatusResolution:
+    matches = list(FINAL_STATUS_RE.finditer(ANSI_RE.sub("", log_content)))
     if not matches:
-        return "UNKNOWN"
-    return matches[-1].group(1).upper()  # type: ignore[return-value]
+        return FinalStatusResolution("UNKNOWN", detected=False)
+    raw = matches[-1].group("status").upper()
+    if raw in {"SUCCESS", "FAILURE", "UNSTABLE", "ABORTED", "NOT_BUILT", "UNKNOWN"}:
+        return FinalStatusResolution(raw, detected=True, raw_status=raw)  # type: ignore[arg-type]
+    return FinalStatusResolution("UNKNOWN", detected=True, raw_status=raw, unsupported_status=raw, error=f"unsupported final status: {raw}")
+
+
+def log_detect_final_status(log_content: str) -> FinalStatus:
+    return resolve_final_status_from_console_log(log_content).status
 
 
 @dataclass(frozen=True)
 class CheckoutCommitResolution:
     commit: str | None
     ambiguous: bool = False
+    refs: tuple[str, ...] = ()
 
 
 def resolve_checkout_revision_from_console_log(text: str) -> CheckoutCommitResolution:
     clean = ANSI_RE.sub("", text)
     candidates = {match.group("commit").lower() for pattern in (CHECKING_OUT_REVISION_RE, GIT_CHECKOUT_FORCE_RE) for match in pattern.finditer(clean)}
+    refs = tuple(sorted({match.group("ref").strip() for match in CHECKING_OUT_REVISION_RE.finditer(clean) if match.group("ref")}))
     if len(candidates) == 1:
-        return CheckoutCommitResolution(candidates.pop())
-    return CheckoutCommitResolution(None, ambiguous=bool(candidates))
+        return CheckoutCommitResolution(candidates.pop(), refs=refs)
+    return CheckoutCommitResolution(None, ambiguous=bool(candidates), refs=refs)
 
 
 def detect_checkout_revision_from_console_log(text: str) -> str | None:
