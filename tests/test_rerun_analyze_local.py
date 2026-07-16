@@ -3,7 +3,7 @@ import json
 import subprocess
 from ci_owner_agent.schemas import CiResponsibilityNotice, Owner
 from scripts import rerun_analyze_local
-from scripts.rerun_analyze_local import build_command, read_notice, validate_notice
+from scripts.rerun_analyze_local import build_command, read_notice, terminate_timed_out_process, validate_notice
 
 
 def make_notice() -> CiResponsibilityNotice:
@@ -157,3 +157,15 @@ def test_rerun_timeout_reaps_process_and_returns_failure(tmp_path, monkeypatch):
     assert waits == [1, 5]
     rows = json.loads((out_dir / "summary.json").read_text(encoding="utf-8"))
     assert rows[0]["status"] == "TIMEOUT" and rows[0]["errorKind"] == "timeout"
+
+
+def test_timeout_termination_reports_warning_without_raising(monkeypatch):
+    class BrokenProcess:
+        def poll(self): return None
+        def wait(self, timeout=None): raise subprocess.TimeoutExpired("fake", timeout)
+        def kill(self): raise OSError("kill denied")
+    monkeypatch.setattr(rerun_analyze_local, "kill_process_tree", lambda process: (_ for _ in ()).throw(OSError("tree denied")))
+    result = terminate_timed_out_process(BrokenProcess(), grace_seconds=0.01)
+    assert result.reaped is False
+    assert "tree termination failed" in result.warning
+    assert "final reap failed" in result.warning

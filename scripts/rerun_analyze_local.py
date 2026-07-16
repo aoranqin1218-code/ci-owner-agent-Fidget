@@ -10,6 +10,7 @@ import signal
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -30,7 +31,14 @@ SUMMARY_FIELDS = [
     "totalTokens", "tokenWarning", "stageCount", "traceOk", "traceUrl", "traceError", "stdoutFile",
     "noticeFile", "stderrFile", "metricsFile", "traceFile", "traceSummaryFile", "traceChildRunCount",
     "traceToolRunCount", "traceLlmRunCount", "traceUsageDictCount",
+    "terminationWarning", "cleanupWarning",
 ]
+
+
+@dataclass(frozen=True)
+class ProcessTerminationResult:
+    reaped: bool
+    warning: str | None = None
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -91,6 +99,37 @@ def kill_process_tree(process: subprocess.Popen) -> None:
             process.kill()
 
 
+def terminate_timed_out_process(process: subprocess.Popen, *, grace_seconds: float = 5) -> ProcessTerminationResult:
+    warnings: list[str] = []
+    try:
+        kill_process_tree(process)
+    except (ProcessLookupError, ChildProcessError):
+        return ProcessTerminationResult(True)
+    except Exception as exc:
+        warnings.append(f"tree termination failed: {type(exc).__name__}: {exc}")
+    try:
+        process.wait(timeout=grace_seconds)
+        return ProcessTerminationResult(True, "; ".join(warnings) or None)
+    except (ProcessLookupError, ChildProcessError):
+        return ProcessTerminationResult(True, "; ".join(warnings) or None)
+    except Exception as exc:
+        warnings.append(f"initial reap failed: {type(exc).__name__}: {exc}")
+    try:
+        process.kill()
+    except (ProcessLookupError, ChildProcessError):
+        pass
+    except Exception as exc:
+        warnings.append(f"fallback kill failed: {type(exc).__name__}: {exc}")
+    try:
+        process.wait(timeout=grace_seconds)
+        return ProcessTerminationResult(True, "; ".join(warnings) or None)
+    except (ProcessLookupError, ChildProcessError):
+        return ProcessTerminationResult(True, "; ".join(warnings) or None)
+    except Exception as exc:
+        warnings.append(f"final reap failed: {type(exc).__name__}: {exc}")
+        return ProcessTerminationResult(False, "; ".join(warnings))
+
+
 def read_last_jsonl(path: Path) -> dict[str, Any] | None:
     if not path.exists():
         return None
@@ -131,12 +170,46 @@ def validate_notice(notice: dict[str, Any] | None, args: argparse.Namespace) -> 
     return None
 
 
-def write_summaries(out_dir: Path, rows: list[dict[str, Any]]) -> None:
-    with (out_dir / "summary.csv").open("w", encoding="utf-8-sig", newline="") as fp:
-        writer = csv.DictWriter(fp, fieldnames=SUMMARY_FIELDS, extrasaction="ignore")
-        writer.writeheader()
-        writer.writerows(rows)
-    (out_dir / "summary.json").write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
+def write_summaries(out_dir: Path, rows: list[dict[str, Any]]) -> bool:
+    try:
+        with (out_dir / "summary.csv").open("w", encoding="utf-8-sig", newline="") as fp:
+            writer = csv.DictWriter(fp, fieldnames=SUMMARY_FIELDS, extrasaction="ignore")
+            writer.writeheader()
+            writer.writerows(rows)
+        (out_dir / "summary.json").write_text(json.dumps(rows, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+        return True
+    except Exception as exc:
+        print(f"ERROR: failed to write rerun summaries: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return False
+
+
+def prepare_run(*, run_index: int, args: argparse.Namespace, console_file: Path, out_dir: Path, project_name: str) -> dict[str, Any]:
+    run_dir = out_dir / f"run-{run_index:02d}"
+    paths = {
+        "notice_file": run_dir / "notice.json", "stdout_file": run_dir / "stdout.log",
+        "stderr_file": run_dir / "stderr.log", "metrics_file": run_dir / "metrics.jsonl",
+        "command_file": run_dir / "command.txt", "trace_file": run_dir / "trace.json",
+        "trace_summary_file": run_dir / "trace-summary.json",
+    }
+    run_dir.mkdir(parents=True, exist_ok=True)
+    warnings = cleanup_previous_outputs(list(paths.values()))
+    if warnings:
+        raise RuntimeError("cleanup: " + "; ".join(warnings))
+    run_args = argparse.Namespace(**vars(args))
+    run_args.console_file = str(console_file)
+    command = build_command(run_args, paths["notice_file"])
+    paths["command_file"].write_text(" ".join(f'"{part}"' if " " in part else part for part in command), encoding="utf-8")
+    env = build_subprocess_env()
+    env["CI_AGENT_METRICS_ENABLED"] = "true"
+    env["CI_AGENT_METRICS_FILE"] = str(paths["metrics_file"])
+    if not args.notify:
+        env["CI_AGENT_WECOM_NOTIFY_ENABLED"] = "false"
+    if args.fetch_trace:
+        env["LANGCHAIN_PROJECT"] = project_name
+        env["LANGSMITH_PROJECT"] = project_name
+        env.setdefault("LANGCHAIN_TRACING_V2", "true")
+        env.setdefault("LANGSMITH_TRACING", "true")
+    return {**paths, "command": command, "env": env}
 
 
 def build_command(args: argparse.Namespace, notice_path: Path | None = None) -> list[str]:
@@ -605,41 +678,23 @@ def main() -> int:
     for run_index in range(1, args.runs + 1):
         run_name = f"run-{run_index:02d}"
         run_dir = out_dir / run_name
-        run_dir.mkdir(parents=True, exist_ok=True)
-
         notice_file = run_dir / "notice.json"
         stdout_file = run_dir / "stdout.log"
         stderr_file = run_dir / "stderr.log"
         metrics_file = run_dir / "metrics.jsonl"
-        command_file = run_dir / "command.txt"
         trace_file = run_dir / "trace.json"
         trace_summary_file = run_dir / "trace-summary.json"
-
-        cleanup_warnings = cleanup_previous_outputs([notice_file, stdout_file, stderr_file, metrics_file, command_file, trace_file, trace_summary_file])
-        if cleanup_warnings:
-            rows.append({"run": run_index, "status": "FAILED", "errorKind": "cleanup", "error": "; ".join(cleanup_warnings), "noticeValid": False, "noticeValidationError": "cleanup failed"})
+        try:
+            prepared = prepare_run(run_index=run_index, args=args, console_file=console_file, out_dir=out_dir, project_name=project_name)
+            run_command, env = prepared["command"], prepared["env"]
+        except Exception as exc:
+            message = f"{type(exc).__name__}: {exc}"
+            kind = "cleanup" if str(exc).startswith("cleanup:") else "prepare"
+            rows.append({"run": run_index, "status": "FAILED", "errorKind": kind, "error": message,
+                         "noticeValid": False, "noticeValidationError": f"{kind} failed",
+                         "stdoutFile": str(stdout_file), "stderrFile": str(stderr_file), "noticeFile": str(notice_file),
+                         "metricsFile": str(metrics_file), "traceFile": str(trace_file), "traceSummaryFile": str(trace_summary_file)})
             continue
-
-        run_args = argparse.Namespace(**vars(args))
-        run_args.console_file = str(console_file)
-        run_command = build_command(run_args, notice_file)
-        command_file.write_text(
-            " ".join(f'"{part}"' if " " in part else part for part in run_command),
-            encoding="utf-8",
-        )
-
-        env = build_subprocess_env()
-        env["CI_AGENT_METRICS_ENABLED"] = "true"
-        env["CI_AGENT_METRICS_FILE"] = str(metrics_file)
-
-        if not args.notify:
-            env["CI_AGENT_WECOM_NOTIFY_ENABLED"] = "false"
-
-        if args.fetch_trace:
-            env["LANGCHAIN_PROJECT"] = project_name
-            env["LANGSMITH_PROJECT"] = project_name
-            env.setdefault("LANGCHAIN_TRACING_V2", "true")
-            env.setdefault("LANGSMITH_TRACING", "true")
 
         print(f"========== {run_name} / {args.runs} ==========")
         print(f"stdout : {stdout_file}")
@@ -650,6 +705,7 @@ def main() -> int:
 
         started_at = dt.datetime.now(dt.timezone.utc)
         started = time.perf_counter()
+        termination_warning: str | None = None
 
         try:
             with stdout_file.open("w", encoding="utf-8", errors="replace") as stdout_fp, stderr_file.open(
@@ -674,12 +730,7 @@ def main() -> int:
                 except subprocess.TimeoutExpired:
                     timed_out = True
                     exit_code = None
-                    kill_process_tree(process)
-                    try:
-                        process.wait(timeout=5)
-                    except subprocess.TimeoutExpired:
-                        process.kill()
-                        process.wait(timeout=5)
+                    termination_warning = terminate_timed_out_process(process).warning
         except Exception as exc:
             duration_sec = round(time.perf_counter() - started, 3)
             rows.append({
@@ -759,6 +810,7 @@ def main() -> int:
             "metricsFile": str(metrics_file),
             "traceFile": str(trace_file) if args.fetch_trace else None,
             "traceSummaryFile": str(trace_summary_file) if args.fetch_trace else None,
+            "terminationWarning": termination_warning,
         }
 
         rows.append(row)
@@ -776,7 +828,7 @@ def main() -> int:
 
     summary_csv = out_dir / "summary.csv"
     summary_json = out_dir / "summary.json"
-    write_summaries(out_dir, rows)
+    summaries_written = write_summaries(out_dir, rows)
 
     ok_count = sum(1 for row in rows if row["status"] == "OK")
     timeout_count = sum(1 for row in rows if row["status"] == "TIMEOUT")
@@ -790,7 +842,7 @@ def main() -> int:
     print(f"Summary CSV : {summary_csv}")
     print(f"Summary JSON: {summary_json}")
 
-    return 0 if rows and all(row.get("status") == "OK" for row in rows) else 1
+    return 0 if summaries_written and rows and all(row.get("status") == "OK" for row in rows) else 1
 
 
 if __name__ == "__main__":
