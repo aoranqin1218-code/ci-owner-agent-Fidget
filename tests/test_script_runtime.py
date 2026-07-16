@@ -25,6 +25,22 @@ class FakeProcess:
         self.killed = True
 
 
+class SequenceProcess(FakeProcess):
+    def __init__(self, actions, kill_error=None):
+        super().__init__()
+        self.actions = iter(actions)
+        self.kill_error = kill_error
+    def communicate(self, timeout=None):
+        action = next(self.actions)
+        if isinstance(action, BaseException):
+            raise action
+        return action
+    def kill(self):
+        if self.kill_error:
+            raise self.kill_error
+        super().kill()
+
+
 def invoke(monkeypatch, process):
     monkeypatch.setattr(_runtime.subprocess, "Popen", lambda *a, **k: process)
     with pytest.raises(_runtime.BoundedProcessTimeout) as caught:
@@ -66,3 +82,39 @@ def test_final_reap_timeout_returns_unreaped(monkeypatch):
     termination = invoke(monkeypatch, FakeProcess(always_timeout=True))
     assert termination.reaped is False
     assert "final reap timed out" in termination.warning
+
+
+@pytest.mark.parametrize("grace_error", [OSError("pipe closed"), ValueError("bad pipe")])
+def test_grace_reap_regular_error_preserves_timeout(monkeypatch, grace_error):
+    monkeypatch.setattr(_runtime.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(_runtime.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a[0], 0, "", ""))
+    process = SequenceProcess([subprocess.TimeoutExpired("fake", 1), grace_error, ("done", "")])
+    termination = invoke(monkeypatch, process)
+    assert termination.reaped is True and "grace reap failed" in termination.warning
+    assert process.killed is True
+
+
+def test_grace_and_direct_kill_and_final_reap_failures_are_warnings(monkeypatch):
+    monkeypatch.setattr(_runtime.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(_runtime.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a[0], 1, "", "denied"))
+    process = SequenceProcess([subprocess.TimeoutExpired("fake", 1), OSError("pipe"), subprocess.TimeoutExpired("fake", 1)],
+                              kill_error=PermissionError("kill denied"))
+    termination = invoke(monkeypatch, process)
+    assert termination.reaped is False
+    assert all(part in termination.warning for part in ("grace reap failed", "direct kill failed", "final reap timed out"))
+
+
+def test_final_reap_regular_error_preserves_timeout(monkeypatch):
+    monkeypatch.setattr(_runtime.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(_runtime.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a[0], 0, "", ""))
+    process = SequenceProcess([subprocess.TimeoutExpired("fake", 1), subprocess.TimeoutExpired("fake", 1), OSError("closed")])
+    termination = invoke(monkeypatch, process)
+    assert termination.reaped is False and "final reap failed: OSError" in termination.warning
+
+
+def test_mocked_windows_does_not_require_native_constant(monkeypatch):
+    monkeypatch.setattr(_runtime.platform, "system", lambda: "Windows")
+    monkeypatch.delattr(_runtime.subprocess, "CREATE_NEW_PROCESS_GROUP", raising=False)
+    monkeypatch.setattr(_runtime.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a[0], 0, "", ""))
+    termination = invoke(monkeypatch, FakeProcess())
+    assert termination.reaped is True

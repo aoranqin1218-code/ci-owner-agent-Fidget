@@ -24,20 +24,21 @@ def main() -> int:
     if mode not in supported:
         print(f"unsupported FAKE_ANALYZE_MODE: {mode}", file=sys.stderr)
         return 64
+    exit_code = int(os.environ.get("FAKE_ANALYZE_EXIT_CODE", "3" if mode in {"nonzero", "nonzero_missing"} else "0"))
     diagnostic = os.environ.get("FAKE_ANALYZE_DIAGNOSTIC_FILE")
     if diagnostic:
         Path(diagnostic).write_text(json.dumps({"cwd": os.getcwd(), "pythonpath": os.environ.get("PYTHONPATH", ""), "marker": os.environ.get("CI_AGENT_TEST_ENV_MARKER")}), encoding="utf-8")
     output = value("--output-file")
     if mode in {"missing_notice", "nonzero_missing"}:
-        return 3 if mode == "nonzero_missing" else 0
+        return exit_code
     if output is None:
         return 65
     if mode == "invalid_json":
         Path(output).write_text("{invalid", encoding="utf-8")
-        return 0
+        return exit_code
     if mode == "invalid_schema":
         Path(output).write_text('{"repo":"fx-code"}', encoding="utf-8")
-        return 0
+        return exit_code
     notice = {
         "repo": value("--repo"), "job": value("--job"), "buildNumber": int(value("--build") or 0),
         "buildUrl": value("--build-url") or f"jenkins://{value('--job')}/{value('--build')}", "result": value("--result") or "UNKNOWN", "branch": value("--branch"),
@@ -61,7 +62,7 @@ def main() -> int:
         time.sleep(30)
     if mode == "write_then_timeout":
         time.sleep(30)
-    return 3 if mode == "nonzero" else 0
+    return exit_code
 
 
 if __name__ == "__main__":

@@ -649,6 +649,8 @@ company 和 Jenkins batch 在 notice/stdout/stderr/metrics/trace 旧产物清理
 
 company 与 Jenkins batch 使用共享的有界进程组 timeout 管理：POSIX 终止独立进程组，Windows 使用带超时的 `taskkill /T /F` 并在失败时 fallback kill。终止或最终回收问题写入 `terminationReaped` / `terminationWarning`，不会把 timeout 改写为 execution；timeout 后 notice、metrics 和 trace 都不可信。company 子进程非零退出稳定记录 `errorKind=execution`。
 
+共享恢复流程会分别标注 tree termination、grace reap、direct kill 和 final reap 错误；这些异常始终保留 timeout 主分类。Jenkins 非零退出的 execution 错误优先于 notice 错误，notice 缺失/schema/metadata 诊断独立保存在 `noticeValidationError`；timeout 后残留文件清理问题保存在 `cleanupWarning`。Windows 分支通过平台无关 mock 测试，POSIX descendant 终止由集成测试实际覆盖。
+
 ### 6.2 批量分析 Jenkins 构建号：`scripts/batch_analyze_jenkins_builds.py`
 
 适用于 Jenkins 仍可访问的场景，脚本会对指定构建号逐个执行 `python -m ci_owner_agent analyze`。

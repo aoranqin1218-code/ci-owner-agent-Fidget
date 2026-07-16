@@ -473,14 +473,21 @@ def main() -> int:
                 except Exception as exc:
                     notice = None
                     record["noticeValid"] = False
-                    record["errorKind"] = "notice_schema" if notice_path.exists() else "notice_missing"
-                    record["error"] = f"invalid output notice: {type(exc).__name__}: {exc}"
+                    notice_kind = "notice_schema" if notice_path.exists() else "notice_missing"
+                    message = f"invalid output notice: {type(exc).__name__}: {exc}"
+                    record["noticeValidationError"] = message
+                    if not record.get("errorKind"):
+                        record["errorKind"] = notice_kind
+                        record["error"] = message
                 if notice is not None:
                     mismatches = [field for field, expected in (("repo", args.repo), ("job", args.job), ("buildNumber", build)) if notice[field] != expected]
                     if mismatches:
                         record["noticeValid"] = False
-                        record["errorKind"] = "notice_metadata"
-                        record["error"] = f"notice metadata mismatch: {mismatches[0]}"
+                        message = f"notice metadata mismatch: {mismatches[0]}"
+                        record["noticeValidationError"] = message
+                        if not record.get("errorKind"):
+                            record["errorKind"] = "notice_metadata"
+                            record["error"] = message
                     else:
                         record["noticeValid"] = True
                         record.update(notice_record_fields(notice))
@@ -514,7 +521,9 @@ def main() -> int:
                 record["terminationWarning"] = getattr(termination, "warning", None)
                 stdout_path.write_text(exc.stdout or "", encoding="utf-8")
                 stderr_path.write_text(exc.stderr or "", encoding="utf-8")
-                cleanup_previous_outputs([notice_path, trace_path])
+                timeout_cleanup = cleanup_previous_outputs([notice_path, trace_path])
+                if timeout_cleanup:
+                    record["cleanupWarning"] = "; ".join(timeout_cleanup)
             except Exception as exc:
                 record["durationSeconds"] = round(time.monotonic() - started_monotonic, 3)
                 record["error"] = str(exc)

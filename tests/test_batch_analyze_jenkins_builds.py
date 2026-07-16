@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from scripts import batch_analyze_jenkins_builds as jenkins_batch
+from scripts._runtime import BoundedProcessTimeout, ProcessTerminationResult
 
 from scripts.batch_analyze_jenkins_builds import (
     build_analyze_command,
@@ -147,6 +148,39 @@ def test_jenkins_invalid_resume_cleanup_failure_is_fail_closed(tmp_path, monkeyp
     assert main() == 1
     record = json.loads((out / "index.jsonl").read_text(encoding="utf-8").splitlines()[0])
     assert record["resumeValidated"] is False and record["resumeInvalidReason"] and record["errorKind"] == "cleanup"
+
+
+@pytest.mark.parametrize(("mode", "notice_valid"), [
+    ("success", True), ("missing_notice", False), ("invalid_json", False),
+    ("invalid_schema", False), ("metadata_mismatch", False),
+])
+def test_jenkins_nonzero_execution_precedes_notice_failures(tmp_path, monkeypatch, mode, notice_valid):
+    monkeypatch.setenv("FAKE_ANALYZE_EXIT_CODE", "3")
+    code, record = run_main(tmp_path, monkeypatch, mode, "repo" if mode == "metadata_mismatch" else None)
+    assert code == 1 and record["returnCode"] == 3
+    assert record["errorKind"] == "execution" and "exited with 3" in record["error"]
+    assert record["noticeValid"] is notice_valid
+    if not notice_valid:
+        assert record["noticeValidationError"]
+
+
+def test_jenkins_timeout_preserves_cleanup_and_termination_warnings(tmp_path, monkeypatch):
+    out = tmp_path / "out"
+    calls = 0
+    def cleanup(paths):
+        nonlocal calls
+        calls += 1
+        return [] if calls == 1 else ["failed to remove notice"]
+    timeout = BoundedProcessTimeout(["fake"], 1, output="partial", stderr="err",
+                                    termination=ProcessTerminationResult(False, "final reap timed out"))
+    monkeypatch.setattr(jenkins_batch, "cleanup_previous_outputs", cleanup)
+    monkeypatch.setattr(jenkins_batch, "run_analyze", lambda **kwargs: (_ for _ in ()).throw(timeout))
+    monkeypatch.setattr("sys.argv", ["jenkins", "--job", "job", "--repo", "repo", "--builds", "13", "--out-dir", str(out)])
+    assert main() == 1
+    record = json.loads((out / "index.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert record["errorKind"] == "timeout" and record["noticeValid"] is False
+    assert record["terminationReaped"] is False and "final reap timed out" in record["terminationWarning"]
+    assert "failed to remove notice" in record["cleanupWarning"]
 
 
 def test_parse_builds_list_range_and_union():

@@ -60,9 +60,10 @@ def _text(value: str | bytes | None) -> str:
 
 def run_process_bounded(command: list[str], *, cwd: Path, env: dict[str, str], timeout_seconds: float, grace_seconds: float = 5) -> subprocess.CompletedProcess[str]:
     windows = platform.system().lower().startswith("win")
+    creationflags = int(getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)) if windows else 0
     process = subprocess.Popen(command, cwd=str(cwd), env=env, text=True, encoding="utf-8", errors="replace",
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                               creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if windows else 0,
+                               creationflags=creationflags,
                                start_new_session=not windows)
     try:
         stdout, stderr = process.communicate(timeout=timeout_seconds)
@@ -87,10 +88,17 @@ def run_process_bounded(command: list[str], *, cwd: Path, env: dict[str, str], t
         reaped = False
         stdout = _text(initial.output)
         stderr = _text(initial.stderr)
+        grace_failed = False
         try:
             out2, err2 = process.communicate(timeout=grace_seconds)
             stdout, stderr, reaped = _text(out2) or stdout, _text(err2) or stderr, True
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as exc:
+            warnings.append(f"grace reap timed out: {exc}")
+            grace_failed = True
+        except Exception as exc:
+            warnings.append(f"grace reap failed: {type(exc).__name__}: {exc}")
+            grace_failed = True
+        if grace_failed:
             try:
                 process.kill()
             except (ProcessLookupError, ChildProcessError):
