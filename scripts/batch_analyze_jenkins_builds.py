@@ -8,6 +8,8 @@ import os
 import subprocess
 import sys
 import time
+import platform
+import signal
 from pathlib import Path
 from typing import Any
 
@@ -293,8 +295,7 @@ def run_analyze(
     notice_path: Path | None = None,
     python_executable: str = sys.executable,
 ) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        build_analyze_command(
+    command = build_analyze_command(
             build=build,
             repo=repo,
             job=job,
@@ -304,17 +305,25 @@ def run_analyze(
             force_notify=force_notify,
             notice_path=notice_path,
             python_executable=python_executable,
-        ),
-        cwd=str(cwd),
-        env=env,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        timeout=timeout_seconds,
-        check=False,
-    )
+        )
+    windows = platform.system().lower().startswith("win")
+    process = subprocess.Popen(command, cwd=str(cwd), env=env, text=True, encoding="utf-8", errors="replace",
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                               creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if windows else 0,
+                               start_new_session=not windows)
+    try:
+        stdout, stderr = process.communicate(timeout=timeout_seconds)
+    except subprocess.TimeoutExpired as exc:
+        if windows:
+            subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        else:
+            try:
+                os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        stdout, stderr = process.communicate()
+        raise subprocess.TimeoutExpired(command, timeout_seconds, output=stdout or exc.output, stderr=stderr or exc.stderr) from exc
+    return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
 
 
 def main() -> int:
@@ -515,6 +524,7 @@ def main() -> int:
                 record["durationSeconds"] = round(time.monotonic() - started_monotonic, 3)
                 record["error"] = f"analyze timeout after {args.timeout_seconds}s"
                 record["errorKind"] = "timeout"
+                record["noticeValid"] = False
                 stdout_path.write_text(exc.stdout or "", encoding="utf-8")
                 stderr_path.write_text(exc.stderr or "", encoding="utf-8")
                 cleanup_previous_outputs([notice_path, trace_path])

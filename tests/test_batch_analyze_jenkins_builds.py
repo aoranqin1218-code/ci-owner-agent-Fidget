@@ -94,6 +94,44 @@ def test_jenkins_dry_run_does_not_start_child(tmp_path, monkeypatch):
     assert record["dryRun"] is True
 
 
+def test_jenkins_main_real_child_timeout(tmp_path, monkeypatch):
+    out = tmp_path / "out"
+    monkeypatch.setenv("FAKE_ANALYZE_MODE", "write_then_timeout")
+    monkeypatch.setattr("sys.argv", ["jenkins", "--job", "job", "--repo", "repo", "--builds", "13", "--out-dir", str(out),
+                                      "--python", str(make_fake_python(tmp_path)), "--timeout-seconds", "1"])
+    assert main() == 1
+    record = json.loads((out / "index.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert record["errorKind"] == "timeout" and record["noticeValid"] is not True
+
+
+def test_jenkins_valid_resume_skips_child(tmp_path, monkeypatch):
+    out = tmp_path / "out"
+    monkeypatch.setenv("FAKE_ANALYZE_MODE", "success")
+    argv = ["jenkins", "--job", "job", "--repo", "repo", "--builds", "13", "--out-dir", str(out), "--python", str(make_fake_python(tmp_path))]
+    monkeypatch.setattr("sys.argv", argv)
+    assert main() == 0
+    monkeypatch.setattr(jenkins_batch, "run_analyze", lambda **kwargs: (_ for _ in ()).throw(AssertionError("resume must not run child")))
+    monkeypatch.setattr("sys.argv", [*argv, "--resume"])
+    assert main() == 0
+    record = json.loads((out / "index.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert record["resumeValidated"] is True and record["skipped"] is True
+
+
+@pytest.mark.parametrize("invalid_content", ["{invalid", '{"repo":"repo"}'])
+def test_jenkins_invalid_resume_reexecutes(tmp_path, monkeypatch, invalid_content):
+    out = tmp_path / "out"
+    notice_dir = out / "notices"
+    notice_dir.mkdir(parents=True)
+    (notice_dir / "job_13.notice.json").write_text(invalid_content, encoding="utf-8")
+    monkeypatch.setenv("FAKE_ANALYZE_MODE", "success")
+    monkeypatch.setattr("sys.argv", ["jenkins", "--job", "job", "--repo", "repo", "--builds", "13", "--out-dir", str(out),
+                                      "--python", str(make_fake_python(tmp_path)), "--resume"])
+    assert main() == 0
+    record = json.loads((out / "index.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert record["resumeValidated"] is False and record["resumeInvalidReason"]
+    assert record["returnCode"] == 0 and record["noticeValid"] is True
+
+
 def test_parse_builds_list_range_and_union():
     assert parse_builds("7,13", None, None) == [7, 13]
     assert parse_builds(None, 7, 9) == [7, 8, 9]
