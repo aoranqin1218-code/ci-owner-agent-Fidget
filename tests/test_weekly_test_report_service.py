@@ -6,6 +6,7 @@ from ci_owner_agent.schemas import TestFileFailureStat
 from ci_owner_agent.services.weekly_test_report_config import WeeklyTestReportConfig
 from ci_owner_agent.services.weekly_test_report_formatter import format_weekly_test_report
 from ci_owner_agent.services.weekly_test_report_service import WeeklyTestReportService
+from ci_owner_agent.services.scope_normalization import normalize_branch_scope_values, normalize_scope_values
 from tests.test_history_store import make_store
 
 
@@ -140,3 +141,48 @@ def test_weekly_notification_dedup_is_scope_order_independent():
     second = service.notify(report, repo="r", jobs=["job-a", "job-b"], branches=["dev", "release"], period_start=START, period_end=END)
     assert first["inserted"] is True
     assert second["inserted"] is False
+
+
+def test_scope_normalization_keeps_jobs_and_normalizes_branches():
+    assert normalize_scope_values([" origin/dev ", "refs/tags/release", "feature/a", "origin/dev"]) == ["feature/a", "origin/dev", "refs/tags/release"]
+    assert normalize_branch_scope_values(["refs/remotes/origin/dev", "*/dev"]) == ["dev"]
+
+
+def test_branch_scope_normalization_preserves_explicit_empty_filter():
+    assert normalize_branch_scope_values(None) is None
+    assert normalize_branch_scope_values([]) == []
+    assert normalize_branch_scope_values(["refs/tags/v1"]) == []
+    assert normalize_branch_scope_values(["refs/tags/v1", "*/dev"]) == ["dev"]
+    assert normalize_branch_scope_values(normalize_branch_scope_values(["refs/tags/v1"])) == []
+
+
+def test_weekly_scope_query_preserves_job_refs():
+    store = make_store()
+    _save_build(store, job="origin/dev", number=1, result="SUCCESS", timestamp=START)
+    service = WeeklyTestReportService(store, WeeklyTestReportConfig.model_validate({"important": {"enabled": False}}))
+    report = service.generate(repo="r", jobs=["origin/dev"], branches=["refs/remotes/origin/dev"], period_start=START, period_end=END)
+    assert report["completedBuildCount"] == 1
+
+
+def test_weekly_invalid_or_empty_branch_filter_matches_no_data():
+    store = make_store()
+    _save_build(store, job="job", number=1, result="SUCCESS", timestamp=START, branch="dev")
+    _save_build(store, job="job", number=2, result="SUCCESS", timestamp=START, branch="release")
+    service = WeeklyTestReportService(store, WeeklyTestReportConfig.model_validate({"important": {"enabled": False}}), notification_chat_id="chat")
+    for branches in (["refs/tags/v1"], []):
+        report = service.generate(repo="r", jobs=["job"], branches=branches, period_start=START, period_end=END)
+        assert report["stats"] == [] and report["completedBuildCount"] == 0 and report["failedBuildCount"] == 0
+        queued = service.notify({"importantItemCount": 1, "normalItemCount": 0, "markdown": "x", "digest": str(branches)}, repo="r", jobs=["job"], branches=branches, period_start=START, period_end=END)
+        assert queued["ok"] is True
+        assert store.wecom_notification_outbox.docs[-1]["metadata"]["branches"] == []
+
+
+def test_weekly_empty_branch_scope_has_distinct_markdown_and_digest():
+    store = make_store()
+    service = WeeklyTestReportService(store, WeeklyTestReportConfig.model_validate({"important": {"enabled": False}}))
+    report_all = service.generate(repo="r", jobs=["origin/dev"], branches=None, period_start=START, period_end=END)
+    report_empty = service.generate(repo="r", jobs=["origin/dev"], branches=[], period_start=START, period_end=END)
+    assert report_all["markdown"] != report_empty["markdown"]
+    assert report_all["digest"] != report_empty["digest"]
+    assert "origin/dev / *" in report_all["markdown"]
+    assert "origin/dev / 无有效分支" in report_empty["markdown"]

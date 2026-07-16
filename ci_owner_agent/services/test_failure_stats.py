@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from ci_owner_agent.schemas import TestFileFailureStat
 from ci_owner_agent.services.test_failure_priority import apply_priority
 from ci_owner_agent.services.weekly_test_report_config import WeeklyTestReportConfig
+from ci_owner_agent.services.scope_normalization import normalize_branch_scope_values
 
 
 VALID_RESULTS = {"SUCCESS", "FAILURE", "UNSTABLE"}
@@ -26,8 +27,9 @@ class TestFailureStatsService:
             query["repo"] = repo
         if jobs:
             query["job"] = {"$in": jobs}
-        if branches:
-            query["branch"] = {"$in": branches}
+        normalized_branches = normalize_branch_scope_values(branches)
+        if normalized_branches is not None:
+            query["branch"] = {"$in": normalized_branches}
         events = list(self.store.test_file_failures.find(query))
         builds = list(self.store.builds.find(query))
 

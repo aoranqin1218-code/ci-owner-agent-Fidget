@@ -17,6 +17,7 @@ class Settings:
     jenkins_token: str | None
     repo_cache_dir: Path
     default_log_tail_lines: int
+    jenkins_successful_build_scan_limit: int
     max_tool_steps: int
     max_tool_output_chars: int
     model_provider: str
@@ -148,6 +149,7 @@ def load_settings(env_file: str | Path | None = None) -> Settings:
         jenkins_token=os.getenv("JENKINS_TOKEN") or None,
         repo_cache_dir=repo_cache_dir,
         default_log_tail_lines=_int_env("CI_AGENT_DEFAULT_LOG_TAIL_LINES", 500),
+        jenkins_successful_build_scan_limit=_int_env("CI_AGENT_JENKINS_SUCCESSFUL_BUILD_SCAN_LIMIT", 100),
         max_tool_steps=max_tool_steps,
         max_tool_output_chars=_int_env("CI_AGENT_MAX_TOOL_OUTPUT_CHARS", 20000),
         model_provider=os.getenv("CI_AGENT_MODEL_PROVIDER", "fake"),

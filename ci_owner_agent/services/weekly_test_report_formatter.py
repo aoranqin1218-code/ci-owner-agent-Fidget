@@ -47,7 +47,7 @@ def format_weekly_test_report(
     lines = [
         "### 📊 CI 高频失败测试周报",
         f"统计周期：{period_start.astimezone(ZoneInfo(config.timezone)):%Y-%m-%d %H:%M} ～ {period_end.astimezone(ZoneInfo(config.timezone)):%Y-%m-%d %H:%M} ({config.timezone})",
-        f"范围：{repo or '*'} / {','.join(jobs or ['*'])} / {','.join(branches or ['*'])}",
+        f"范围：{repo or '*'} / {_format_scope_values(jobs, empty_label='*')} / {_format_scope_values(branches, empty_label='无有效分支')}",
         "",
         f"周期有效构建：{completed}",
         f"出现测试失败的构建：{failed_build_count}",
@@ -74,6 +74,14 @@ def format_weekly_test_report(
         f"- 缺少真实构建时间的历史记录：{missing_timestamp_count} 条",
     ])
     return _fit_wecom_limit(lines, omitted)
+
+
+def _format_scope_values(values: list[str] | None, *, empty_label: str) -> str:
+    if values is None:
+        return "*"
+    if not values:
+        return empty_label
+    return ",".join(values)
 
 
 def _item_lines(index: int, stat: TestFileFailureStat, mention: str) -> list[str]:

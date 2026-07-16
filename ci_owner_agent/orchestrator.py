@@ -18,7 +18,8 @@ from ci_owner_agent.services.history_inheritance import build_no_owner_item_from
 from ci_owner_agent.services.history_store import MongoHistoryStore, get_history_store
 from ci_owner_agent.services.investigation_scope import InvestigationScope
 from ci_owner_agent.services.jenkins_client import JenkinsClient
-from ci_owner_agent.services.log_provider import JenkinsLogProvider, LocalFileLogProvider, LogProvider, detect_checkout_revision_from_console_log
+from ci_owner_agent.services.branch_normalization import normalize_branch_name
+from ci_owner_agent.services.log_provider import JenkinsLogProvider, LocalFileLogProvider, LogProvider, resolve_checkout_revision_from_console_log
 from ci_owner_agent.services.metrics import current_metrics_recorder
 from ci_owner_agent.services.responsibility_path_enricher import enrich_responsibility_item_paths, normalize_repository_path
 from ci_owner_agent.services.responsibility_signature_enricher import enrich_responsibility_item_signatures
@@ -148,6 +149,11 @@ def analyze_failed_build(
             detail=message,
             source="repo_sync",
         )
+    ancestry = git_client.check_ancestor(repo, base_commit, head_commit)
+    if not ancestry.get("ok"):
+        return failure_without_context(build_info, base_commit, f"Git ancestry 校验失败，不能输出高可信责任人：{ancestry.get('error')}", repo=repo)
+    if not ancestry.get("isAncestor"):
+        return failure_without_context(build_info, base_commit, "当前选择的上次成功提交不是本次构建提交的祖先，不能将该提交区间作为可靠的定责范围。", repo=repo)
     investigation_scope = _resolve_investigation_scope(
         repo=repo,
         build_info=build_info,
@@ -1020,7 +1026,14 @@ def analyze_local(
 ) -> CiResponsibilityNotice:
     settings = settings or load_settings()
     log_provider = LocalFileLogProvider(console_file, max_output_chars=max_output_chars)
-    actual_checkout_commit = detect_checkout_revision_from_console_log(log_provider._content())
+    checkout_resolution = resolve_checkout_revision_from_console_log(log_provider._content())
+    if checkout_resolution.ambiguous and not ignore_checkout_commit_mismatch:
+        raise ValueError(
+            "Console log contains multiple conflicting checkout commits, so --head-commit cannot be verified. "
+            "Refusing to execute Git analysis. Review the log or rerun with --ignore-checkout-commit-mismatch "
+            "only when the supplied head commit is known to be correct."
+        )
+    actual_checkout_commit = checkout_resolution.commit
     if (
         actual_checkout_commit
         and actual_checkout_commit.lower() != head_commit.lower()
@@ -1109,6 +1122,20 @@ def analyze_jenkins(
 
     if build_info.result not in {"FAILURE", "UNSTABLE", "UNKNOWN"}:
         return failure_without_context(build_info, None, f"不支持的 Jenkins 构建结果：{build_info.result}", repo=repo)
+    if build_info.commit is None:
+        return failure_without_context(
+            build_info,
+            None,
+            "无法确认当前 Jenkins checkout SHA，因此不能可靠确定 baseCommit 或执行 Git diff。",
+            repo=repo,
+        )
+    if normalize_branch_name(build_info.branch) is None:
+        return failure_without_context(
+            build_info,
+            None,
+            "当前构建分支无法确认，因此不能可靠确定 baseCommit 或执行 Git diff。",
+            repo=repo,
+        )
 
     with _metrics_stage("jenkinsFetch"):
         last_success_result = jenkins_get_last_successful_build_info(
@@ -1116,6 +1143,7 @@ def analyze_jenkins(
             job,
             branch=build_info.branch,
             beforeBuildNumber=build_info.buildNumber,
+            scanLimit=settings.jenkins_successful_build_scan_limit,
         )
     if not last_success_result.get("ok"):
         return failure_without_context(

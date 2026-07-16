@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from ci_owner_agent.main import main
 from ci_owner_agent.orchestrator import analyze_jenkins
 from ci_owner_agent.services.git_client import GitClient
@@ -105,6 +107,131 @@ def test_jenkins_client_warns_when_commit_missing():
     assert any("commit not found" in item for item in result["buildInfo"]["warnings"])
 
 
+def test_jenkins_branch_extraction_normalizes_and_rejects_ambiguous_candidates():
+    job = "services/fx-code-unittest"
+    payload = build_payload(1, "FAILURE", "abc1234", branch="refs/heads/feature/a")
+    assert client_for({jenkins_url(job, "1/api/json"): FakeResponse(payload), jenkins_url(job, "1/consoleText"): FakeResponse()}).get_build_info(job, 1)["buildInfo"]["branch"] == "feature/a"
+    payload["actions"] = [{"buildsByBranchName": {"refs/remotes/origin/dev": {}, "refs/remotes/origin/release": {}}}]
+    result = client_for({jenkins_url(job, "1/api/json"): FakeResponse(payload), jenkins_url(job, "1/consoleText"): FakeResponse()}).get_build_info(job, 1)
+    assert result["buildInfo"]["branch"] is None
+    assert any("unique logical branch" in warning for warning in result["buildInfo"]["warnings"])
+
+
+@pytest.mark.parametrize("parameters", [
+    [{"name": "BRANCH", "value": "dev"}, {"name": "GIT_BRANCH", "value": "release"}],
+    [{"name": "GIT_BRANCH", "value": "release"}, {"name": "BRANCH", "value": "dev"}],
+])
+def test_jenkins_conflicting_branch_parameters_fail_closed(parameters):
+    job = "services/fx-code-unittest"
+    payload = build_payload(1, "FAILURE", "abc1234")
+    payload["actions"] = [{"parameters": parameters}, {"buildsByBranchName": {"refs/remotes/origin/dev": {}}}]
+    result = client_for({jenkins_url(job, "1/api/json"): FakeResponse(payload), jenkins_url(job, "1/consoleText"): FakeResponse()}).get_build_info(job, 1)
+    assert result["buildInfo"]["branch"] is None
+    assert any("unique logical branch" in warning for warning in result["buildInfo"]["warnings"])
+
+
+def test_jenkins_branch_parameters_normalize_and_deduplicate_across_actions():
+    job = "services/fx-code-unittest"
+    payload = build_payload(1, "FAILURE", "abc1234")
+    payload["actions"] = [
+        {"parameters": [{"name": "BRANCH", "value": "dev"}]},
+        {"parameters": [{"name": "GIT_BRANCH", "value": "refs/remotes/origin/dev"}, {"name": "SOURCE_BRANCH", "value": "refs/heads/dev"}]},
+    ]
+    result = client_for({jenkins_url(job, "1/api/json"): FakeResponse(payload), jenkins_url(job, "1/consoleText"): FakeResponse()}).get_build_info(job, 1)
+    assert result["buildInfo"]["branch"] == "dev"
+
+
+def test_jenkins_branch_maps_are_collected_across_actions():
+    job = "services/fx-code-unittest"
+    payload = build_payload(1, "FAILURE", "abc1234")
+    payload["actions"] = [{"buildsByBranchName": {"refs/remotes/origin/dev": {}}}, {"buildsByBranchName": {"refs/remotes/origin/release": {}}}]
+    result = client_for({jenkins_url(job, "1/api/json"): FakeResponse(payload), jenkins_url(job, "1/consoleText"): FakeResponse()}).get_build_info(job, 1)
+    assert result["buildInfo"]["branch"] is None
+
+
+def test_jenkins_checkout_commit_ignores_changeset_and_rev_list(sample_repo):
+    job = "services/fx-code-unittest"
+    checkout = "d9f992446b9cca4fd6e14389628524d394fac498"
+    old = "f215d71beb43a091544e57d1e5352ccf8fd020cf"
+    payload = build_payload(1, "FAILURE", None)
+    payload["changeSet"] = {"items": [{"commitId": old}]}
+    console = f"Checking out Revision {checkout} (refs/remotes/origin/dev)\n > git rev-list --no-walk {old} # timeout=10\n"
+    result = client_for({jenkins_url(job, "1/api/json"): FakeResponse(payload), jenkins_url(job, "1/consoleText"): FakeResponse(text=console)}).get_build_info(job, 1)
+    assert result["buildInfo"]["commit"] == checkout
+
+
+def test_last_successful_build_scans_past_wrong_branch(sample_repo):
+    job = "services/fx-code-unittest"
+    routes = {
+        jenkins_url(job, "lastSuccessfulBuild/api/json"): FakeResponse(build_payload(10, "SUCCESS", sample_repo["base"], "release")),
+        jenkins_url(job, "10/api/json"): FakeResponse(build_payload(10, "SUCCESS", sample_repo["base"], "release")),
+        jenkins_url(job, "10/consoleText"): FakeResponse(),
+        jenkins_url(job, "9/api/json"): FakeResponse(build_payload(9, "SUCCESS", sample_repo["base"], "refs/remotes/origin/dev")),
+        jenkins_url(job, "9/consoleText"): FakeResponse(),
+    }
+    result = client_for(routes).get_last_successful_build_info(job, branch="dev", before_build_number=11)
+    assert result["ok"] is True
+    assert result["successfulBuildInfo"]["buildNumber"] == 9
+    assert result["successfulBuildInfo"]["branch"] == "dev"
+
+
+def test_last_successful_requires_current_branch_without_requests():
+    client = client_for({})
+    result = client.get_last_successful_build_info("job", branch=None, before_build_number=10)
+    assert result["ok"] is False
+    assert result["scannedBuildCount"] == 0
+    assert client.session.requested == []
+
+
+@pytest.mark.parametrize("before_build_number", [None, 0, -1])
+def test_last_successful_requires_positive_current_build_number_before_requests(before_build_number, sample_repo):
+    job = "services/fx-code-unittest"
+    client = client_for({jenkins_url(job, "lastSuccessfulBuild/api/json"): FakeResponse(build_payload(10, "SUCCESS", sample_repo["base"], "dev"))})
+    result = client.get_last_successful_build_info(job, "dev", before_build_number)
+    assert result["ok"] is False
+    assert result["scannedBuildCount"] == 0
+    assert result["candidateRejectedReasons"] == []
+    assert client.session.requested == []
+
+
+def test_last_successful_candidate_console_is_loaded_only_when_needed(sample_repo):
+    job = "services/fx-code-unittest"
+    routes = {
+        jenkins_url(job, "lastSuccessfulBuild/api/json"): FakeResponse(build_payload(10, "SUCCESS", sample_repo["base"], "release")),
+        jenkins_url(job, "9/api/json"): FakeResponse(build_payload(9, "SUCCESS", sample_repo["base"], "dev")),
+    }
+    client = client_for(routes)
+    result = client.get_last_successful_build_info(job, "dev", 11)
+    assert result["ok"] is True
+    assert all("consoleText" not in url for url in client.session.requested)
+    assert jenkins_url(job, "10/api/json") not in client.session.requested
+
+
+def test_last_successful_uses_console_only_for_matching_missing_commit(sample_repo):
+    job = "services/fx-code-unittest"
+    routes = {
+        jenkins_url(job, "lastSuccessfulBuild/api/json"): FakeResponse(build_payload(9, "SUCCESS", None, "dev")),
+            jenkins_url(job, "9/consoleText"): FakeResponse(text=f"Checking out Revision {sample_repo['base']}"),
+    }
+    client = client_for(routes)
+    result = client.get_last_successful_build_info(job, "dev", 10)
+    assert result["successfulBuildInfo"]["commit"] == sample_repo["base"]
+    assert client.session.requested == [jenkins_url(job, "lastSuccessfulBuild/api/json"), jenkins_url(job, "9/consoleText")]
+
+
+def test_last_successful_rejects_unknown_candidate_branch_and_scans(sample_repo):
+    job = "services/fx-code-unittest"
+    unknown = build_payload(9, "SUCCESS", sample_repo["base"], "dev")
+    unknown["actions"] = []
+    routes = {
+        jenkins_url(job, "lastSuccessfulBuild/api/json"): FakeResponse(unknown),
+        jenkins_url(job, "8/api/json"): FakeResponse(build_payload(8, "SUCCESS", sample_repo["base"], "refs/remotes/origin/dev")),
+    }
+    result = client_for(routes).get_last_successful_build_info(job, "dev", 10)
+    assert result["ok"] is True
+    assert result["successfulBuildInfo"]["buildNumber"] == 8
+
+
 def test_jenkins_log_provider_methods(sample_repo):
     job = "services/fx-code-unittest"
     routes = {
@@ -148,7 +275,7 @@ def test_last_successful_build_extracts_commit_from_console(sample_repo):
     job = "services/fx-code-unittest"
     routes = {
         jenkins_url(job, "lastSuccessfulBuild/api/json"): FakeResponse(build_payload(5060, "SUCCESS", None)),
-        jenkins_url(job, "5060/consoleText"): FakeResponse(text=f"Checked out revision {sample_repo['base']}\n"),
+        jenkins_url(job, "5060/consoleText"): FakeResponse(text=f"Checking out Revision {sample_repo['base']}\n"),
     }
     result = client_for(routes).get_last_successful_build_info(job, branch="dev", before_build_number=5061)
     assert result["ok"] is True
@@ -189,7 +316,23 @@ def test_analyze_jenkins_missing_commit_returns_no_owner(repo_cache: Path, sampl
     }
     notice = analyze_jenkins(sample_repo["repo"], job, 5061, client_for(routes), GitClient(repo_cache))
     assert notice.owner.type == "no_high_confidence_owner"
-    assert "缺少 headCommit 或 baseCommit" in notice.failureReason
+    assert "checkout SHA" in notice.failureReason
+
+
+def test_analyze_jenkins_stops_before_baseline_when_current_branch_is_ambiguous(sample_repo):
+    job = "services/fx-code-unittest"
+    payload = build_payload(11, "FAILURE", sample_repo["head"])
+    payload["actions"] = [{"buildsByBranchName": {"refs/remotes/origin/dev": {}, "refs/remotes/origin/release": {}}}, {"lastBuiltRevision": {"SHA1": sample_repo["head"]}}]
+    client = client_for({jenkins_url(job, "11/api/json"): FakeResponse(payload), jenkins_url(job, "11/consoleText"): FakeResponse(text="Finished: FAILURE")})
+
+    class NoGit:
+        def __getattr__(self, name):
+            raise AssertionError(f"Git must not be called: {name}")
+
+    notice = analyze_jenkins(sample_repo["repo"], job, 11, client, NoGit())
+    assert notice.owner.type == "no_high_confidence_owner"
+    assert "分支无法确认" in notice.failureReason
+    assert all("lastSuccessfulBuild" not in url for url in client.session.requested)
 
 
 def test_analyze_jenkins_failure_runs_fake_no_owner_agent(repo_cache: Path, sample_repo, monkeypatch):
