@@ -8,15 +8,13 @@ import os
 import subprocess
 import sys
 import time
-import platform
-import signal
 from pathlib import Path
 from typing import Any
 
 _SCRIPT_REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_SCRIPT_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_REPO_ROOT))
-from scripts._runtime import REPO_ROOT, build_subprocess_env, ensure_repo_on_sys_path, resolve_repo_default_path, resolve_user_path
+from scripts._runtime import REPO_ROOT, build_subprocess_env, ensure_repo_on_sys_path, resolve_repo_default_path, resolve_user_path, run_process_bounded
 ensure_repo_on_sys_path()
 from ci_owner_agent.schemas import CiResponsibilityNotice
 
@@ -79,6 +77,9 @@ SUMMARY_FIELDS = [
     "resumeInvalidReason",
     "errorKind",
     "cleanupWarning",
+    "noticeValidationError",
+    "terminationReaped",
+    "terminationWarning",
     "error",
 ]
 
@@ -306,24 +307,7 @@ def run_analyze(
             notice_path=notice_path,
             python_executable=python_executable,
         )
-    windows = platform.system().lower().startswith("win")
-    process = subprocess.Popen(command, cwd=str(cwd), env=env, text=True, encoding="utf-8", errors="replace",
-                               stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                               creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if windows else 0,
-                               start_new_session=not windows)
-    try:
-        stdout, stderr = process.communicate(timeout=timeout_seconds)
-    except subprocess.TimeoutExpired as exc:
-        if windows:
-            subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
-        else:
-            try:
-                os.killpg(os.getpgid(process.pid), signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-        stdout, stderr = process.communicate()
-        raise subprocess.TimeoutExpired(command, timeout_seconds, output=stdout or exc.output, stderr=stderr or exc.stderr) from exc
-    return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+    return run_process_bounded(command, cwd=cwd, env=env, timeout_seconds=timeout_seconds)
 
 
 def main() -> int:
@@ -525,6 +509,9 @@ def main() -> int:
                 record["error"] = f"analyze timeout after {args.timeout_seconds}s"
                 record["errorKind"] = "timeout"
                 record["noticeValid"] = False
+                termination = getattr(exc, "termination", None)
+                record["terminationReaped"] = getattr(termination, "reaped", None)
+                record["terminationWarning"] = getattr(termination, "warning", None)
                 stdout_path.write_text(exc.stdout or "", encoding="utf-8")
                 stderr_path.write_text(exc.stderr or "", encoding="utf-8")
                 cleanup_previous_outputs([notice_path, trace_path])

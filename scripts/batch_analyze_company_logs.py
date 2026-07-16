@@ -16,7 +16,7 @@ from typing import Any, Literal
 _SCRIPT_REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_SCRIPT_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_REPO_ROOT))
-from scripts._runtime import REPO_ROOT, build_subprocess_env, ensure_repo_on_sys_path, resolve_repo_default_path, resolve_user_path
+from scripts._runtime import REPO_ROOT, build_subprocess_env, ensure_repo_on_sys_path, resolve_repo_default_path, resolve_user_path, run_process_bounded
 
 ensure_repo_on_sys_path()
 from ci_owner_agent.schemas import CiResponsibilityNotice
@@ -285,6 +285,8 @@ def cleanup_previous_outputs(paths: list[Path]) -> list[str]:
         try:
             if path.exists():
                 path.unlink()
+            if path.exists():
+                warnings.append(f"failed to remove {path}: path still exists")
         except Exception as exc:
             warnings.append(f"failed to remove {path}: {exc}")
     return warnings
@@ -553,18 +555,7 @@ def run_analyze_local(
         notice_path=notice_path,
     )
 
-    return subprocess.run(
-        cmd,
-        cwd=str(cwd),
-        env=env,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        timeout=timeout_seconds,
-        check=False,
-    )
+    return run_process_bounded(cmd, cwd=cwd, env=env, timeout_seconds=timeout_seconds)
 
 
 def get_run_metadata(run: Any) -> dict[str, Any]:
@@ -919,6 +910,7 @@ def main() -> int:
             env["CI_AGENT_METRICS_FILE"] = str(metrics_file)
 
             started = time.perf_counter()
+            timed_out = False
             try:
                 cp = run_analyze_local(
                     item=item,
@@ -936,6 +928,9 @@ def main() -> int:
                 stderr_path.write_text(cp.stderr, encoding="utf-8")
 
                 record["returnCode"] = cp.returncode
+                if cp.returncode != 0:
+                    record["errorKind"] = "execution"
+                    record["error"] = f"analyze-local exited with {cp.returncode}"
                 record["durationSec"] = round(time.perf_counter() - started, 3)
 
                 try:
@@ -961,8 +956,10 @@ def main() -> int:
                     record.update(extract_responsibility_stats_from_notice(notice))
                 except Exception as exc:
                     record["noticeValid"] = False
-                    record["errorKind"] = "notice_validation"
-                    record["error"] = f"invalid output notice: {type(exc).__name__}: {exc}"
+                    record["noticeValidationError"] = f"invalid output notice: {type(exc).__name__}: {exc}"
+                    if not record.get("errorKind"):
+                        record["errorKind"] = "notice_validation"
+                        record["error"] = record["noticeValidationError"]
 
                 if args.fetch_trace:
                     trace_result = fetch_langsmith_trace(
@@ -977,9 +974,14 @@ def main() -> int:
                     record["trace"] = trace_result
 
             except subprocess.TimeoutExpired as exc:
+                timed_out = True
                 record["durationSec"] = round(time.perf_counter() - started, 3)
                 record["error"] = f"analyze-local timeout after {args.timeout_seconds}s"
                 record["errorKind"] = "timeout"
+                record["noticeValid"] = False
+                termination = getattr(exc, "termination", None)
+                record["terminationReaped"] = getattr(termination, "reaped", None)
+                record["terminationWarning"] = getattr(termination, "warning", None)
                 stdout_path.write_text(exc.stdout or "", encoding="utf-8")
                 stderr_path.write_text(exc.stderr or "", encoding="utf-8")
                 cleanup_warnings = cleanup_previous_outputs([notice_path, trace_path])
@@ -995,7 +997,7 @@ def main() -> int:
                 record["errorKind"] = "execution"
 
             # Read metrics after each build (success, timeout, or exception)
-            metrics = read_last_jsonl(metrics_file)
+            metrics = None if timed_out else read_last_jsonl(metrics_file)
             if metrics:
                 record["metricsDurationMs"] = metrics.get("durationMs")
                 record["llmCalls"] = metrics.get("llmCalls")
@@ -1029,6 +1031,9 @@ def main() -> int:
         "resumeValidated",
         "resumeInvalidReason",
         "errorKind",
+        "noticeValidationError",
+        "terminationReaped",
+        "terminationWarning",
         "lastSuccessfulBuildNumber",
         "previousBuildNumber",
         "previousCommit",
