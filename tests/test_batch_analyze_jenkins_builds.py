@@ -32,9 +32,11 @@ def make_fake_python(tmp_path: Path) -> Path:
     return path
 
 
-def run_main(tmp_path, monkeypatch, mode: str) -> tuple[int, dict]:
+def run_main(tmp_path, monkeypatch, mode: str, mismatch_field: str | None = None) -> tuple[int, dict]:
     out = tmp_path / "out"
     monkeypatch.setenv("FAKE_ANALYZE_MODE", mode)
+    if mismatch_field:
+        monkeypatch.setenv("FAKE_ANALYZE_MISMATCH_FIELD", mismatch_field)
     monkeypatch.setattr("sys.argv", ["jenkins-batch", "--job", "job", "--repo", "repo", "--builds", "13", "--out-dir", str(out), "--python", str(make_fake_python(tmp_path))])
     code = main()
     record = json.loads((out / "index.jsonl").read_text(encoding="utf-8").splitlines()[0])
@@ -60,6 +62,36 @@ def test_jenkins_main_missing_notice(tmp_path, monkeypatch):
 def test_jenkins_main_invalid_notice_schema(tmp_path, monkeypatch, mode):
     code, record = run_main(tmp_path, monkeypatch, mode)
     assert code == 1 and record["noticeValid"] is False and record["errorKind"] == "notice_schema"
+
+
+@pytest.mark.parametrize("field", ["repo", "job", "buildNumber"])
+def test_jenkins_main_metadata_mismatch(tmp_path, monkeypatch, field):
+    code, record = run_main(tmp_path, monkeypatch, "metadata_mismatch", field)
+    assert code == 1 and record["errorKind"] == "notice_metadata" and field in record["error"]
+
+
+def test_jenkins_cleanup_failure_is_fail_closed(tmp_path, monkeypatch):
+    out = tmp_path / "out"
+    called = False
+    def forbidden(**kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("child must not start")
+    monkeypatch.setattr(jenkins_batch, "cleanup_previous_outputs", lambda paths: ["locked stale notice"])
+    monkeypatch.setattr(jenkins_batch, "run_analyze", forbidden)
+    monkeypatch.setattr("sys.argv", ["jenkins", "--job", "job", "--repo", "repo", "--builds", "13", "--out-dir", str(out)])
+    assert main() == 1 and called is False
+    record = json.loads((out / "index.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert record["errorKind"] == "cleanup" and record["noticeValid"] is False
+
+
+def test_jenkins_dry_run_does_not_start_child(tmp_path, monkeypatch):
+    out = tmp_path / "out"
+    monkeypatch.setattr(jenkins_batch, "run_analyze", lambda **kwargs: (_ for _ in ()).throw(AssertionError("must not run")))
+    monkeypatch.setattr("sys.argv", ["jenkins", "--job", "job", "--repo", "repo", "--builds", "13", "--out-dir", str(out), "--dry-run"])
+    assert main() == 0
+    record = json.loads((out / "index.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert record["dryRun"] is True
 
 
 def test_parse_builds_list_range_and_union():

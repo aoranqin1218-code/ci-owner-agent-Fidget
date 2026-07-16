@@ -44,6 +44,14 @@ def main() -> int:
         "owner": {"type": "no_high_confidence_owner", "name": "无高可信责任人", "email": None, "commit": None, "confidence": 0},
         "failureReason": "tests-only launcher", "evidence": [], "suggestions": [], "responsibilityItems": [], "hasHighConfidenceOwner": False,
     }
+    if mode == "metadata_mismatch":
+        field = os.environ.get("FAKE_ANALYZE_MISMATCH_FIELD", "repo")
+        replacements = {"repo": "wrong-repo", "job": "wrong-job", "buildNumber": 9999, "branch": "feature/test",
+                        "result": "UNSTABLE", "baseCommit": "wrong-base", "headCommit": "wrong-head"}
+        if field not in replacements:
+            print(f"unsupported FAKE_ANALYZE_MISMATCH_FIELD: {field}", file=sys.stderr)
+            return 64
+        notice[field] = replacements[field]
     Path(output).write_text(json.dumps(notice, ensure_ascii=False), encoding="utf-8")
     print('{"unrelated": true}')
     if mode == "write_then_timeout":

@@ -251,3 +251,74 @@ def test_write_summaries_json_failure_returns_false(tmp_path, monkeypatch, capsy
     assert write_summaries(tmp_path, [{"run": 1, "status": "OK"}]) is False
     assert (tmp_path / "summary.csv").exists()
     assert "failed to write rerun summaries" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("field", ["repo", "job", "buildNumber", "branch", "result", "baseCommit", "headCommit"])
+def test_rerun_metadata_mismatch_matrix_real_child(tmp_path, monkeypatch, field):
+    console = tmp_path / "console.log"
+    console.write_text("Finished: FAILURE\n", encoding="utf-8")
+    out = tmp_path / "out"
+    monkeypatch.setenv("FAKE_ANALYZE_MODE", "metadata_mismatch")
+    monkeypatch.setenv("FAKE_ANALYZE_MISMATCH_FIELD", field)
+    monkeypatch.setattr("sys.argv", ["rerun", "--runs", "1", "--python", str(make_fake_python(tmp_path)), "--repo", "fx-code", "--job", "services/fx-code-unittest", "--build", "5088", "--branch", "origin/dev", "--base-commit", "base", "--head-commit", "head", "--console-file", str(console), "--out-dir", str(out)])
+    assert rerun_analyze_local.main() == 1
+    row = json.loads((out / "summary.json").read_text(encoding="utf-8"))[0]
+    assert row["errorKind"] == "notice_metadata" and field in row["noticeValidationError"]
+
+
+def test_rerun_stale_outputs_are_removed(tmp_path, monkeypatch):
+    console, out = tmp_path / "console.log", tmp_path / "out"
+    console.write_text("Finished: FAILURE\n", encoding="utf-8")
+    run = out / "run-01"
+    run.mkdir(parents=True)
+    for name, content in {"notice.json": make_notice().model_dump_json(), "metrics.jsonl": '{"durationMs":999999,"totalTokens":999999}', "trace.json": "{}", "trace-summary.json": "{}", "stdout.log": "STALE_OWNER", "stderr.log": "old", "command.txt": "old"}.items():
+        (run / name).write_text(content, encoding="utf-8")
+    monkeypatch.setenv("FAKE_ANALYZE_MODE", "missing_notice")
+    monkeypatch.setattr("sys.argv", ["rerun", "--runs", "1", "--python", str(make_fake_python(tmp_path)), "--repo", "fx-code", "--job", "services/fx-code-unittest", "--build", "5088", "--branch", "dev", "--base-commit", "base", "--head-commit", "head", "--console-file", str(console), "--out-dir", str(out)])
+    assert rerun_analyze_local.main() == 1
+    row = json.loads((out / "summary.json").read_text(encoding="utf-8"))[0]
+    assert row["errorKind"] == "notice_missing" and row["noticeOwner"] is None and row["totalTokens"] is None
+    assert not (run / "notice.json").exists() and not (run / "metrics.jsonl").exists()
+
+
+def test_rerun_cleanup_failure_does_not_stop_next_run(tmp_path, monkeypatch):
+    console, out = tmp_path / "console.log", tmp_path / "out"
+    console.write_text("Finished: FAILURE\n", encoding="utf-8")
+    calls = 0
+    original = rerun_analyze_local.cleanup_previous_outputs
+    def cleanup(paths):
+        nonlocal calls
+        calls += 1
+        return ["locked"] if calls == 1 else original(paths)
+    monkeypatch.setattr(rerun_analyze_local, "cleanup_previous_outputs", cleanup)
+    monkeypatch.setenv("FAKE_ANALYZE_MODE", "success")
+    monkeypatch.setattr("sys.argv", ["rerun", "--runs", "2", "--python", str(make_fake_python(tmp_path)), "--repo", "fx-code", "--job", "services/fx-code-unittest", "--build", "5088", "--branch", "dev", "--base-commit", "base", "--head-commit", "head", "--console-file", str(console), "--out-dir", str(out)])
+    assert rerun_analyze_local.main() == 1
+    rows = json.loads((out / "summary.json").read_text(encoding="utf-8"))
+    assert len(rows) == 2 and rows[0]["errorKind"] == "cleanup" and rows[1]["status"] == "OK"
+
+
+def test_rerun_main_preserves_unreaped_timeout(tmp_path, monkeypatch):
+    console, out = tmp_path / "console.log", tmp_path / "out"
+    console.write_text("Finished: FAILURE\n", encoding="utf-8")
+    class TimedOut:
+        pid = 1
+        def wait(self, timeout=None): raise subprocess.TimeoutExpired("fake", timeout)
+    monkeypatch.setattr(rerun_analyze_local.subprocess, "Popen", lambda *a, **k: TimedOut())
+    monkeypatch.setattr(rerun_analyze_local, "terminate_timed_out_process", lambda process: rerun_analyze_local.ProcessTerminationResult(False, "final reap failed"))
+    monkeypatch.setattr("sys.argv", ["rerun", "--runs", "1", "--timeout-sec", "1", "--repo", "fx-code", "--job", "j", "--build", "1", "--base-commit", "base", "--head-commit", "head", "--console-file", str(console), "--out-dir", str(out)])
+    assert rerun_analyze_local.main() == 1
+    row = json.loads((out / "summary.json").read_text(encoding="utf-8"))[0]
+    assert row["status"] == "TIMEOUT" and row["terminationReaped"] is False and row["noticeValid"] is False
+    assert "final reap failed" in row["terminationWarning"] and row["metricsDurationMs"] is None
+
+
+def test_rerun_real_child_write_before_timeout_is_untrusted(tmp_path, monkeypatch):
+    console, out = tmp_path / "console.log", tmp_path / "out"
+    console.write_text("Finished: FAILURE\n", encoding="utf-8")
+    monkeypatch.setenv("FAKE_ANALYZE_MODE", "write_then_timeout")
+    monkeypatch.setattr("sys.argv", ["rerun", "--runs", "1", "--timeout-sec", "1", "--python", str(make_fake_python(tmp_path)), "--repo", "fx-code", "--job", "services/fx-code-unittest", "--build", "5088", "--branch", "dev", "--base-commit", "base", "--head-commit", "head", "--console-file", str(console), "--out-dir", str(out)])
+    assert rerun_analyze_local.main() == 1
+    row = json.loads((out / "summary.json").read_text(encoding="utf-8"))[0]
+    assert row["status"] == "TIMEOUT" and row["errorKind"] == "timeout"
+    assert row["noticeValid"] is False and row["noticeOwner"] is None and row["metricsDurationMs"] is None
