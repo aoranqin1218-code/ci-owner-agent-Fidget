@@ -4,6 +4,7 @@ import re
 import hashlib
 from abc import ABC, abstractmethod
 from pathlib import Path
+from dataclasses import dataclass
 from typing import Literal
 
 from ci_owner_agent.schemas import LogTail
@@ -11,8 +12,8 @@ from ci_owner_agent.services.command_runner import truncate_tail_text, truncate_
 
 FinalStatus = Literal["SUCCESS", "FAILURE", "ABORTED", "UNKNOWN"]
 FINAL_STATUS_RE = re.compile(r"Finished:\s*(SUCCESS|FAILURE|ABORTED)\b", re.IGNORECASE)
-CHECKING_OUT_REVISION_RE = re.compile(r"\bChecking out Revision\s+([0-9a-f]{7,40})\b", re.IGNORECASE)
-GIT_CHECKOUT_FORCE_RE = re.compile(r"\bgit\s+checkout\s+-f\s+([0-9a-f]{7,40})\b", re.IGNORECASE)
+CHECKING_OUT_REVISION_RE = re.compile(r"(?mi)^\s*Checking out Revision\s+(?P<commit>[0-9a-f]{40})(?:\s+\([^)]+\))?\s*$")
+GIT_CHECKOUT_FORCE_RE = re.compile(r"(?mi)^\s*(?:>\s*)?git\s+checkout\s+-f\s+(?P<commit>[0-9a-f]{40})(?:\s+#.*)?$")
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 ERROR_TERMS = [
     "error",
@@ -54,14 +55,22 @@ def log_detect_final_status(log_content: str) -> FinalStatus:
     return matches[-1].group(1).upper()  # type: ignore[return-value]
 
 
+@dataclass(frozen=True)
+class CheckoutCommitResolution:
+    commit: str | None
+    ambiguous: bool = False
+
+
+def resolve_checkout_revision_from_console_log(text: str) -> CheckoutCommitResolution:
+    clean = ANSI_RE.sub("", text)
+    candidates = {match.group("commit").lower() for pattern in (CHECKING_OUT_REVISION_RE, GIT_CHECKOUT_FORCE_RE) for match in pattern.finditer(clean)}
+    if len(candidates) == 1:
+        return CheckoutCommitResolution(candidates.pop())
+    return CheckoutCommitResolution(None, ambiguous=bool(candidates))
+
+
 def detect_checkout_revision_from_console_log(text: str) -> str | None:
-    checkout_revision = CHECKING_OUT_REVISION_RE.search(text)
-    if checkout_revision:
-        return checkout_revision.group(1)
-    forced_checkout = GIT_CHECKOUT_FORCE_RE.search(text)
-    if forced_checkout:
-        return forced_checkout.group(1)
-    return None
+    return resolve_checkout_revision_from_console_log(text).commit
 
 
 class LogProvider(ABC):

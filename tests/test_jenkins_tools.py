@@ -141,6 +141,25 @@ def test_jenkins_branch_parameters_normalize_and_deduplicate_across_actions():
     assert result["buildInfo"]["branch"] == "dev"
 
 
+def test_jenkins_branch_maps_are_collected_across_actions():
+    job = "services/fx-code-unittest"
+    payload = build_payload(1, "FAILURE", "abc1234")
+    payload["actions"] = [{"buildsByBranchName": {"refs/remotes/origin/dev": {}}}, {"buildsByBranchName": {"refs/remotes/origin/release": {}}}]
+    result = client_for({jenkins_url(job, "1/api/json"): FakeResponse(payload), jenkins_url(job, "1/consoleText"): FakeResponse()}).get_build_info(job, 1)
+    assert result["buildInfo"]["branch"] is None
+
+
+def test_jenkins_checkout_commit_ignores_changeset_and_rev_list(sample_repo):
+    job = "services/fx-code-unittest"
+    checkout = "d9f992446b9cca4fd6e14389628524d394fac498"
+    old = "f215d71beb43a091544e57d1e5352ccf8fd020cf"
+    payload = build_payload(1, "FAILURE", None)
+    payload["changeSet"] = {"items": [{"commitId": old}]}
+    console = f"Checking out Revision {checkout} (refs/remotes/origin/dev)\n > git rev-list --no-walk {old} # timeout=10\n"
+    result = client_for({jenkins_url(job, "1/api/json"): FakeResponse(payload), jenkins_url(job, "1/consoleText"): FakeResponse(text=console)}).get_build_info(job, 1)
+    assert result["buildInfo"]["commit"] == checkout
+
+
 def test_last_successful_build_scans_past_wrong_branch(sample_repo):
     job = "services/fx-code-unittest"
     routes = {
@@ -192,7 +211,7 @@ def test_last_successful_uses_console_only_for_matching_missing_commit(sample_re
     job = "services/fx-code-unittest"
     routes = {
         jenkins_url(job, "lastSuccessfulBuild/api/json"): FakeResponse(build_payload(9, "SUCCESS", None, "dev")),
-        jenkins_url(job, "9/consoleText"): FakeResponse(text=f"Checked out revision {sample_repo['base']}"),
+            jenkins_url(job, "9/consoleText"): FakeResponse(text=f"Checking out Revision {sample_repo['base']}"),
     }
     client = client_for(routes)
     result = client.get_last_successful_build_info(job, "dev", 10)
@@ -256,7 +275,7 @@ def test_last_successful_build_extracts_commit_from_console(sample_repo):
     job = "services/fx-code-unittest"
     routes = {
         jenkins_url(job, "lastSuccessfulBuild/api/json"): FakeResponse(build_payload(5060, "SUCCESS", None)),
-        jenkins_url(job, "5060/consoleText"): FakeResponse(text=f"Checked out revision {sample_repo['base']}\n"),
+        jenkins_url(job, "5060/consoleText"): FakeResponse(text=f"Checking out Revision {sample_repo['base']}\n"),
     }
     result = client_for(routes).get_last_successful_build_info(job, branch="dev", before_build_number=5061)
     assert result["ok"] is True
@@ -297,7 +316,7 @@ def test_analyze_jenkins_missing_commit_returns_no_owner(repo_cache: Path, sampl
     }
     notice = analyze_jenkins(sample_repo["repo"], job, 5061, client_for(routes), GitClient(repo_cache))
     assert notice.owner.type == "no_high_confidence_owner"
-    assert "缺少 headCommit 或 baseCommit" in notice.failureReason
+    assert "checkout SHA" in notice.failureReason
 
 
 def test_analyze_jenkins_stops_before_baseline_when_current_branch_is_ambiguous(sample_repo):

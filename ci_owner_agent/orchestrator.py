@@ -1115,6 +1115,13 @@ def analyze_jenkins(
 
     if build_info.result not in {"FAILURE", "UNSTABLE", "UNKNOWN"}:
         return failure_without_context(build_info, None, f"不支持的 Jenkins 构建结果：{build_info.result}", repo=repo)
+    if build_info.commit is None:
+        return failure_without_context(
+            build_info,
+            None,
+            "无法确认当前 Jenkins checkout SHA，因此不能可靠确定 baseCommit 或执行 Git diff。",
+            repo=repo,
+        )
     if normalize_branch_name(build_info.branch) is None:
         return failure_without_context(
             build_info,

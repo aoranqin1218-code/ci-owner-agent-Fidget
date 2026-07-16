@@ -30,11 +30,11 @@ def test_success_build_short_circuits(repo_cache: Path, sample_repo, logs):
 
 def test_detect_checkout_revision_from_console_log():
     text = (
-        "git checkout -f 1111111111111111111111111111111111111111\n"
+        "git checkout -f b9869e53b70cc543aac84a2148da0fd7a945b4ff\n"
         "Checking out Revision b9869e53b70cc543aac84a2148da0fd7a945b4ff (refs/remotes/origin/dev)\n"
     )
     assert detect_checkout_revision_from_console_log(text) == "b9869e53b70cc543aac84a2148da0fd7a945b4ff"
-    assert detect_checkout_revision_from_console_log("git checkout -f 1234567890abcdef") == "1234567890abcdef"
+    assert detect_checkout_revision_from_console_log("git checkout -f 1234567890abcdef") is None
     assert detect_checkout_revision_from_console_log("no checkout here") is None
 
 
