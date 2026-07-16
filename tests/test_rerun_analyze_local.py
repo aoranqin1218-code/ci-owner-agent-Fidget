@@ -1,5 +1,7 @@
 import argparse
+import json
 from ci_owner_agent.schemas import CiResponsibilityNotice, Owner
+from scripts import rerun_analyze_local
 from scripts.rerun_analyze_local import build_command, read_notice, validate_notice
 
 
@@ -81,3 +83,31 @@ def test_rerun_analyze_local_omits_previous_when_not_provided():
     assert "--previous-commit" not in command
     assert "--last-success-build" in command
     assert "5068" in command
+
+
+def test_rerun_main_records_popen_failure_and_writes_summary(tmp_path, monkeypatch):
+    console = tmp_path / "console.log"
+    console.write_text("Finished: FAILURE\n", encoding="utf-8")
+    out_dir = tmp_path / "runs"
+    monkeypatch.setattr(
+        "sys.argv",
+        ["rerun", "--runs", "1", "--python", str(tmp_path / "missing-python"), "--repo", "fx-code", "--job", "services/fx-code-unittest",
+         "--build", "5088", "--branch", "dev", "--base-commit", "base", "--head-commit", "head", "--console-file", str(console), "--out-dir", str(out_dir)],
+    )
+    assert rerun_analyze_local.main() == 1
+    rows = json.loads((out_dir / "summary.json").read_text(encoding="utf-8"))
+    assert rows[0]["status"] == "FAILED"
+    assert rows[0]["errorKind"] == "execution"
+
+
+def test_rerun_unsupported_status_writes_structured_summary(tmp_path, monkeypatch):
+    console = tmp_path / "console.log"
+    console.write_text("Finished: CANCELLED\n", encoding="utf-8")
+    out_dir = tmp_path / "runs"
+    monkeypatch.setattr(
+        "sys.argv",
+        ["rerun", "--repo", "fx-code", "--job", "j", "--build", "1", "--base-commit", "base", "--head-commit", "head", "--console-file", str(console), "--out-dir", str(out_dir)],
+    )
+    assert rerun_analyze_local.main() == 1
+    rows = json.loads((out_dir / "summary.json").read_text(encoding="utf-8"))
+    assert rows[0]["errorKind"] == "status_validation"
