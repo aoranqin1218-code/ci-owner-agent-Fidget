@@ -113,41 +113,62 @@ class JenkinsClient:
         scan_limit: int = 100,
     ) -> dict:
         current_branch = normalize_branch_name(branch)
+        if current_branch is None:
+            return {
+                "ok": False,
+                "error": "current build branch could not be determined; refusing to select a Git diff baseline",
+                "scannedBuildCount": 0,
+                "candidateRejectedReasons": [],
+            }
         rejected: list[str] = []
         scanned = 0
+        seen_numbers: set[int] = set()
 
-        def validate(info: BuildInfo, source: str) -> SuccessfulBuildInfo | None:
-            reasons: list[str] = []
-            if before_build_number is not None and info.buildNumber >= before_build_number:
-                reasons.append("not before current build")
-            if info.result != "SUCCESS":
-                reasons.append(f"result={info.result}")
-            if not info.commit:
-                reasons.append("missing commit")
-            if current_branch and info.branch != current_branch:
-                reasons.append(f"branch={info.branch!r} does not match {current_branch!r}")
-            if reasons:
-                rejected.append(f"{source}: build {info.buildNumber} rejected: {', '.join(reasons)}")
-                return None
-            return SuccessfulBuildInfo(buildNumber=info.buildNumber, result=info.result, commit=info.commit, buildUrl=info.buildUrl, branch=info.branch, warnings=info.warnings)
-
-        def candidate(number: int | str, source: str) -> SuccessfulBuildInfo | None:
+        def load_candidate(data: dict[str, Any], source: str) -> SuccessfulBuildInfo | None:
             nonlocal scanned
-            result = self.get_build_info(job, int(number), 0)
-            scanned += 1
-            if not result.get("ok"):
-                rejected.append(f"{source}: build {number} unreadable: {result.get('error')}")
+            number = data.get("number")
+            try:
+                number = int(number)
+            except (TypeError, ValueError):
+                rejected.append(f"{source}: missing build number")
                 return None
-            return validate(BuildInfo.model_validate(result["buildInfo"]), source)
+            if number in seen_numbers:
+                return None
+            seen_numbers.add(number)
+            scanned += 1
+            branch_name = self._extract_branch(data)
+            reasons: list[str] = []
+            if before_build_number is not None and number >= before_build_number:
+                reasons.append("not before current build")
+            result = (data.get("result") or "UNKNOWN").upper()
+            if result != "SUCCESS":
+                reasons.append(f"result={result}")
+            if branch_name != current_branch:
+                reasons.append(f"branch={branch_name!r} does not match {current_branch!r}")
+            if reasons:
+                rejected.append(f"{source}: build {number} rejected: {', '.join(reasons)}")
+                return None
+            commit = self._extract_commit(data, "")
+            if not commit:
+                console = self.get_console_text(job, number)
+                if not console.get("ok"):
+                    rejected.append(f"{source}: build {number} console unreadable: {console.get('error')}")
+                    return None
+                commit = self._extract_commit(data, console.get("content", ""))
+            if not commit:
+                rejected.append(f"{source}: build {number} rejected: missing commit")
+                return None
+            return SuccessfulBuildInfo(
+                buildNumber=number,
+                result=result,
+                commit=commit,
+                buildUrl=data.get("url") or self._url(job, f"{number}/"),
+                branch=branch_name,
+            )
 
         fast = self.get_build_json(job, "lastSuccessfulBuild")
         if fast.get("ok") and fast["data"].get("number") is not None:
-            data = fast["data"]
-            number = int(data["number"])
-            console = self.get_console_text(job, number)
-            scanned += 1
-            info = BuildInfo(job=job, buildNumber=number, result=(data.get("result") or "SUCCESS").upper(), buildUrl=data.get("url") or self._url(job, "lastSuccessfulBuild/"), branch=self._extract_branch(data), commit=self._extract_commit(data, console.get("content", "")), warnings=[])
-            found = validate(info, "lastSuccessfulBuild")
+            found = load_candidate(fast["data"], "lastSuccessfulBuild")
             if found:
                 return {"ok": True, "successfulBuildInfo": found.model_dump(), "scannedBuildCount": scanned, "candidateRejectedReasons": rejected}
         elif not fast.get("ok"):
@@ -155,7 +176,13 @@ class JenkinsClient:
         if before_build_number is None:
             return {"ok": False, "error": "current build number is required to scan matching successful builds", "scannedBuildCount": scanned, "candidateRejectedReasons": rejected}
         for number in range(before_build_number - 1, max(0, before_build_number - max(1, scan_limit)) - 1, -1):
-            found = candidate(number, "history")
+            if number in seen_numbers:
+                continue
+            result = self.get_build_json(job, number)
+            if not result.get("ok"):
+                rejected.append(f"history: build {number} unreadable: {result.get('error')}")
+                continue
+            found = load_candidate(result["data"], "history")
             if found:
                 return {"ok": True, "successfulBuildInfo": found.model_dump(), "scannedBuildCount": scanned, "candidateRejectedReasons": rejected}
         return {"ok": False, "error": "no earlier successful build with a valid commit on the current branch", "scannedBuildCount": scanned, "candidateRejectedReasons": rejected}

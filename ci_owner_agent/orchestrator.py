@@ -18,6 +18,7 @@ from ci_owner_agent.services.history_inheritance import build_no_owner_item_from
 from ci_owner_agent.services.history_store import MongoHistoryStore, get_history_store
 from ci_owner_agent.services.investigation_scope import InvestigationScope
 from ci_owner_agent.services.jenkins_client import JenkinsClient
+from ci_owner_agent.services.branch_normalization import normalize_branch_name
 from ci_owner_agent.services.log_provider import JenkinsLogProvider, LocalFileLogProvider, LogProvider, detect_checkout_revision_from_console_log
 from ci_owner_agent.services.metrics import current_metrics_recorder
 from ci_owner_agent.services.responsibility_path_enricher import enrich_responsibility_item_paths, normalize_repository_path
@@ -1114,6 +1115,13 @@ def analyze_jenkins(
 
     if build_info.result not in {"FAILURE", "UNSTABLE", "UNKNOWN"}:
         return failure_without_context(build_info, None, f"不支持的 Jenkins 构建结果：{build_info.result}", repo=repo)
+    if normalize_branch_name(build_info.branch) is None:
+        return failure_without_context(
+            build_info,
+            None,
+            "当前构建分支无法确认，因此不能可靠确定 baseCommit 或执行 Git diff。",
+            repo=repo,
+        )
 
     with _metrics_stage("jenkinsFetch"):
         last_success_result = jenkins_get_last_successful_build_info(

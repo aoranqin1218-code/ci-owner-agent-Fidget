@@ -11,7 +11,7 @@ from ci_owner_agent.services.weekly_test_report_formatter import classify_weekly
 from ci_owner_agent.services.weekly_test_report_config import WeeklyTestReportConfig
 from ci_owner_agent.services.responsibility_path_enricher import is_test_file_path
 from ci_owner_agent.services.wecom_notification_outbox import WeComNotificationOutbox
-from ci_owner_agent.services.branch_normalization import normalize_branch_name
+from ci_owner_agent.services.scope_normalization import normalize_branch_scope_values, normalize_scope_values
 
 
 class WeeklyTestReportService:
@@ -28,7 +28,7 @@ class WeeklyTestReportService:
 
     def generate(self, *, repo: str, jobs: list[str] | None, branches: list[str] | None,
                  period_start: dt.datetime, period_end: dt.datetime, top_n: int | None = None) -> dict:
-        jobs, branches = normalize_scope_values(jobs), normalize_scope_values(branches)
+        jobs, branches = normalize_scope_values(jobs), normalize_branch_scope_values(branches)
         stats = TestFailureStatsService(self.store, self.config).aggregate(repo, jobs, branches, period_start, period_end)
         groups = classify_weekly_report_stats(stats, self.config)
         routes = {}
@@ -74,7 +74,7 @@ class WeeklyTestReportService:
 
     def notify(self, report: dict, *, repo: str, jobs: list[str] | None, branches: list[str] | None,
                period_start: dt.datetime, period_end: dt.datetime, dry_run: bool = False, force: bool = False) -> dict:
-        jobs, branches = normalize_scope_values(jobs), normalize_scope_values(branches)
+        jobs, branches = normalize_scope_values(jobs), normalize_branch_scope_values(branches)
         if report["importantItemCount"] == 0 and not self.config.notification.sendWhenNoImportantItems:
             return {"ok": True, "sent": False, "reason": "no_important_test_failures",
                     "importantItemCount": 0, "normalItemCount": report["normalItemCount"],
@@ -114,11 +114,6 @@ def _scope_query(repo: str, jobs: list[str] | None, branches: list[str] | None) 
 VALID_COMPLETED_RESULTS = {"SUCCESS", "FAILURE", "UNSTABLE"}
 
 
-def normalize_scope_values(values: list[str] | None) -> list[str] | None:
-    if not values:
-        return None
-    normalized = sorted({branch for branch in (normalize_branch_name(str(value)) for value in values) if branch})
-    return normalized or None
 
 
 def _in_period(value, start: dt.datetime, end: dt.datetime) -> bool:

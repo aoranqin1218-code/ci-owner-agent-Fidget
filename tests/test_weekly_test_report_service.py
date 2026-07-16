@@ -6,6 +6,7 @@ from ci_owner_agent.schemas import TestFileFailureStat
 from ci_owner_agent.services.weekly_test_report_config import WeeklyTestReportConfig
 from ci_owner_agent.services.weekly_test_report_formatter import format_weekly_test_report
 from ci_owner_agent.services.weekly_test_report_service import WeeklyTestReportService
+from ci_owner_agent.services.scope_normalization import normalize_branch_scope_values, normalize_scope_values
 from tests.test_history_store import make_store
 
 
@@ -140,3 +141,16 @@ def test_weekly_notification_dedup_is_scope_order_independent():
     second = service.notify(report, repo="r", jobs=["job-a", "job-b"], branches=["dev", "release"], period_start=START, period_end=END)
     assert first["inserted"] is True
     assert second["inserted"] is False
+
+
+def test_scope_normalization_keeps_jobs_and_normalizes_branches():
+    assert normalize_scope_values([" origin/dev ", "refs/tags/release", "feature/a", "origin/dev"]) == ["feature/a", "origin/dev", "refs/tags/release"]
+    assert normalize_branch_scope_values(["refs/remotes/origin/dev", "*/dev"]) == ["dev"]
+
+
+def test_weekly_scope_query_preserves_job_refs():
+    store = make_store()
+    _save_build(store, job="origin/dev", number=1, result="SUCCESS", timestamp=START)
+    service = WeeklyTestReportService(store, WeeklyTestReportConfig.model_validate({"important": {"enabled": False}}))
+    report = service.generate(repo="r", jobs=["origin/dev"], branches=["refs/remotes/origin/dev"], period_start=START, period_end=END)
+    assert report["completedBuildCount"] == 1

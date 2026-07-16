@@ -54,3 +54,9 @@ def test_other_failure_breaks_streak_unknown_without_event_skips_and_branches_is
         datetime(2026, 7, 1, tzinfo=timezone.utc), datetime(2026, 8, 1, tzinfo=timezone.utc))[0]
     assert stat.currentConsecutiveFailureCount == 1
     assert stat.totalFailedBuildCount == 2
+
+
+def test_aggregate_normalizes_branch_scope_like_weekly_reports():
+    store = make_store(); t = datetime(2026, 7, 10, tzinfo=timezone.utc)
+    _build(store, 1, "FAILURE", t); _event(store, 1, t)
+    assert len(TestFailureStatsService(store).aggregate("r", ["j"], ["refs/remotes/origin/dev"], t.replace(day=1), t.replace(day=20))) == 1

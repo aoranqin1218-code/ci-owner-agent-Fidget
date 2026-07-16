@@ -8,22 +8,24 @@ def normalize_branch_name(value: str | None) -> str | None:
     branch = value.strip()
     if not branch:
         return None
-    prefixes = ("refs/remotes/", "remotes/", "refs/heads/")
-    for prefix in prefixes:
-        if branch.startswith(prefix):
-            branch = branch[len(prefix):]
-            if prefix in {"refs/remotes/", "remotes/"} and "/" in branch:
-                branch = branch.split("/", 1)[1]
-            break
-    else:
-        if branch.startswith("*/"):
+    while True:
+        if branch == "HEAD" or branch.endswith("/HEAD") or branch.startswith("refs/tags/") or branch.startswith("refs/pull/"):
+            return None
+        previous = branch
+        if branch.startswith("refs/remotes/") or branch.startswith("remotes/"):
+            prefix = "refs/remotes/" if branch.startswith("refs/remotes/") else "remotes/"
+            remainder = branch[len(prefix):]
+            if "/" not in remainder:
+                return None
+            _, branch = remainder.split("/", 1)
+        elif branch.startswith("refs/heads/"):
+            branch = branch[len("refs/heads/"):]
+        elif branch.startswith("*/"):
             branch = branch[2:]
+        elif branch.startswith("origin/") or branch.startswith("upstream/"):
+            branch = branch.split("/", 1)[1]
         elif branch.startswith("refs/"):
             return None
-        elif "/" in branch:
-            remote, candidate = branch.split("/", 1)
-            if remote in {"origin", "upstream"}:
-                branch = candidate
-    if not branch or branch == "HEAD" or branch.endswith("/HEAD"):
-        return None
-    return branch
+        if not branch or branch == previous:
+            break
+    return None if branch == "HEAD" or branch.endswith("/HEAD") else branch

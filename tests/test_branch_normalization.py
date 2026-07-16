@@ -18,3 +18,16 @@ def test_normalize_branch_name(raw, expected):
 
 def test_feature_branches_remain_distinct():
     assert normalize_branch_name("feature/a") != normalize_branch_name("feature/b")
+
+
+@pytest.mark.parametrize(("raw", "expected"), [
+    ("refs/heads/origin/dev", "dev"),
+    ("refs/heads/upstream/feature/a", "feature/a"),
+    ("refs/remotes/origin/refs/heads/dev", "dev"),
+    ("refs/heads/refs/tags/v1", None),
+    ("refs/remotes/origin/refs/pull/123/merge", None),
+])
+def test_normalize_branch_name_is_idempotent_for_nested_prefixes(raw, expected):
+    normalized = normalize_branch_name(raw)
+    assert normalized == expected
+    assert normalize_branch_name(normalized) == normalized
