@@ -19,7 +19,7 @@ from ci_owner_agent.services.history_store import MongoHistoryStore, get_history
 from ci_owner_agent.services.investigation_scope import InvestigationScope
 from ci_owner_agent.services.jenkins_client import JenkinsClient
 from ci_owner_agent.services.branch_normalization import normalize_branch_name
-from ci_owner_agent.services.log_provider import JenkinsLogProvider, LocalFileLogProvider, LogProvider, detect_checkout_revision_from_console_log
+from ci_owner_agent.services.log_provider import JenkinsLogProvider, LocalFileLogProvider, LogProvider, resolve_checkout_revision_from_console_log
 from ci_owner_agent.services.metrics import current_metrics_recorder
 from ci_owner_agent.services.responsibility_path_enricher import enrich_responsibility_item_paths, normalize_repository_path
 from ci_owner_agent.services.responsibility_signature_enricher import enrich_responsibility_item_signatures
@@ -1026,7 +1026,14 @@ def analyze_local(
 ) -> CiResponsibilityNotice:
     settings = settings or load_settings()
     log_provider = LocalFileLogProvider(console_file, max_output_chars=max_output_chars)
-    actual_checkout_commit = detect_checkout_revision_from_console_log(log_provider._content())
+    checkout_resolution = resolve_checkout_revision_from_console_log(log_provider._content())
+    if checkout_resolution.ambiguous and not ignore_checkout_commit_mismatch:
+        raise ValueError(
+            "Console log contains multiple conflicting checkout commits, so --head-commit cannot be verified. "
+            "Refusing to execute Git analysis. Review the log or rerun with --ignore-checkout-commit-mismatch "
+            "only when the supplied head commit is known to be correct."
+        )
+    actual_checkout_commit = checkout_resolution.commit
     if (
         actual_checkout_commit
         and actual_checkout_commit.lower() != head_commit.lower()

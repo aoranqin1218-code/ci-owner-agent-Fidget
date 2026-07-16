@@ -8,7 +8,7 @@ import pytest
 from ci_owner_agent.main import main
 from ci_owner_agent.orchestrator import analyze_local
 from ci_owner_agent.services.git_client import GitClient
-from ci_owner_agent.services.log_provider import detect_checkout_revision_from_console_log
+from ci_owner_agent.services.log_provider import detect_checkout_revision_from_console_log, resolve_checkout_revision_from_console_log
 
 
 def test_success_build_short_circuits(repo_cache: Path, sample_repo, logs):
@@ -36,6 +36,33 @@ def test_detect_checkout_revision_from_console_log():
     assert detect_checkout_revision_from_console_log(text) == "b9869e53b70cc543aac84a2148da0fd7a945b4ff"
     assert detect_checkout_revision_from_console_log("git checkout -f 1234567890abcdef") is None
     assert detect_checkout_revision_from_console_log("no checkout here") is None
+
+
+def test_checkout_resolution_marks_conflicting_commits_ambiguous():
+    text = (
+        "Checking out Revision aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa (refs/remotes/origin/dev)\n"
+        " > git checkout -f bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb # timeout=10\n"
+    )
+    resolution = resolve_checkout_revision_from_console_log(text)
+    assert resolution.commit is None and resolution.ambiguous is True
+    assert detect_checkout_revision_from_console_log(text) is None
+
+
+def test_analyze_local_rejects_ambiguous_checkout_before_git(repo_cache, tmp_path):
+    log = tmp_path / "ambiguous.log"
+    log.write_text(
+        "Checking out Revision aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa (refs/remotes/origin/dev)\n"
+        " > git checkout -f bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb # timeout=10\nFinished: FAILURE\n",
+        encoding="utf-8",
+    )
+
+    class NoGit:
+        def __getattr__(self, name):
+            raise AssertionError(f"Git must not be called: {name}")
+
+    with pytest.raises(ValueError, match="conflicting checkout commits.*--head-commit"):
+        analyze_local(repo="sample-ts-repo", job="job", build=1, branch="dev", base_commit="a" * 40,
+                      head_commit="c" * 40, console_file=str(log), build_url="local://job/1", git_client=NoGit())
 
 
 def test_analyze_local_rejects_head_commit_mismatch(repo_cache: Path, sample_repo, logs, tmp_path: Path):

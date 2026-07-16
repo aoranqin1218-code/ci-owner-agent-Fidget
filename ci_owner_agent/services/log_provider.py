@@ -70,6 +70,7 @@ def resolve_checkout_revision_from_console_log(text: str) -> CheckoutCommitResol
 
 
 def detect_checkout_revision_from_console_log(text: str) -> str | None:
+    """Return a unique checkout commit; security-sensitive callers must inspect ambiguity."""
     return resolve_checkout_revision_from_console_log(text).commit
 
 
