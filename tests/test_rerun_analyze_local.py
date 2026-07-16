@@ -1,6 +1,7 @@
 import argparse
 import json
 import subprocess
+import sys
 from ci_owner_agent.schemas import CiResponsibilityNotice, Owner
 from scripts import rerun_analyze_local
 from scripts.rerun_analyze_local import build_command, read_notice, terminate_timed_out_process, validate_notice
@@ -157,6 +158,11 @@ def test_rerun_timeout_reaps_process_and_returns_failure(tmp_path, monkeypatch):
     assert waits == [1, 5]
     rows = json.loads((out_dir / "summary.json").read_text(encoding="utf-8"))
     assert rows[0]["status"] == "TIMEOUT" and rows[0]["errorKind"] == "timeout"
+    assert rows[0]["terminationReaped"] is True
+    assert rows[0]["noticeValid"] is False
+    assert rows[0]["noticeValidationError"] == "analysis outputs are untrusted because execution timed out"
+    assert rows[0]["noticeOwner"] is None
+    assert rows[0]["metricsDurationMs"] is None
 
 
 def test_timeout_termination_reports_warning_without_raising(monkeypatch):
@@ -169,3 +175,29 @@ def test_timeout_termination_reports_warning_without_raising(monkeypatch):
     assert result.reaped is False
     assert "tree termination failed" in result.warning
     assert "final reap failed" in result.warning
+
+
+def test_rerun_main_real_subprocess_success(tmp_path, monkeypatch):
+    console = tmp_path / "console.log"
+    console.write_text("Finished: FAILURE\n", encoding="utf-8")
+    out_dir, stub = tmp_path / "runs", tmp_path / "stub.py"
+    payload = make_notice().model_copy(update={"baseCommit": "base", "headCommit": "head"}).model_dump_json()
+    stub.write_text("import pathlib,sys\npathlib.Path(sys.argv[1]).write_text(" + repr(payload) + ", encoding='utf-8')\n", encoding="utf-8")
+    monkeypatch.setattr(rerun_analyze_local, "build_command", lambda args, notice_path=None: [sys.executable, str(stub), str(notice_path)])
+    monkeypatch.setattr("sys.argv", ["rerun", "--runs", "1", "--repo", "fx-code", "--job", "services/fx-code-unittest", "--build", "5088", "--branch", "origin/dev", "--base-commit", "base", "--head-commit", "head", "--console-file", str(console), "--out-dir", str(out_dir)])
+    assert rerun_analyze_local.main() == 0
+    row = json.loads((out_dir / "summary.json").read_text(encoding="utf-8"))[0]
+    assert row["status"] == "OK" and row["noticeValid"] is True
+    assert (out_dir / "run-01" / "command.txt").exists()
+
+
+def test_rerun_main_real_subprocess_missing_notice(tmp_path, monkeypatch):
+    console = tmp_path / "console.log"
+    console.write_text("Finished: FAILURE\n", encoding="utf-8")
+    out_dir, stub = tmp_path / "runs", tmp_path / "stub.py"
+    stub.write_text("print('no notice')\n", encoding="utf-8")
+    monkeypatch.setattr(rerun_analyze_local, "build_command", lambda args, notice_path=None: [sys.executable, str(stub)])
+    monkeypatch.setattr("sys.argv", ["rerun", "--runs", "1", "--repo", "fx-code", "--job", "services/fx-code-unittest", "--build", "5088", "--branch", "dev", "--base-commit", "base", "--head-commit", "head", "--console-file", str(console), "--out-dir", str(out_dir)])
+    assert rerun_analyze_local.main() == 1
+    row = json.loads((out_dir / "summary.json").read_text(encoding="utf-8"))[0]
+    assert row["errorKind"] == "notice_missing" and row["noticeValid"] is False

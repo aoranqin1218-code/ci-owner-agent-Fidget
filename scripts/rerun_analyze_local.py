@@ -31,7 +31,7 @@ SUMMARY_FIELDS = [
     "totalTokens", "tokenWarning", "stageCount", "traceOk", "traceUrl", "traceError", "stdoutFile",
     "noticeFile", "stderrFile", "metricsFile", "traceFile", "traceSummaryFile", "traceChildRunCount",
     "traceToolRunCount", "traceLlmRunCount", "traceUsageDictCount",
-    "terminationWarning", "cleanupWarning",
+    "terminationReaped", "terminationWarning", "cleanupWarning",
 ]
 
 
@@ -39,6 +39,14 @@ SUMMARY_FIELDS = [
 class ProcessTerminationResult:
     reaped: bool
     warning: str | None = None
+
+
+class RunPreparationError(RuntimeError):
+    pass
+
+
+class RunCleanupError(RuntimeError):
+    pass
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -191,15 +199,24 @@ def prepare_run(*, run_index: int, args: argparse.Namespace, console_file: Path,
         "command_file": run_dir / "command.txt", "trace_file": run_dir / "trace.json",
         "trace_summary_file": run_dir / "trace-summary.json",
     }
-    run_dir.mkdir(parents=True, exist_ok=True)
-    warnings = cleanup_previous_outputs(list(paths.values()))
+    try:
+        run_dir.mkdir(parents=True, exist_ok=True)
+    except Exception as exc:
+        raise RunPreparationError(f"run directory creation failed: {exc}") from exc
+    try:
+        warnings = cleanup_previous_outputs(list(paths.values()))
+    except Exception as exc:
+        raise RunCleanupError(f"output cleanup failed: {exc}") from exc
     if warnings:
-        raise RuntimeError("cleanup: " + "; ".join(warnings))
-    run_args = argparse.Namespace(**vars(args))
-    run_args.console_file = str(console_file)
-    command = build_command(run_args, paths["notice_file"])
-    paths["command_file"].write_text(" ".join(f'"{part}"' if " " in part else part for part in command), encoding="utf-8")
-    env = build_subprocess_env()
+        raise RunCleanupError("; ".join(warnings))
+    try:
+        run_args = argparse.Namespace(**vars(args))
+        run_args.console_file = str(console_file)
+        command = build_command(run_args, paths["notice_file"])
+        paths["command_file"].write_text(" ".join(f'"{part}"' if " " in part else part for part in command), encoding="utf-8")
+        env = build_subprocess_env()
+    except Exception as exc:
+        raise RunPreparationError(f"run preparation failed: {exc}") from exc
     env["CI_AGENT_METRICS_ENABLED"] = "true"
     env["CI_AGENT_METRICS_FILE"] = str(paths["metrics_file"])
     if not args.notify:
@@ -687,9 +704,9 @@ def main() -> int:
         try:
             prepared = prepare_run(run_index=run_index, args=args, console_file=console_file, out_dir=out_dir, project_name=project_name)
             run_command, env = prepared["command"], prepared["env"]
-        except Exception as exc:
+        except (RunCleanupError, RunPreparationError) as exc:
             message = f"{type(exc).__name__}: {exc}"
-            kind = "cleanup" if str(exc).startswith("cleanup:") else "prepare"
+            kind = "cleanup" if isinstance(exc, RunCleanupError) else "prepare"
             rows.append({"run": run_index, "status": "FAILED", "errorKind": kind, "error": message,
                          "noticeValid": False, "noticeValidationError": f"{kind} failed",
                          "stdoutFile": str(stdout_file), "stderrFile": str(stderr_file), "noticeFile": str(notice_file),
@@ -706,6 +723,7 @@ def main() -> int:
         started_at = dt.datetime.now(dt.timezone.utc)
         started = time.perf_counter()
         termination_warning: str | None = None
+        termination_reaped: bool | None = None
 
         try:
             with stdout_file.open("w", encoding="utf-8", errors="replace") as stdout_fp, stderr_file.open(
@@ -730,7 +748,9 @@ def main() -> int:
                 except subprocess.TimeoutExpired:
                     timed_out = True
                     exit_code = None
-                    termination_warning = terminate_timed_out_process(process).warning
+                    termination_result = terminate_timed_out_process(process)
+                    termination_reaped = termination_result.reaped
+                    termination_warning = termination_result.warning
         except Exception as exc:
             duration_sec = round(time.perf_counter() - started, 3)
             rows.append({
@@ -757,7 +777,7 @@ def main() -> int:
             error_kind, error = "execution", f"analyze-local exited with {exit_code}"
 
         trace_result: dict[str, Any] | None = None
-        if args.fetch_trace:
+        if args.fetch_trace and not timed_out:
             trace_result = fetch_langsmith_trace(
                 job=args.job,
                 repo=args.repo,
@@ -771,8 +791,8 @@ def main() -> int:
                 wait_seconds=args.trace_wait_sec,
             )
 
-        metrics = read_last_jsonl(metrics_file)
-        notice, read_error = read_notice(notice_file)
+        metrics = None if timed_out else read_last_jsonl(metrics_file)
+        notice, read_error = (None, "analysis outputs are untrusted because execution timed out") if timed_out else read_notice(notice_file)
         notice_error = read_error or validate_notice(notice, args)
         if not timed_out and exit_code == 0 and notice_error:
             status = "FAILED"
@@ -802,7 +822,7 @@ def main() -> int:
             "traceError": trace_result.get("error") if trace_result and not trace_result.get("ok") else None,
             "stdoutFile": str(stdout_file),
             "noticeFile": str(notice_file),
-            "noticeValid": notice_error is None,
+            "noticeValid": False if timed_out else notice_error is None,
             "noticeValidationError": notice_error,
             "errorKind": error_kind,
             "error": error,
@@ -811,6 +831,7 @@ def main() -> int:
             "traceFile": str(trace_file) if args.fetch_trace else None,
             "traceSummaryFile": str(trace_summary_file) if args.fetch_trace else None,
             "terminationWarning": termination_warning,
+            "terminationReaped": termination_reaped,
         }
 
         rows.append(row)
