@@ -5,7 +5,6 @@ import csv
 import io
 import json
 import logging
-import os
 import sys
 from contextlib import nullcontext
 from pathlib import Path
@@ -155,25 +154,6 @@ def main(argv: list[str] | None = None) -> int:
     except SystemExit as exc:
         return int(exc.code or 0)
     if args.command == "analyze-local":
-        fake_mode = os.environ.get("CI_AGENT_TEST_FAKE_ANALYZE_LOCAL_MODE") if os.environ.get("PYTEST_CURRENT_TEST") else None
-        if fake_mode:
-            diagnostic = os.environ.get("CI_AGENT_TEST_DIAGNOSTIC_FILE")
-            if diagnostic:
-                Path(diagnostic).write_text(json.dumps({"cwd": os.getcwd(), "pythonpath": os.environ.get("PYTHONPATH", "")}), encoding="utf-8")
-            if fake_mode == "missing_notice":
-                return 0
-            if fake_mode in {"invalid_json", "invalid_schema"}:
-                if args.output_file:
-                    Path(args.output_file).write_text("{invalid" if fake_mode == "invalid_json" else '{"repo":"fx-code"}', encoding="utf-8")
-                return 0
-            notice = failure_without_context(
-                BuildInfo(job=args.job, buildNumber=args.build, result=args.result or "UNKNOWN", buildUrl=args.build_url,
-                          branch=args.branch, commit=args.head_commit),
-                args.base_commit, "test-only fake analyze-local", repo=args.repo,
-            )
-            _emit_json(notice, args.output_file)
-            print('{"unrelated": true}')
-            return 3 if fake_mode == "nonzero" else 0
         if args.build_timestamp:
             try:
                 args.build_timestamp = parse_aware_datetime(args.build_timestamp).isoformat()

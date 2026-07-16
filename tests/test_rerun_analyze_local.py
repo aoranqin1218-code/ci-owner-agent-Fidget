@@ -2,9 +2,25 @@ import argparse
 import json
 import subprocess
 import pytest
+import os
+import sys
+from pathlib import Path
 from ci_owner_agent.schemas import CiResponsibilityNotice, Owner
 from scripts import rerun_analyze_local
 from scripts.rerun_analyze_local import build_command, read_notice, terminate_timed_out_process, validate_notice
+
+FIXTURE = Path(__file__).parent / "fixtures" / "fake_analyze_launcher.py"
+
+
+def make_fake_python(tmp_path: Path) -> Path:
+    if os.name == "nt":
+        launcher = tmp_path / "fake-python.cmd"
+        launcher.write_text(f'@"{sys.executable}" "{FIXTURE}" %*\r\n', encoding="utf-8")
+    else:
+        launcher = tmp_path / "fake-python"
+        launcher.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{FIXTURE}" "$@"\n', encoding="utf-8")
+        launcher.chmod(0o755)
+    return launcher
 
 
 def make_notice() -> CiResponsibilityNotice:
@@ -181,8 +197,8 @@ def test_rerun_main_real_subprocess_success(tmp_path, monkeypatch):
     console = tmp_path / "console.log"
     console.write_text("Finished: FAILURE\n", encoding="utf-8")
     out_dir = tmp_path / "runs"
-    monkeypatch.setenv("CI_AGENT_TEST_FAKE_ANALYZE_LOCAL_MODE", "success")
-    monkeypatch.setattr("sys.argv", ["rerun", "--runs", "1", "--repo", "fx-code", "--job", "services/fx-code-unittest", "--build", "5088", "--branch", "origin/dev", "--base-commit", "base", "--head-commit", "head", "--console-file", str(console), "--out-dir", str(out_dir)])
+    monkeypatch.setenv("FAKE_ANALYZE_MODE", "success")
+    monkeypatch.setattr("sys.argv", ["rerun", "--runs", "1", "--python", str(make_fake_python(tmp_path)), "--repo", "fx-code", "--job", "services/fx-code-unittest", "--build", "5088", "--branch", "origin/dev", "--base-commit", "base", "--head-commit", "head", "--console-file", str(console), "--out-dir", str(out_dir)])
     assert rerun_analyze_local.main() == 0
     row = json.loads((out_dir / "summary.json").read_text(encoding="utf-8"))[0]
     assert row["status"] == "OK" and row["noticeValid"] is True
@@ -195,8 +211,8 @@ def test_rerun_main_real_subprocess_missing_notice(tmp_path, monkeypatch):
     console = tmp_path / "console.log"
     console.write_text("Finished: FAILURE\n", encoding="utf-8")
     out_dir = tmp_path / "runs"
-    monkeypatch.setenv("CI_AGENT_TEST_FAKE_ANALYZE_LOCAL_MODE", "missing_notice")
-    monkeypatch.setattr("sys.argv", ["rerun", "--runs", "1", "--repo", "fx-code", "--job", "services/fx-code-unittest", "--build", "5088", "--branch", "dev", "--base-commit", "base", "--head-commit", "head", "--console-file", str(console), "--out-dir", str(out_dir)])
+    monkeypatch.setenv("FAKE_ANALYZE_MODE", "missing_notice")
+    monkeypatch.setattr("sys.argv", ["rerun", "--runs", "1", "--python", str(make_fake_python(tmp_path)), "--repo", "fx-code", "--job", "services/fx-code-unittest", "--build", "5088", "--branch", "dev", "--base-commit", "base", "--head-commit", "head", "--console-file", str(console), "--out-dir", str(out_dir)])
     assert rerun_analyze_local.main() == 1
     row = json.loads((out_dir / "summary.json").read_text(encoding="utf-8"))[0]
     assert row["errorKind"] == "notice_missing" and row["noticeValid"] is False
@@ -207,8 +223,8 @@ def test_rerun_real_cli_failure_modes(tmp_path, monkeypatch, mode, error_kind):
     console = tmp_path / "console.log"
     console.write_text("Finished: FAILURE\n", encoding="utf-8")
     out_dir = tmp_path / "runs"
-    monkeypatch.setenv("CI_AGENT_TEST_FAKE_ANALYZE_LOCAL_MODE", mode)
-    monkeypatch.setattr("sys.argv", ["rerun", "--runs", "1", "--repo", "fx-code", "--job", "services/fx-code-unittest", "--build", "5088", "--branch", "dev", "--base-commit", "base", "--head-commit", "head", "--console-file", str(console), "--out-dir", str(out_dir)])
+    monkeypatch.setenv("FAKE_ANALYZE_MODE", mode)
+    monkeypatch.setattr("sys.argv", ["rerun", "--runs", "1", "--python", str(make_fake_python(tmp_path)), "--repo", "fx-code", "--job", "services/fx-code-unittest", "--build", "5088", "--branch", "dev", "--base-commit", "base", "--head-commit", "head", "--console-file", str(console), "--out-dir", str(out_dir)])
     assert rerun_analyze_local.main() == 1
     row = json.loads((out_dir / "summary.json").read_text(encoding="utf-8"))[0]
     assert row["status"] == "FAILED" and row["errorKind"] == error_kind
