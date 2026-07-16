@@ -4,6 +4,7 @@ import argparse
 import csv
 import io
 import json
+import logging
 import sys
 from contextlib import nullcontext
 from pathlib import Path
@@ -21,7 +22,7 @@ from ci_owner_agent.services.metrics import AnalysisMetricsRecorder, current_met
 from ci_owner_agent.services.notification_formatter import format_wecom_markdown_notice, notification_digest
 from ci_owner_agent.services.test_maintainer_mapping import TestMaintainerResolver
 from ci_owner_agent.services.wecom_mongo_user_mapping import build_wecom_notice_mapper
-from ci_owner_agent.services.wecom_notifier import send_wecom_markdown
+from ci_owner_agent.services.wecom_notification_outbox import WeComNotificationOutbox
 from ci_owner_agent.services.test_failure_stats import TestFailureStatsService
 from ci_owner_agent.services.weekly_test_report_config import load_weekly_test_report_config, parse_aware_datetime, resolve_period
 from ci_owner_agent.services.weekly_test_report_service import WeeklyTestReportService
@@ -217,18 +218,25 @@ def main(argv: list[str] | None = None) -> int:
         resolver = TestMaintainerResolver.from_yaml(settings.test_maintainer_mapping_file)
         service = WeeklyTestReportService(store, config, resolver=resolver,
                                           fallback_userids=settings.wecom_fallback_userids,
-                                          webhook_url=settings.wecom_webhook_url,
+                                          notification_chat_id=settings.wecom_bot_notify_chat_id,
+                                          notification_dedup_enabled=settings.notification_dedup_enabled,
+                                          outbox_lease_seconds=settings.wecom_bot_notify_lease_seconds,
+                                          outbox_max_attempts=settings.wecom_bot_notify_max_attempts,
                                           mention_mode=settings.wecom_mention_mode)
         report = service.generate(repo=args.repo, jobs=jobs, branches=branches, period_start=period_start,
                                   period_end=period_end, top_n=args.top)
         print(report["markdown"])
         if args.notify or args.dry_run:
-            result = service.notify(report, repo=args.repo, jobs=jobs, branches=branches, period_start=period_start,
-                                    period_end=period_end, dry_run=args.dry_run, force=args.force)
+            try:
+                result = service.notify(report, repo=args.repo, jobs=jobs, branches=branches, period_start=period_start,
+                                        period_end=period_end, dry_run=args.dry_run, force=args.force)
+            except Exception:
+                print("ERROR: weekly report notification failed unexpectedly", file=sys.stderr)
+                return 2
             if not result.get("ok"):
                 print(f"ERROR: weekly report notification failed: {result.get('error')}", file=sys.stderr)
                 return 2
-            if result.get("reason"):
+            if result.get("reason") or result.get("status"):
                 print(json.dumps({k: v for k, v in result.items() if k != "markdown"}, ensure_ascii=False))
         return 0
     if args.command == "analyze":
@@ -302,13 +310,16 @@ def main(argv: list[str] | None = None) -> int:
                 force=args.force,
                 feedback_base_url=args.feedback_base_url or settings.feedback_base_url,
             )
-        except Exception as exc:
-            print(f"ERROR: notify failed unexpectedly: {exc}", file=sys.stderr)
+        except Exception:
+            print("ERROR: notify failed unexpectedly", file=sys.stderr)
             return 2
         if dry_run:
             print(result["markdown"])
         elif not result.get("ok"):
             print(f"WARNING: notify failed: {result.get('error')}", file=sys.stderr)
+            return 2
+        else:
+            print(json.dumps({key: result.get(key) for key in ("ok", "status", "inserted", "deliveryKey")}, ensure_ascii=False))
         return 0
     if args.command == "feedback":
         store = get_history_store(settings)
@@ -380,6 +391,9 @@ def main(argv: list[str] | None = None) -> int:
         if not secret:
             print("ERROR: Secret is required (--secret or CI_AGENT_WECOM_BOT_SECRET)", file=sys.stderr)
             return 2
+        if settings.wecom_notify_enabled and not settings.wecom_bot_notify_chat_id:
+            print("ERROR: CI_AGENT_WECOM_BOT_NOTIFY_CHAT_ID is required when notifications are enabled", file=sys.stderr)
+            return 2
         store = get_history_store(settings)
         if store is None:
             print("ERROR: MongoDB history storage is unavailable", file=sys.stderr)
@@ -412,6 +426,11 @@ def main(argv: list[str] | None = None) -> int:
             event_ttl_days=settings.wecom_bot_event_ttl_days,
             ai_parser=ai_parser,
             card_action_url=card_action_url,
+            discover_chat_id=settings.wecom_bot_discover_chat_id,
+            notification_chat_id=settings.wecom_bot_notify_chat_id,
+            notification_poll_seconds=settings.wecom_bot_notify_poll_seconds,
+            notification_lease_seconds=settings.wecom_bot_notify_lease_seconds,
+            notification_max_attempts=settings.wecom_bot_notify_max_attempts,
         )
         try:
             worker.run()
@@ -463,8 +482,8 @@ def _maybe_notify_notice(notice: CiResponsibilityNotice, settings, cli_notify: b
         return
     try:
         result = _notify_notice(notice, settings, dry_run=cli_dry_run or settings.wecom_notify_dry_run, force=force, feedback_base_url=settings.feedback_base_url)
-    except Exception as exc:
-        print(f"WARNING: notify failed unexpectedly: {exc}", file=sys.stderr)
+    except Exception:
+        print("WARNING: notify failed unexpectedly", file=sys.stderr)
         return
     if not result.get("ok"):
         print(f"WARNING: notify failed: {result.get('error')}", file=sys.stderr)
@@ -515,7 +534,7 @@ def _notify_notice(notice: CiResponsibilityNotice, settings, *, dry_run: bool, f
                 context = FeedbackContextStore(store, settings.wecom_feedback_code_ttl_days).get_or_create_for_notice(notice)
                 feedback_code = context.get("code") if context else None
             except Exception as exc:
-                print(f"WARNING: feedback context unavailable: {exc}", file=sys.stderr)
+                print(f"WARNING: feedback context unavailable: {type(exc).__name__}", file=sys.stderr)
         markdown = format_wecom_markdown_notice(
             notice,
             feedback_base_url=feedback_base_url,
@@ -534,29 +553,31 @@ def _notify_notice(notice: CiResponsibilityNotice, settings, *, dry_run: bool, f
             fallback_userids=settings.wecom_fallback_userids,
             mention_mode=settings.wecom_mention_mode,
         )
-        if store and settings.notification_dedup_enabled and not force and store.notification_sent(
-            repo=str(notice.repo or ""), job=notice.job, branch=notice.branch, build_number=notice.buildNumber, notice_hash=digest
-        ):
-            return {"ok": True, "status": "skipped", "markdown": markdown}
         if dry_run:
-            if store:
-                store.save_notification(notice=notice, notice_hash=digest, channel="wecom", status="dry_run", message=markdown)
             return {"ok": True, "status": "dry_run", "markdown": markdown}
-        if not settings.wecom_webhook_url:
-            if store:
-                store.save_notification(notice=notice, notice_hash=digest, channel="wecom", status="failed", message=markdown, error="CI_AGENT_WECOM_WEBHOOK_URL is not configured")
-            return {"ok": False, "error": "CI_AGENT_WECOM_WEBHOOK_URL is not configured", "markdown": markdown}
-        send_result = send_wecom_markdown(settings.wecom_webhook_url, markdown)
-        if store:
-            store.save_notification(
-                notice=notice,
-                notice_hash=digest,
-                channel="wecom",
-                status="sent" if send_result.get("ok") else "failed",
-                message=markdown,
-                error=send_result.get("error"),
-            )
-        return {**send_result, "markdown": markdown}
+        if store is None:
+            return {"ok": False, "error": "MongoDB history storage is required for WeCom bot notifications", "markdown": markdown}
+        if not settings.wecom_bot_notify_chat_id:
+            return {"ok": False, "error": "CI_AGENT_WECOM_BOT_NOTIFY_CHAT_ID is not configured", "markdown": markdown}
+        dedup_key = json.dumps({"notificationType": "ci_notice", "repo": notice.repo or "", "job": notice.job,
+                                "branch": notice.branch, "buildNumber": notice.buildNumber, "notificationDigest": digest},
+                               ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        try:
+            queued = WeComNotificationOutbox(store, lease_seconds=settings.wecom_bot_notify_lease_seconds,
+                                             max_attempts=settings.wecom_bot_notify_max_attempts).enqueue_markdown(
+                notification_type="ci_notice", target_chat_id=settings.wecom_bot_notify_chat_id, markdown=markdown,
+                dedup_key=dedup_key, force=force or not settings.notification_dedup_enabled,
+                metadata={"repo": notice.repo or "", "job": notice.job, "branch": notice.branch,
+                          "buildNumber": notice.buildNumber, "noticeHash": digest})
+        except Exception as exc:
+            logging.getLogger(__name__).warning("WeCom notification enqueue failed: %s", type(exc).__name__)
+            return {"ok": False, "status": "enqueue_failed", "error": "notification outbox is unavailable"}
+        if not queued["inserted"] and queued["status"] == "dead":
+            return {"ok": False, "status": "dead", "inserted": False, "reason": "existing_dead_delivery",
+                    "error": "existing notification delivery is dead; retry with --force",
+                    "deliveryKey": queued["deliveryKey"], "markdown": markdown}
+        return {"ok": True, "status": queued["status"], "inserted": queued["inserted"],
+                "deliveryKey": queued["deliveryKey"], "markdown": markdown}
 
 
 def _add_weekly_scope_arguments(parser: argparse.ArgumentParser) -> None:

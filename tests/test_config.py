@@ -59,6 +59,9 @@ def test_wecom_fallback_userids_are_parsed_from_env(monkeypatch):
 def test_wecom_bot_defaults_disabled(monkeypatch):
     for name in ("CI_AGENT_WECOM_BOT_ENABLED", "CI_AGENT_WECOM_BOT_ID", "CI_AGENT_WECOM_BOT_SECRET"):
         monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("CI_AGENT_WECOM_BOT_ENABLED", "false")
+    monkeypatch.setenv("CI_AGENT_WECOM_BOT_ID", "")
+    monkeypatch.setenv("CI_AGENT_WECOM_BOT_SECRET", "")
     settings = load_settings()
     assert settings.wecom_bot_enabled is False
     assert settings.wecom_bot_id is None
@@ -78,3 +81,13 @@ def test_wecom_bot_settings_and_secret_redaction(monkeypatch):
     assert settings.wecom_feedback_code_ttl_days == 40
     assert settings.wecom_bot_event_ttl_days == 9
     assert public_settings(settings)["wecom_bot_secret"] == "***"
+
+
+def test_wecom_bot_chat_discovery_defaults_disabled(monkeypatch):
+    monkeypatch.setenv("CI_AGENT_WECOM_BOT_DISCOVER_CHAT_ID", "false")
+    assert load_settings().wecom_bot_discover_chat_id is False
+
+
+def test_wecom_bot_chat_discovery_enabled_from_env(monkeypatch):
+    monkeypatch.setenv("CI_AGENT_WECOM_BOT_DISCOVER_CHAT_ID", "true")
+    assert load_settings().wecom_bot_discover_chat_id is True

@@ -10,7 +10,9 @@ from ci_owner_agent.services.pending_feedback_store import WeComEventStore
 from ci_owner_agent.services.wecom_bot_adapter import WeComBotAdapterProtocol, fatal_sdk_error_reason
 from ci_owner_agent.services.wecom_feedback_ai_parser import WeComFeedbackAiParserProtocol
 from ci_owner_agent.services.wecom_feedback_service import WeComFeedbackService
+from ci_owner_agent.services.wecom_bot_models import WeComInboundMessage
 from ci_owner_agent.services.wecom_message_normalizer import normalize_wecom_text_frame, normalize_wecom_template_card_event
+from ci_owner_agent.services.wecom_notification_outbox import WeComNotificationOutbox
 
 
 class WeComBotWorker:
@@ -24,6 +26,11 @@ class WeComBotWorker:
         event_ttl_days: int = 7,
         ai_parser: WeComFeedbackAiParserProtocol | None = None,
         card_action_url: str | None = None,
+        discover_chat_id: bool = False,
+        notification_chat_id: str | None = None,
+        notification_poll_seconds: int = 2,
+        notification_lease_seconds: int = 30,
+        notification_max_attempts: int = 5,
     ) -> None:
         self.adapter = adapter
         self.events = WeComEventStore(history_store, event_ttl_days)
@@ -36,6 +43,13 @@ class WeComBotWorker:
         )
         self._stop_event: asyncio.Event | None = None
         self._fatal_error: BaseException | None = None
+        self.discover_chat_id = bool(discover_chat_id)
+        self._chat_id_discovered = False
+        self.notification_chat_id = (notification_chat_id or "").strip() or None
+        self.notification_poll_seconds = max(1, notification_poll_seconds)
+        self.notification_outbox = WeComNotificationOutbox(history_store, lease_seconds=notification_lease_seconds,
+                                                            max_attempts=notification_max_attempts)
+        self._notification_task: asyncio.Task[None] | None = None
         adapter.set_text_handler(self.handle_text_frame)
         adapter.set_template_card_event_handler(self.handle_template_card_event_frame)
         adapter.set_fatal_error_handler(self._handle_fatal_error)
@@ -59,11 +73,20 @@ class WeComBotWorker:
         try:
             if self._fatal_error is None:
                 await self.adapter.start()
+            if self._fatal_error is None and self.notification_chat_id:
+                self._notification_task = asyncio.create_task(self._notification_loop())
             if self._fatal_error is None:
                 await self._stop_event.wait()
         except BaseException as exc:
             run_error = exc
         finally:
+            if self._notification_task is not None:
+                self._notification_task.cancel()
+                try:
+                    await self._notification_task
+                except asyncio.CancelledError:
+                    pass
+                self._notification_task = None
             try:
                 await self.adapter.stop()
             except BaseException as exc:
@@ -92,12 +115,73 @@ class WeComBotWorker:
         if self._stop_event is not None:
             self._stop_event.set()
 
+    async def deliver_one_notification(self) -> bool:
+        item = await asyncio.to_thread(self.notification_outbox.claim_next)
+        if item is None:
+            return False
+        delivery_key, document_id, lease_token, chat_id, markdown = self._validate_notification_item(item)
+        target_matches = chat_id == self.notification_chat_id
+        if lease_token is None:
+            logging.getLogger(__name__).error("Invalid notification outbox item without lease token")
+            return True
+        if delivery_key is None or chat_id is None or markdown is None or not target_matches:
+            reason = "notification target does not match configured chat" if not target_matches else "invalid notification outbox item"
+            marked = await asyncio.to_thread(self.notification_outbox.mark_invalid_dead, lease_token=lease_token,
+                                              delivery_key=delivery_key, document_id=document_id, reason=reason)
+            logging.getLogger(__name__).warning("Invalid notification outbox item isolated" if marked else "notification lease lost")
+            return True
+        prefix = (delivery_key or "document")[:12]
+        try:
+            await self.adapter.send_markdown(chat_id, markdown)
+        except Exception as exc:
+            outcome = await asyncio.to_thread(self.notification_outbox.mark_failed, delivery_key=delivery_key,
+                                              lease_token=lease_token, error=exc)
+            logging.getLogger(__name__).warning("Notification %s %s attempt=%s", prefix, outcome, item.get("attemptCount"))
+            return True
+        sent = await asyncio.to_thread(self.notification_outbox.mark_sent, delivery_key=delivery_key, lease_token=lease_token)
+        if not sent:
+            logging.getLogger(__name__).warning("notification lease lost after send")
+        else:
+            logging.getLogger(__name__).info("Notification %s sent attempt=%s", prefix, item.get("attemptCount"))
+        return True
+
+    def _validate_notification_item(self, item: Mapping[str, Any]) -> tuple[str | None, Any | None, str | None, str | None, str | None]:
+        delivery_key = item.get("deliveryKey") if isinstance(item.get("deliveryKey"), str) and item.get("deliveryKey") else None
+        document_id = item.get("_id")
+        lease_token = item.get("leaseToken") if isinstance(item.get("leaseToken"), str) and item.get("leaseToken") else None
+        chat_id = item.get("targetChatId") if isinstance(item.get("targetChatId"), str) and item.get("targetChatId") else None
+        payload = item.get("payload")
+        markdown = payload.get("content") if isinstance(payload, Mapping) and isinstance(payload.get("content"), str) and payload.get("content") else None
+        if item.get("messageType") != "markdown" or not isinstance(item.get("notificationType"), str) or not item.get("notificationType"):
+            markdown = None
+        return delivery_key, document_id, lease_token, chat_id, markdown
+
+    async def _notification_loop(self) -> None:
+        logger = logging.getLogger(__name__)
+        while self._stop_event is not None and not self._stop_event.is_set():
+            try:
+                if await self.deliver_one_notification():
+                    continue
+                try:
+                    await asyncio.wait_for(self._stop_event.wait(), timeout=self.notification_poll_seconds)
+                except TimeoutError:
+                    pass
+            except asyncio.CancelledError:
+                return
+            except Exception as exc:
+                logger.error("Notification delivery loop failed: %s", type(exc).__name__)
+                try:
+                    await asyncio.wait_for(self._stop_event.wait(), timeout=self.notification_poll_seconds)
+                except TimeoutError:
+                    pass
+
     async def handle_text_frame(self, frame: Mapping[str, Any]) -> None:
         claim_token: str | None = None
         logger = logging.getLogger(__name__)
 
         try:
             message = normalize_wecom_text_frame(frame)
+            self._maybe_log_discovered_chat_id(message)
 
             claim_status, event = await asyncio.to_thread(
                 self.events.claim,
@@ -188,6 +272,17 @@ class WeComBotWorker:
             await self.adapter.reply_text(frame, reply)
         except Exception:
             logger.exception("Failed to reply to WeCom message")
+
+    def _maybe_log_discovered_chat_id(self, message: WeComInboundMessage) -> None:
+        chat_type = (message.chat_type or "").strip().lower()
+        if not self.discover_chat_id or self._chat_id_discovered or not message.chat_id:
+            return
+        if chat_type not in {"group", "group_chat"}:
+            return
+        self._chat_id_discovered = True
+        logging.getLogger(__name__).warning(
+            "WeCom group chat discovery: chat_type=%s chat_id=%s", chat_type, message.chat_id
+        )
 
     async def handle_template_card_event_frame(self, frame: Mapping[str, Any]) -> None:
         claim_token: str | None = None

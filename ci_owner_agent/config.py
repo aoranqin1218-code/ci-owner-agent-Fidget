@@ -46,7 +46,6 @@ class Settings:
     ai_history_max_fact_candidates: int
     ai_history_max_compare_calls: int
     wecom_notify_enabled: bool
-    wecom_webhook_url: str | None
     wecom_notify_dry_run: bool
     wecom_notify_on_success: bool
     wecom_notify_on_no_owner: bool
@@ -57,6 +56,11 @@ class Settings:
     wecom_bot_enabled: bool
     wecom_bot_id: str | None
     wecom_bot_secret: str | None
+    wecom_bot_discover_chat_id: bool
+    wecom_bot_notify_chat_id: str | None
+    wecom_bot_notify_poll_seconds: int
+    wecom_bot_notify_lease_seconds: int
+    wecom_bot_notify_max_attempts: int
     wecom_bot_confirm_ttl_seconds: int
     wecom_feedback_code_ttl_days: int
     wecom_bot_event_ttl_days: int
@@ -173,7 +177,6 @@ def load_settings(env_file: str | Path | None = None) -> Settings:
         ai_history_max_fact_candidates=_int_env_or_default("CI_AGENT_AI_HISTORY_MAX_FACT_CANDIDATES", 20),
         ai_history_max_compare_calls=_int_env_or_default("CI_AGENT_AI_HISTORY_MAX_COMPARE_CALLS", 20),
         wecom_notify_enabled=_bool_env("CI_AGENT_WECOM_NOTIFY_ENABLED", False),
-        wecom_webhook_url=os.getenv("CI_AGENT_WECOM_WEBHOOK_URL") or None,
         wecom_notify_dry_run=_bool_env("CI_AGENT_WECOM_NOTIFY_DRY_RUN", True),
         wecom_notify_on_success=_bool_env("CI_AGENT_WECOM_NOTIFY_ON_SUCCESS", False),
         wecom_notify_on_no_owner=_bool_env("CI_AGENT_WECOM_NOTIFY_ON_NO_OWNER", True),
@@ -188,6 +191,11 @@ def load_settings(env_file: str | Path | None = None) -> Settings:
         wecom_bot_enabled=_bool_env("CI_AGENT_WECOM_BOT_ENABLED", False),
         wecom_bot_id=os.getenv("CI_AGENT_WECOM_BOT_ID") or None,
         wecom_bot_secret=os.getenv("CI_AGENT_WECOM_BOT_SECRET") or None,
+        wecom_bot_discover_chat_id=_bool_env("CI_AGENT_WECOM_BOT_DISCOVER_CHAT_ID", False),
+        wecom_bot_notify_chat_id=(os.getenv("CI_AGENT_WECOM_BOT_NOTIFY_CHAT_ID") or "").strip() or None,
+        wecom_bot_notify_poll_seconds=_int_env("CI_AGENT_WECOM_BOT_NOTIFY_POLL_SECONDS", 2),
+        wecom_bot_notify_lease_seconds=_int_env("CI_AGENT_WECOM_BOT_NOTIFY_LEASE_SECONDS", 30),
+        wecom_bot_notify_max_attempts=_int_env("CI_AGENT_WECOM_BOT_NOTIFY_MAX_ATTEMPTS", 5),
         wecom_bot_confirm_ttl_seconds=_int_env("CI_AGENT_WECOM_BOT_CONFIRM_TTL_SECONDS", 300),
         wecom_feedback_code_ttl_days=_int_env("CI_AGENT_WECOM_FEEDBACK_CODE_TTL_DAYS", 30),
         wecom_bot_event_ttl_days=_int_env("CI_AGENT_WECOM_BOT_EVENT_TTL_DAYS", 7),
@@ -226,9 +234,9 @@ def public_settings(settings: Settings) -> dict[str, object]:
     data["jenkins_token"] = "***" if settings.jenkins_token else None
     data["api_key"] = "***" if settings.api_key else None
     data["langsmith_api_key"] = "***" if settings.langsmith_api_key else None
-    data["wecom_webhook_url"] = "***" if settings.wecom_webhook_url else None
     data["feedback_shared_token"] = "***" if settings.feedback_shared_token else None
     data["wecom_bot_secret"] = "***" if settings.wecom_bot_secret else None
+    data["wecom_bot_notify_chat_id"] = "***" if settings.wecom_bot_notify_chat_id else None
     data["wecom_bot_llm_max_input_chars"] = settings.wecom_bot_llm_max_input_chars
     data["repo_cache_dir"] = str(settings.repo_cache_dir)
     data["ts_analyzer_dir"] = str(settings.ts_analyzer_dir)

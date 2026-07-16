@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 
 def _isolated_subprocess_env() -> dict[str, str]:
@@ -20,7 +21,6 @@ def _isolated_subprocess_env() -> dict[str, str]:
             "CI_AGENT_HISTORY_MONGO_URI": "",
             "CI_AGENT_HISTORY_MONGO_DB": "",
             "CI_AGENT_WECOM_NOTIFY_ENABLED": "false",
-            "CI_AGENT_WECOM_WEBHOOK_URL": "",
             "CI_AGENT_WECOM_BOT_ENABLED": "false",
     "CI_AGENT_WECOM_BOT_LLM_ENABLED": "false",
     "CI_AGENT_WECOM_BOT_LLM_MAX_INPUT_CHARS": "2000",
@@ -118,7 +118,6 @@ def test_isolated_subprocess_env_blocks_dangerous_config(monkeypatch):
     monkeypatch.setenv("CI_AGENT_HISTORY_ENABLED", "true")
     monkeypatch.setenv("CI_AGENT_HISTORY_MONGO_URI", "mongodb://real-or-invalid-host")
     monkeypatch.setenv("CI_AGENT_WECOM_NOTIFY_ENABLED", "true")
-    monkeypatch.setenv("CI_AGENT_WECOM_WEBHOOK_URL", "https://example.invalid/webhook")
     monkeypatch.setenv("CI_AGENT_MODEL_PROVIDER", "openai-compatible")
     monkeypatch.setenv("CI_AGENT_API_KEY", "secret")
     monkeypatch.setenv("LANGSMITH_TRACING", "true")
@@ -136,7 +135,6 @@ def test_isolated_subprocess_env_blocks_dangerous_config(monkeypatch):
     assert env["JENKINS_URL"] == ""
     assert env["CI_AGENT_API_KEY"] == ""
     assert env["CI_AGENT_HISTORY_MONGO_URI"] == ""
-    assert env["CI_AGENT_WECOM_WEBHOOK_URL"] == ""
     assert env["LANGSMITH_TRACING"] == "false"
     assert env["LANGSMITH_API_KEY"] == ""
     assert env["LANGSMITH_PROJECT"] == ""
@@ -434,8 +432,9 @@ def test_serve_wecom_bot_passes_ai_parser_to_worker(monkeypatch):
     )
 
     class FakeWorker:
-        def __init__(self, adapter, store, *, confirm_ttl_seconds=300, feedback_code_ttl_days=30, event_ttl_days=7, ai_parser=None, card_action_url=None):
-            captured["ai_parser"] = ai_parser
+        def __init__(self, adapter, store, **kwargs):
+            captured["ai_parser"] = kwargs["ai_parser"]
+            captured["discover_chat_id"] = kwargs["discover_chat_id"]
         def run(self):
             pass
 
@@ -447,6 +446,7 @@ def test_serve_wecom_bot_passes_ai_parser_to_worker(monkeypatch):
     monkeypatch.setenv("CI_AGENT_HISTORY_ENABLED", "true")
     monkeypatch.setenv("CI_AGENT_WECOM_BOT_ENABLED", "true")
     monkeypatch.setenv("CI_AGENT_WECOM_BOT_LLM_ENABLED", "true")
+    monkeypatch.setenv("CI_AGENT_WECOM_NOTIFY_ENABLED", "false")
 
     result = main([
         "serve-wecom-bot",
@@ -458,3 +458,39 @@ def test_serve_wecom_bot_passes_ai_parser_to_worker(monkeypatch):
 
     assert result == 0
     assert captured.get("ai_parser") is sentinel_parser
+    assert captured.get("discover_chat_id") is False
+
+
+def test_weekly_notify_outbox_exception_returns_2_without_traceback(monkeypatch, capsys):
+    from ci_owner_agent.main import main
+
+    settings = SimpleNamespace(
+        history_enabled=True,
+        test_maintainer_mapping_file=None,
+        wecom_fallback_userids=(),
+        wecom_bot_notify_chat_id="chat",
+        notification_dedup_enabled=True,
+        wecom_bot_notify_lease_seconds=30,
+        wecom_bot_notify_max_attempts=5,
+        wecom_mention_mode="userid",
+        weekly_test_report_config_file="unused.yml",
+    )
+    config = SimpleNamespace(timezone="UTC", topN=10)
+
+    class FakeService:
+        def __init__(self, *args, **kwargs):
+            pass
+        def generate(self, **kwargs):
+            return {"markdown": "safe weekly report"}
+        def notify(self, *args, **kwargs):
+            raise RuntimeError("mongodb://user:password@secret-host")
+
+    monkeypatch.setattr("ci_owner_agent.main.load_settings", lambda: settings)
+    monkeypatch.setattr("ci_owner_agent.main.get_history_store", lambda _: object())
+    monkeypatch.setattr("ci_owner_agent.main.load_weekly_test_report_config", lambda _: config)
+    monkeypatch.setattr("ci_owner_agent.main.resolve_period", lambda **_: (None, None))
+    monkeypatch.setattr("ci_owner_agent.main.WeeklyTestReportService", FakeService)
+    assert main(["weekly-test-report", "--repo", "r", "--notify"]) == 2
+    captured = capsys.readouterr()
+    assert "weekly report notification failed unexpectedly" in captured.err
+    assert "Traceback" not in captured.err and "password" not in captured.err and "secret-host" not in captured.out

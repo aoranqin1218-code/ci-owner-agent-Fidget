@@ -1,3 +1,5 @@
+> Archive: historical implementation notes; webhook references below are obsolete.
+
 当前状态：
 - analyze / analyze-local 已能生成 CiResponsibilityNotice。
 - 企业微信 markdown 通知已实现并真实发送成功。
@@ -364,7 +366,7 @@ CI_AGENT_HISTORY_MONGO_DB=ci_owner_agent
 
 CI_AGENT_WECOM_NOTIFY_ENABLED=true
 CI_AGENT_WECOM_NOTIFY_DRY_RUN=false
-CI_AGENT_WECOM_WEBHOOK_URL=******
+[obsolete webhook environment variable]=******
 CI_AGENT_WECOM_NOTIFY_ON_SUCCESS=false
 CI_AGENT_WECOM_NOTIFY_ON_NO_OWNER=true
 CI_AGENT_NOTIFICATION_DEDUP_ENABLED=true

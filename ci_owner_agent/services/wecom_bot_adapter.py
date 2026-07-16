@@ -20,6 +20,7 @@ class WeComBotAdapterProtocol(Protocol):
     def set_fatal_error_handler(self, handler: FatalErrorHandler) -> None: ...
     async def start(self) -> None: ...
     async def stop(self) -> None: ...
+    async def send_markdown(self, chat_id: str, markdown: str) -> Any: ...
     async def reply_text(self, frame: Mapping[str, Any], text: str) -> None: ...
     async def reply_template_card(self, frame: Mapping[str, Any], template_card: dict[str, Any]) -> None: ...
     async def update_template_card(
@@ -30,7 +31,8 @@ class WeComBotAdapterProtocol(Protocol):
 class WeComSdkAdapter:
     """Thin adapter around the optional official SDK; no feedback business logic lives here."""
 
-    def __init__(self, bot_id: str, secret: str, *, close_timeout_seconds: float = 5.0) -> None:
+    def __init__(self, bot_id: str, secret: str, *, close_timeout_seconds: float = 5.0,
+                 authentication_timeout_seconds: float = 15.0) -> None:
         try:
             from aibot import WSClient, WSClientOptions, generate_req_id
         except ImportError as exc:
@@ -43,11 +45,13 @@ class WeComSdkAdapter:
         self._card_handler: TemplateCardEventHandler | None = None
         self._fatal_error_handler: FatalErrorHandler | None = None
         self._close_timeout_seconds = max(0.0, float(close_timeout_seconds))
+        self._authentication_timeout_seconds = max(0.1, float(authentication_timeout_seconds))
+        self._authenticated_event = asyncio.Event()
         self._client.on("message.text", self._on_text)
         self._client.on("event.template_card_event", self._on_template_card_event)
         self._client.on("connected", lambda: logging.getLogger(__name__).info("WeCom bot connected"))
-        self._client.on("authenticated", lambda: logging.getLogger(__name__).info("WeCom bot authenticated"))
-        self._client.on("disconnected", lambda reason: logging.getLogger(__name__).warning("WeCom bot disconnected: %s", reason))
+        self._client.on("authenticated", self._on_authenticated)
+        self._client.on("disconnected", self._on_disconnected)
         self._client.on("reconnecting", lambda attempt: logging.getLogger(__name__).info("WeCom bot reconnecting: attempt %s", attempt))
         self._client.on("error", self._on_sdk_error)
 
@@ -63,11 +67,20 @@ class WeComSdkAdapter:
     def _on_sdk_error(self, error: BaseException) -> None:
         logger = logging.getLogger(__name__)
         if is_fatal_sdk_error(error):
+            self._authenticated_event.clear()
             logger.error("WeCom bot fatal SDK error: %s", fatal_sdk_error_reason(error))
             if self._fatal_error_handler is not None:
                 self._fatal_error_handler(error)
             return
-        logger.warning("WeCom bot recoverable SDK error: %s", error)
+        logger.warning("WeCom bot recoverable SDK error")
+
+    def _on_authenticated(self, *args: Any) -> None:
+        self._authenticated_event.set()
+        logging.getLogger(__name__).info("WeCom bot authenticated")
+
+    def _on_disconnected(self, reason: Any = None) -> None:
+        self._authenticated_event.clear()
+        logging.getLogger(__name__).warning("WeCom bot disconnected")
 
     async def _on_text(self, frame: Mapping[str, Any]) -> None:
         if self._text_handler is not None:
@@ -81,6 +94,7 @@ class WeComSdkAdapter:
         await self._client.connect()
 
     async def stop(self) -> None:
+        self._authenticated_event.clear()
         result = self._client.disconnect()
         if inspect.isawaitable(result):
             await result
@@ -98,6 +112,21 @@ class WeComSdkAdapter:
     async def reply_text(self, frame: Mapping[str, Any], text: str) -> None:
         stream_id = self._generate_req_id("stream")
         await self._client.reply_stream(frame, stream_id, text, True)
+
+    async def send_markdown(self, chat_id: str, markdown: str) -> Any:
+        event = getattr(self, "_authenticated_event", None)
+        if event is None:
+            event = self._authenticated_event = asyncio.Event()
+        timeout = getattr(self, "_authentication_timeout_seconds", 15.0)
+        try:
+            await asyncio.wait_for(event.wait(), timeout=timeout)
+        except TimeoutError as exc:
+            raise TimeoutError("WeCom bot authentication is not ready") from exc
+        result = await self._client.send_message(chat_id, {"msgtype": "markdown", "markdown": {"content": markdown}})
+        if isinstance(result, Mapping) and result.get("errcode") not in (None, 0):
+            message = "WeCom proactive send failed: errcode=%s" % result.get("errcode")
+            raise RuntimeError(message)
+        return result
 
     async def reply_template_card(self, frame: Mapping[str, Any], template_card: dict[str, Any]) -> None:
         await self._client.reply_template_card(frame, template_card)
@@ -140,13 +169,13 @@ class _SdkLogger:
     """SDK logger that deliberately never serializes raw frames or credentials."""
 
     def debug(self, message: str, *args: Any) -> None:
-        logging.getLogger(__name__).debug("%s", message)
+        return
 
     def info(self, message: str, *args: Any) -> None:
-        logging.getLogger(__name__).info("%s", message)
+        return
 
     def warn(self, message: str, *args: Any) -> None:
-        logging.getLogger(__name__).warning("%s", message)
+        logging.getLogger(__name__).warning("WeCom SDK warning")
 
     def error(self, message: str, *args: Any) -> None:
-        logging.getLogger(__name__).error("%s", message)
+        logging.getLogger(__name__).error("WeCom SDK error")

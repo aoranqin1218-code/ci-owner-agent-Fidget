@@ -70,7 +70,7 @@ Jenkins / 本地日志
 - `ci_failure_chunks`：结构化失败摘要。
 - `ci_failure_facts`：AI 提取的失败事实。
 - `ci_feedback`：人工反馈。
-- `ci_notifications`：通知发送记录。
+- `ci_wecom_notification_outbox`：企业微信主动通知 Outbox（pending/sending/retry/sent/dead）。
 - `ci_wecom_users`：企业微信用户映射。
 - `ci_feedback_contexts`：构建反馈码及责任项上下文（默认 30 天 TTL）。
 - `ci_wecom_pending_feedback`：等待二次确认的群内反馈（默认 5 分钟 TTL）。
@@ -343,7 +343,6 @@ CI_AGENT_METRICS_FILE=./runs/metrics/ci_analysis_metrics.jsonl
 
 ```env
 CI_AGENT_WECOM_NOTIFY_ENABLED=false
-CI_AGENT_WECOM_WEBHOOK_URL=
 CI_AGENT_WECOM_NOTIFY_DRY_RUN=true
 CI_AGENT_WECOM_NOTIFY_ON_SUCCESS=false
 CI_AGENT_WECOM_NOTIFY_ON_NO_OWNER=true
@@ -358,7 +357,7 @@ CI_AGENT_NOTIFICATION_DEDUP_ENABLED=true
 | 配置 | 说明 |
 | --- | --- |
 | `CI_AGENT_WECOM_NOTIFY_ENABLED` | 是否默认发送企业微信通知。 |
-| `CI_AGENT_WECOM_WEBHOOK_URL` | 企业微信群机器人 webhook。 |
+| `CI_AGENT_WECOM_BOT_NOTIFY_CHAT_ID` | 唯一的企业微信群 chatid；仅在通知开启时必填。 |
 | `CI_AGENT_WECOM_NOTIFY_DRY_RUN` | dry-run 时只生成 markdown，不真正发送。 |
 | `CI_AGENT_WECOM_NOTIFY_ON_SUCCESS` | 是否通知成功构建。默认 false。 |
 | `CI_AGENT_WECOM_NOTIFY_ON_NO_OWNER` | 无高可信责任人时是否仍通知。 |
@@ -837,8 +836,8 @@ python scripts/backfill_test_file_failures.py --repo fx-code `
   --job services/fx-code-unittest --branch dev --dry-run
 ```
 
-周报发送记录独立保存在 `ci_report_notifications`，同一周期、范围和渠道默认只发送一次；使用
-`weekly-test-report --force --notify` 可重发，`--dry-run` 不调用 webhook，也不写成功发送记录。
+普通通知和周报都会写入 `ci_wecom_notification_outbox`；同一内容默认按 deliveryKey 去重，使用
+`weekly-test-report --force --notify` 可重新排队，`--dry-run` 不入队。
 历史回填只读取已有 notice、失败块和构建记录，不调用 LLM；确认 dry-run 结果后去掉 `--dry-run`，需要替换旧事件时加 `--overwrite`。
 
 Jenkins 可由外部调度器每周触发（Python 进程本身不常驻调度）：
@@ -855,10 +854,12 @@ steps {
 新增 Mongo 集合及关键索引：
 
 - `ci_test_file_failures`：构建/测试文件唯一索引、文件历史统计索引、`buildTimestamp` 周期索引。
-- `ci_report_notifications`：通知类型、范围、周期和渠道的唯一索引。
+- `ci_wecom_notification_outbox`：deliveryKey 唯一索引、待领取索引和租约恢复索引。
 # 企业微信群内反馈（智能机器人长连接）
 
-本项目保留现有企业微信群机器人 Webhook 通知链路，并可选启用企业微信 API 模式智能机器人，通过 WebSocket 长连接接收群内反馈。两条链路彼此独立：Webhook 继续负责 CI 通知，智能机器人负责接收和回复反馈。
+企业微信通知和群内反馈均使用 API 模式智能机器人的长期 WebSocket 连接。分析命令只向 MongoDB Outbox 入队，`serve-wecom-bot` 负责在认证完成后主动推送，因此 Bot 离线时通知会保留 pending 并在恢复后发送。
+
+获取目标群 chatid 时，临时设置 `CI_AGENT_WECOM_NOTIFY_ENABLED=false` 和 `CI_AGENT_WECOM_BOT_DISCOVER_CHAT_ID=true` 后启动机器人，并在目标群 @机器人发送消息。进程只会记录第一次群聊的 `chat_type` 和 chatid；随后停止进程，手动配置 `CI_AGENT_WECOM_BOT_NOTIFY_CHAT_ID`，关闭 discovery 后再启动长期 Worker。不要提交 chatid，也不要将 Bot ID、msgid、userid 或 response_url 当作 chatid；若先在错误群触发，重启 Worker 后重试。
 
 1. 在企业微信后台创建 API 模式智能机器人，接入方式选择“长连接”，获取 Bot ID 和 Secret，并将机器人加入研发群。
 2. 安装可选依赖：
@@ -876,6 +877,10 @@ steps {
    CI_AGENT_WECOM_BOT_ENABLED=true
    CI_AGENT_WECOM_BOT_ID=your-bot-id
    CI_AGENT_WECOM_BOT_SECRET=your-bot-secret
+   CI_AGENT_WECOM_BOT_NOTIFY_CHAT_ID=your-group-chatid
+   CI_AGENT_WECOM_BOT_NOTIFY_POLL_SECONDS=2
+   CI_AGENT_WECOM_BOT_NOTIFY_LEASE_SECONDS=30
+   CI_AGENT_WECOM_BOT_NOTIFY_MAX_ATTEMPTS=5
    ```
 
 4. 以常驻进程启动（不能放在每次 Jenkins 构建结束即退出的临时分析进程中）：

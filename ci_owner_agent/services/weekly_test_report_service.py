@@ -3,22 +3,26 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import json
+import logging
 
 from ci_owner_agent.services.test_failure_stats import TestFailureStatsService
 from ci_owner_agent.services.test_maintainer_mapping import TestMaintainerResolver
 from ci_owner_agent.services.weekly_test_report_formatter import classify_weekly_report_stats, format_weekly_test_report
 from ci_owner_agent.services.weekly_test_report_config import WeeklyTestReportConfig
-from ci_owner_agent.services.wecom_notifier import send_wecom_markdown
 from ci_owner_agent.services.responsibility_path_enricher import is_test_file_path
+from ci_owner_agent.services.wecom_notification_outbox import WeComNotificationOutbox
 
 
 class WeeklyTestReportService:
     def __init__(self, store, config: WeeklyTestReportConfig, *, resolver: TestMaintainerResolver | None = None,
-                 fallback_userids: tuple[str, ...] = (), webhook_url: str | None = None,
-                 mention_mode: str = "userid") -> None:
+                 fallback_userids: tuple[str, ...] = (), notification_chat_id: str | None = None,
+                 notification_dedup_enabled: bool = True, outbox_lease_seconds: int = 30,
+                 outbox_max_attempts: int = 5, mention_mode: str = "userid") -> None:
         self.store, self.config = store, config
         self.resolver = resolver or TestMaintainerResolver()
-        self.fallback_userids, self.webhook_url = fallback_userids, webhook_url
+        self.fallback_userids, self.notification_chat_id = fallback_userids, (notification_chat_id or "").strip() or None
+        self.notification_dedup_enabled = notification_dedup_enabled
+        self.outbox = WeComNotificationOutbox(store, lease_seconds=outbox_lease_seconds, max_attempts=outbox_max_attempts)
         self.mention_mode = mention_mode
 
     def generate(self, *, repo: str, jobs: list[str] | None, branches: list[str] | None,
@@ -74,27 +78,26 @@ class WeeklyTestReportService:
             return {"ok": True, "sent": False, "reason": "no_important_test_failures",
                     "importantItemCount": 0, "normalItemCount": report["normalItemCount"],
                     "ignoredItemCount": report.get("ignoredItemCount", 0)}
-        scope_job = ",".join(jobs or [])
-        scope_branch = ",".join(branches or []) or None
-        key = {"notificationType": "weekly_test_failure_report", "repo": repo or "", "job": scope_job,
-               "branch": scope_branch, "periodStart": period_start, "periodEnd": period_end, "channel": "wecom"}
-        existing = self.store.report_notifications.find_one({**key, "status": "sent"})
-        if existing and not force:
-            return {"ok": True, "sent": False, "reason": "already_sent", "importantItemCount": report["importantItemCount"],
-                    "normalItemCount": report["normalItemCount"], "ignoredItemCount": report.get("ignoredItemCount", 0)}
         if dry_run:
             return {"ok": True, "sent": False, "reason": "dry_run", "markdown": report["markdown"],
                     "importantItemCount": report["importantItemCount"], "normalItemCount": report["normalItemCount"],
                     "ignoredItemCount": report.get("ignoredItemCount", 0)}
-        if not self.webhook_url:
-            send_result = {"ok": False, "error": "CI_AGENT_WECOM_WEBHOOK_URL is not configured"}
-        else:
-            send_result = send_wecom_markdown(self.webhook_url, report["markdown"])
-        now = dt.datetime.now(dt.timezone.utc)
-        doc = {**key, "digest": report["digest"], "status": "sent" if send_result.get("ok") else "failed",
-               "messagePreview": report["markdown"][:1000], "error": send_result.get("error"), "updatedAt": now}
-        self.store.report_notifications.update_one(key, {"$set": doc, "$setOnInsert": {"createdAt": now}}, upsert=True)
-        return {**send_result, "sent": bool(send_result.get("ok")), "importantItemCount": report["importantItemCount"],
+        if not self.notification_chat_id:
+            return {"ok": False, "error": "CI_AGENT_WECOM_BOT_NOTIFY_CHAT_ID is not configured"}
+        try:
+            queued = self.outbox.enqueue_markdown(notification_type="weekly_test_failure_report", target_chat_id=self.notification_chat_id,
+                markdown=report["markdown"], dedup_key=report["digest"], force=force or not self.notification_dedup_enabled,
+                metadata={"repo": repo, "jobs": jobs, "branches": branches, "periodStart": period_start,
+                          "periodEnd": period_end, "digest": report["digest"]})
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Weekly notification enqueue failed: %s", type(exc).__name__)
+            return {"ok": False, "sent": False, "status": "enqueue_failed", "error": "notification outbox is unavailable"}
+        if not queued["inserted"] and queued["status"] == "dead":
+            return {"ok": False, "sent": False, "status": "dead", "inserted": False,
+                    "reason": "existing_dead_delivery", "error": "existing notification delivery is dead; retry with --force",
+                    "deliveryKey": queued["deliveryKey"]}
+        return {"ok": True, "sent": False, "status": queued["status"], "inserted": queued["inserted"],
+                "deliveryKey": queued["deliveryKey"], "importantItemCount": report["importantItemCount"],
                 "normalItemCount": report["normalItemCount"], "ignoredItemCount": report.get("ignoredItemCount", 0)}
 
 

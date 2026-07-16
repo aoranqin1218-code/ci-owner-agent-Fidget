@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import asyncio
+import logging
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 from collections.abc import Mapping
 
 from ci_owner_agent.services.wecom_bot_adapter import WeComBotAdapterProtocol
 from ci_owner_agent.services.wecom_bot_worker import WeComBotWorker
+from ci_owner_agent.services.wecom_bot_models import WeComInboundMessage
 from tests.test_history_store import make_store
 
 
@@ -21,6 +24,8 @@ class _MockAdapter:
         self.card_updates = []
         self.started = False
         self.stopped = False
+        self.send_markdown_calls = []
+        self.send_markdown_error = None
 
     def set_text_handler(self, handler):
         self.text_handler = handler
@@ -36,6 +41,11 @@ class _MockAdapter:
 
     async def stop(self):
         self.stopped = True
+
+    async def send_markdown(self, chat_id, markdown):
+        if self.send_markdown_error:
+            raise self.send_markdown_error
+        self.send_markdown_calls.append((chat_id, markdown))
 
     async def reply_text(self, frame, text):
         self.text_replies.append(text)
@@ -63,6 +73,117 @@ def test_worker_creates_service_with_ai_parser():
     parser.parse = MagicMock(return_value=MagicMock(intent_type="unknown"))
     worker = WeComBotWorker(adapter, store, ai_parser=parser)
     assert worker.service.ai_parser is parser
+
+
+def test_deliver_one_notification_sends_and_marks_sent():
+    import asyncio
+    adapter = _MockAdapter(); store = make_store(); worker = WeComBotWorker(adapter, store, notification_chat_id="chat")
+    worker.notification_outbox.enqueue_markdown(notification_type="ci_notice", target_chat_id="chat", markdown="hello", dedup_key="one")
+    assert asyncio.run(worker.deliver_one_notification()) is True
+    assert adapter.send_markdown_calls == [("chat", "hello")]
+    assert store.wecom_notification_outbox.docs[0]["status"] == "sent"
+
+
+def test_deliver_one_notification_requeues_failure():
+    import asyncio
+    adapter = _MockAdapter(); adapter.send_markdown_error = RuntimeError("offline")
+    store = make_store(); worker = WeComBotWorker(adapter, store, notification_chat_id="chat")
+    worker.notification_outbox.enqueue_markdown(notification_type="ci_notice", target_chat_id="chat", markdown="hello", dedup_key="one")
+    assert asyncio.run(worker.deliver_one_notification()) is True
+    assert store.wecom_notification_outbox.docs[0]["status"] == "pending"
+
+
+def test_invalid_claimed_notification_is_marked_dead():
+    import asyncio
+    adapter = _MockAdapter(); store = make_store(); worker = WeComBotWorker(adapter, store, notification_chat_id="chat")
+    queued = worker.notification_outbox.enqueue_markdown(notification_type="ci_notice", target_chat_id="chat", markdown="private", dedup_key="broken")
+    store.wecom_notification_outbox.docs[0]["payload"] = {}
+    assert asyncio.run(worker.deliver_one_notification()) is True
+    assert adapter.send_markdown_calls == []
+    assert store.wecom_notification_outbox.docs[0]["status"] == "dead"
+
+
+def test_notification_target_mismatch_is_marked_dead(caplog):
+    import asyncio
+    adapter = _MockAdapter(); store = make_store(); worker = WeComBotWorker(adapter, store, notification_chat_id="configured-chat")
+    worker.notification_outbox.enqueue_markdown(notification_type="ci_notice", target_chat_id="unexpected-chat", markdown="private markdown", dedup_key="wrong-chat")
+    assert asyncio.run(worker.deliver_one_notification()) is True
+    assert adapter.send_markdown_calls == []
+    assert store.wecom_notification_outbox.docs[0]["status"] == "dead"
+    assert "unexpected-chat" not in caplog.text and "configured-chat" not in caplog.text and "private markdown" not in caplog.text
+
+
+def test_missing_delivery_key_is_dead_lettered_without_send(caplog, monkeypatch):
+    import asyncio
+    from datetime import datetime, timezone
+
+    adapter = _MockAdapter(); store = make_store(); worker = WeComBotWorker(adapter, store, notification_chat_id="configured-chat")
+    now = datetime.now(timezone.utc)
+    store.wecom_notification_outbox.insert_one({"_id": "broken-no-key", "status": "pending", "nextAttemptAt": now,
+        "createdAt": now, "attemptCount": 0, "targetChatId": "configured-chat", "messageType": "markdown",
+        "notificationType": "ci_notice", "payload": {"content": "private markdown"}})
+    monkeypatch.setattr(worker.notification_outbox, "mark_sent", lambda **kwargs: (_ for _ in ()).throw(AssertionError("must not mark sent")))
+    monkeypatch.setattr(worker.notification_outbox, "mark_failed", lambda **kwargs: (_ for _ in ()).throw(AssertionError("must not mark failed")))
+    assert asyncio.run(worker.deliver_one_notification()) is True
+    doc = store.wecom_notification_outbox.docs[0]
+    assert adapter.send_markdown_calls == [] and doc["status"] == "dead" and doc["deadAt"] is not None
+    assert doc["nextAttemptAt"] is None and doc["leaseToken"] is None and doc["leaseUntil"] is None
+    assert doc["lastErrorType"] == "InvalidOutboxItem" and worker.notification_outbox.claim_next() is None
+    assert "configured-chat" not in caplog.text and "private markdown" not in caplog.text
+
+
+def test_notification_loop_redacts_unexpected_exception(caplog, monkeypatch):
+    adapter = _MockAdapter()
+    worker = WeComBotWorker(adapter, make_store(), notification_chat_id="configured-chat", notification_poll_seconds=1)
+
+    async def fail_once():
+        assert worker._stop_event is not None
+        worker._stop_event.set()
+        raise RuntimeError("mongodb://user:password@secret-host/db")
+
+    monkeypatch.setattr(worker, "deliver_one_notification", fail_once)
+    caplog.set_level(logging.ERROR, logger="ci_owner_agent.services.wecom_bot_worker")
+
+    async def run():
+        worker._stop_event = asyncio.Event()
+        await worker._notification_loop()
+
+    asyncio.run(run())
+    assert "Notification delivery loop failed: RuntimeError" in caplog.text
+    assert all(value not in caplog.text for value in ("mongodb://", "password", "secret-host", "/db", "Traceback"))
+    relevant = [record for record in caplog.records if "Notification delivery loop failed" in record.getMessage()]
+    assert len(relevant) == 1 and relevant[0].exc_info is None
+
+
+def _inbound_chat(*, chat_id, chat_type, content="private callback content", sender="secret-userid"):
+    return WeComInboundMessage(event_key="message:test", chat_id=chat_id, chat_type=chat_type,
+                               sender_userid=sender, content=content)
+
+
+def test_chat_discovery_disabled_does_not_log_chat_id(caplog):
+    worker = WeComBotWorker(_MockAdapter(), make_store(), discover_chat_id=False)
+    worker._maybe_log_discovered_chat_id(_inbound_chat(chat_id="secret-group-chat", chat_type="group"))
+    assert "WeCom group chat discovery" not in caplog.text
+    assert "secret-group-chat" not in caplog.text and "private callback content" not in caplog.text
+
+
+def test_chat_discovery_logs_first_group_chat_only(caplog):
+    worker = WeComBotWorker(_MockAdapter(), make_store(), discover_chat_id=True)
+    worker._maybe_log_discovered_chat_id(_inbound_chat(chat_id="first-group-chat", chat_type="group"))
+    worker._maybe_log_discovered_chat_id(_inbound_chat(chat_id="first-group-chat", chat_type="group"))
+    worker._maybe_log_discovered_chat_id(_inbound_chat(chat_id="second-group-chat", chat_type="group"))
+    assert caplog.text.count("WeCom group chat discovery") == 1
+    assert "first-group-chat" in caplog.text and "second-group-chat" not in caplog.text
+    assert "private callback content" not in caplog.text and "secret-userid" not in caplog.text
+    assert worker._chat_id_discovered is True
+
+
+def test_chat_discovery_ignores_direct_or_invalid_chat_metadata(caplog):
+    worker = WeComBotWorker(_MockAdapter(), make_store(), discover_chat_id=True)
+    for chat_id, chat_type in (("direct-userid", "single"), (None, "group"), ("", "group"), ("unknown-chat", "unknown")):
+        worker._maybe_log_discovered_chat_id(_inbound_chat(chat_id=chat_id, chat_type=chat_type))
+    assert "WeCom group chat discovery" not in caplog.text
+    assert "direct-userid" not in caplog.text and worker._chat_id_discovered is False
 
 
 
