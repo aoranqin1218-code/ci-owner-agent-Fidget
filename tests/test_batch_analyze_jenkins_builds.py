@@ -1,6 +1,12 @@
 from __future__ import annotations
 
 import sys
+import os
+import json
+from pathlib import Path
+import pytest
+
+from scripts import batch_analyze_jenkins_builds as jenkins_batch
 
 from scripts.batch_analyze_jenkins_builds import (
     build_analyze_command,
@@ -9,7 +15,51 @@ from scripts.batch_analyze_jenkins_builds import (
     extract_responsibility_stats_from_notice,
     metadata_matches_jenkins,
     parse_builds,
+    main,
 )
+
+FIXTURE = Path(__file__).parent / "fixtures" / "fake_analyze_launcher.py"
+
+
+def make_fake_python(tmp_path: Path) -> Path:
+    if os.name == "nt":
+        path = tmp_path / "fake-python.cmd"
+        path.write_text(f'@"{sys.executable}" "{FIXTURE}" %*\r\n', encoding="utf-8")
+    else:
+        path = tmp_path / "fake-python"
+        path.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{FIXTURE}" "$@"\n', encoding="utf-8")
+        path.chmod(0o755)
+    return path
+
+
+def run_main(tmp_path, monkeypatch, mode: str) -> tuple[int, dict]:
+    out = tmp_path / "out"
+    monkeypatch.setenv("FAKE_ANALYZE_MODE", mode)
+    monkeypatch.setattr("sys.argv", ["jenkins-batch", "--job", "job", "--repo", "repo", "--builds", "13", "--out-dir", str(out), "--python", str(make_fake_python(tmp_path))])
+    code = main()
+    record = json.loads((out / "index.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    return code, record
+
+
+def test_jenkins_main_real_child_success(tmp_path, monkeypatch):
+    code, record = run_main(tmp_path, monkeypatch, "success")
+    assert code == 0 and record["returnCode"] == 0 and record["noticeValid"] is True
+
+
+def test_jenkins_main_real_child_nonzero(tmp_path, monkeypatch):
+    code, record = run_main(tmp_path, monkeypatch, "nonzero")
+    assert code == 1 and record["returnCode"] == 3 and record["errorKind"] == "execution"
+
+
+def test_jenkins_main_missing_notice(tmp_path, monkeypatch):
+    code, record = run_main(tmp_path, monkeypatch, "missing_notice")
+    assert code == 1 and record["noticeValid"] is False and record["errorKind"] == "notice_missing"
+
+
+@pytest.mark.parametrize("mode", ["invalid_json", "invalid_schema"])
+def test_jenkins_main_invalid_notice_schema(tmp_path, monkeypatch, mode):
+    code, record = run_main(tmp_path, monkeypatch, mode)
+    assert code == 1 and record["noticeValid"] is False and record["errorKind"] == "notice_schema"
 
 
 def test_parse_builds_list_range_and_union():

@@ -110,9 +110,10 @@ def build_analyze_command(
     notify_dry_run: bool,
     force_notify: bool,
     notice_path: Path | None = None,
+    python_executable: str = sys.executable,
 ) -> list[str]:
     command = [
-        sys.executable,
+        python_executable,
         "-m",
         "ci_owner_agent",
         "analyze",
@@ -290,6 +291,7 @@ def run_analyze(
     env: dict[str, str],
     timeout_seconds: int,
     notice_path: Path | None = None,
+    python_executable: str = sys.executable,
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         build_analyze_command(
@@ -301,6 +303,7 @@ def run_analyze(
             notify_dry_run=notify_dry_run,
             force_notify=force_notify,
             notice_path=notice_path,
+            python_executable=python_executable,
         ),
         cwd=str(cwd),
         env=env,
@@ -318,6 +321,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--job", required=True)
     parser.add_argument("--repo", required=True)
+    parser.add_argument("--python", default=sys.executable)
     parser.add_argument("--build-from", type=int, default=None)
     parser.add_argument("--build-to", type=int, default=None)
     parser.add_argument("--builds", default=None)
@@ -394,6 +398,7 @@ def main() -> int:
                 notify_dry_run=args.notify_dry_run,
                 force_notify=args.force_notify,
                 notice_path=notice_path,
+                python_executable=args.python,
             )
             record: dict[str, Any] = {
                 "build": build,
@@ -428,11 +433,21 @@ def main() -> int:
                     rows.append(record)
                     continue
                 record["resumeInvalidReason"] = "invalid notice or metadata mismatch"
-                cleanup_previous_outputs([notice_path])
+                resume_cleanup = cleanup_previous_outputs([notice_path])
+                if resume_cleanup:
+                    message = "; ".join(resume_cleanup)
+                    record.update({"cleanupWarning": message, "errorKind": "cleanup", "error": message, "noticeValid": False})
+                    index_file.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+                    rows.append(record)
+                    continue
 
             cleanup_warnings = cleanup_previous_outputs([notice_path, stdout_path, stderr_path, trace_path])
             if cleanup_warnings:
-                record["cleanupWarning"] = "; ".join(cleanup_warnings)
+                message = "; ".join(cleanup_warnings)
+                record.update({"cleanupWarning": message, "errorKind": "cleanup", "error": message, "noticeValid": False})
+                index_file.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+                rows.append(record)
+                continue
 
             started_at = dt.datetime.now(dt.timezone.utc)
             started_monotonic = time.monotonic()
@@ -451,9 +466,13 @@ def main() -> int:
                     env=env,
                     timeout_seconds=args.timeout_seconds,
                     notice_path=notice_path,
+                    python_executable=args.python,
                 )
                 record["durationSeconds"] = round(time.monotonic() - started_monotonic, 3)
                 record["returnCode"] = cp.returncode
+                if cp.returncode != 0:
+                    record["errorKind"] = "execution"
+                    record["error"] = f"analyze exited with {cp.returncode}"
                 stdout_path.write_text(cp.stdout, encoding="utf-8")
                 stderr_path.write_text(cp.stderr, encoding="utf-8")
                 try:
@@ -461,13 +480,14 @@ def main() -> int:
                 except Exception as exc:
                     notice = None
                     record["noticeValid"] = False
-                    record["errorKind"] = "notice_validation"
+                    record["errorKind"] = "notice_schema" if notice_path.exists() else "notice_missing"
                     record["error"] = f"invalid output notice: {type(exc).__name__}: {exc}"
                 if notice is not None:
-                    if notice["repo"] != args.repo or notice["job"] != args.job or notice["buildNumber"] != build:
+                    mismatches = [field for field, expected in (("repo", args.repo), ("job", args.job), ("buildNumber", build)) if notice[field] != expected]
+                    if mismatches:
                         record["noticeValid"] = False
-                        record["errorKind"] = "notice_validation"
-                        record["error"] = "notice metadata mismatch"
+                        record["errorKind"] = "notice_metadata"
+                        record["error"] = f"notice metadata mismatch: {mismatches[0]}"
                     else:
                         record["noticeValid"] = True
                         record.update(notice_record_fields(notice))

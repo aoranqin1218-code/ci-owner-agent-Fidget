@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 from pathlib import Path
 import json
+from scripts import batch_analyze_company_logs as company_batch
 
 from scripts.batch_analyze_company_logs import (
     build_analyze_command,
@@ -204,6 +205,24 @@ def test_manifest_success_supplies_baseline_to_real_failure_log(tmp_path, monkey
     records = [json.loads(line) for line in (out_dir / "index.jsonl").read_text(encoding="utf-8").splitlines()]
     failure = next(item for item in records if item["build"] == 2)
     assert failure["baseCommit"] == base and failure["dryRun"] is True
+
+
+def test_company_cleanup_failure_is_fail_closed(tmp_path, monkeypatch):
+    log_dir, out_dir = tmp_path / "logs", tmp_path / "out"
+    log_dir.mkdir()
+    head = "b" * 40
+    (log_dir / "company-unittest-2.log").write_text(f"Checking out Revision {head} (refs/remotes/origin/dev)\nFinished: FAILURE\n", encoding="utf-8")
+    called = False
+    def forbidden_run(**kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("subprocess must not start")
+    monkeypatch.setattr(company_batch, "cleanup_previous_outputs", lambda paths: ["failed to remove stale notice"])
+    monkeypatch.setattr(company_batch, "run_analyze_local", forbidden_run)
+    monkeypatch.setattr("sys.argv", ["batch", "--log-dir", str(log_dir), "--out-dir", str(out_dir), "--initial-base-commit", "a" * 40])
+    assert main() == 1 and called is False
+    record = json.loads((out_dir / "index.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert record["errorKind"] == "cleanup" and record["noticeValid"] is False and record["skipped"] is False
 
 
 def test_extract_history_stats_from_structured_notice():

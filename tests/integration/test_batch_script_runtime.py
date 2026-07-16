@@ -31,6 +31,17 @@ def test_production_cli_contains_no_fake_analyzer_switch() -> None:
         assert not any(token in text for token in forbidden), path
 
 
+def test_fake_launcher_rejects_unknown_mode(tmp_path: Path) -> None:
+    output = tmp_path / "notice.json"
+    result = subprocess.run(
+        [sys.executable, str(FIXTURE), "-m", "ci_owner_agent", "analyze-local", "--output-file", str(output)],
+        env={**os.environ, "FAKE_ANALYZE_MODE": "sucess"}, text=True, encoding="utf-8", capture_output=True, check=False,
+    )
+    assert result.returncode == 64
+    assert "unsupported FAKE_ANALYZE_MODE" in result.stderr
+    assert not output.exists()
+
+
 @pytest.mark.parametrize("script", [
     "batch_analyze_company_logs.py",
     "batch_analyze_jenkins_builds.py",

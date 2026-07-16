@@ -886,6 +886,8 @@ def main() -> int:
                 rows.append(record)
                 continue
 
+            metrics_file = metrics_dir / f"{name}.metrics.jsonl"
+
             if args.resume and notice_path.exists():
                 valid, reason = validate_resume_notice(notice_path, item=item, repo=args.repo, job=args.job, branch=branch)
                 record["resumeValidated"] = valid
@@ -896,14 +898,21 @@ def main() -> int:
                     index_file.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
                     rows.append(record)
                     continue
-                cleanup_previous_outputs([notice_path])
-
-            # Per-build metrics file (defined before cleanup so stale metrics get removed)
-            metrics_file = metrics_dir / f"{name}.metrics.jsonl"
+                resume_cleanup = cleanup_previous_outputs([notice_path])
+                if resume_cleanup:
+                    message = "; ".join(resume_cleanup)
+                    record.update({"cleanupWarning": message, "errorKind": "cleanup", "error": message, "noticeValid": False})
+                    index_file.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+                    rows.append(record)
+                    continue
 
             cleanup_warnings = cleanup_previous_outputs([notice_path, stdout_path, stderr_path, trace_path, metrics_file])
             if cleanup_warnings:
-                record["cleanupWarning"] = "; ".join(cleanup_warnings)
+                message = "; ".join(cleanup_warnings)
+                record.update({"cleanupWarning": message, "errorKind": "cleanup", "error": message, "noticeValid": False})
+                index_file.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+                rows.append(record)
+                continue
 
             started_at = dt.datetime.now(dt.timezone.utc)
 
