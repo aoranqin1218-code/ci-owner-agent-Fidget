@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 from ci_owner_agent.schemas import CiResponsibilityNotice, Owner
 from scripts import rerun_analyze_local
-from scripts.rerun_analyze_local import build_command, read_notice, terminate_timed_out_process, validate_notice
+from scripts.rerun_analyze_local import build_command, read_notice, terminate_timed_out_process, validate_notice, write_summaries
 
 FIXTURE = Path(__file__).parent / "fixtures" / "fake_analyze_launcher.py"
 
@@ -228,3 +228,26 @@ def test_rerun_real_cli_failure_modes(tmp_path, monkeypatch, mode, error_kind):
     assert rerun_analyze_local.main() == 1
     row = json.loads((out_dir / "summary.json").read_text(encoding="utf-8"))[0]
     assert row["status"] == "FAILED" and row["errorKind"] == error_kind
+
+
+def test_write_summaries_csv_failure_returns_false(tmp_path, monkeypatch, capsys):
+    original_open = Path.open
+    def failing_open(path, *args, **kwargs):
+        if path.name == "summary.csv":
+            raise OSError("csv locked")
+        return original_open(path, *args, **kwargs)
+    monkeypatch.setattr(Path, "open", failing_open)
+    assert write_summaries(tmp_path, [{"run": 1, "status": "OK"}]) is False
+    assert "failed to write rerun summaries" in capsys.readouterr().err
+
+
+def test_write_summaries_json_failure_returns_false(tmp_path, monkeypatch, capsys):
+    original_write = Path.write_text
+    def failing_write(path, *args, **kwargs):
+        if path.name == "summary.json":
+            raise OSError("disk full")
+        return original_write(path, *args, **kwargs)
+    monkeypatch.setattr(Path, "write_text", failing_write)
+    assert write_summaries(tmp_path, [{"run": 1, "status": "OK"}]) is False
+    assert (tmp_path / "summary.csv").exists()
+    assert "failed to write rerun summaries" in capsys.readouterr().err

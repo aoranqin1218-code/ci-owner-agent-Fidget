@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 from pathlib import Path
+import json
 
 from scripts.batch_analyze_company_logs import (
     build_analyze_command,
@@ -177,6 +178,32 @@ def test_main_conflicting_checkout_sha_returns_validation_failure(tmp_path, monk
     record = __import__("json").loads((out_dir / "index.jsonl").read_text(encoding="utf-8").splitlines()[0])
     assert record["validationFailed"] is True
     assert record["errorKind"] == "checkout_validation"
+
+
+def test_main_manifest_only_failure_is_validation_failure(tmp_path, monkeypatch):
+    log_dir, out_dir = tmp_path / "logs", tmp_path / "out"
+    log_dir.mkdir()
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps([{"build": 2, "result": "FAILURE", "branch": "dev", "headCommit": "a" * 40}]), encoding="utf-8")
+    monkeypatch.setattr("sys.argv", ["batch", "--log-dir", str(log_dir), "--out-dir", str(out_dir), "--manifest-file", str(manifest), "--initial-base-commit", "b" * 40, "--dry-run"])
+    assert main() == 1
+    record = json.loads((out_dir / "index.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert record["consoleFile"] is None and record["errorKind"] == "manifest_validation"
+    assert not list((out_dir / "notices").glob("*"))
+
+
+def test_manifest_success_supplies_baseline_to_real_failure_log(tmp_path, monkeypatch):
+    log_dir, out_dir = tmp_path / "logs", tmp_path / "out"
+    log_dir.mkdir()
+    base, head = "a" * 40, "b" * 40
+    (log_dir / "company-unittest-2.log").write_text(f"Checking out Revision {head} (refs/remotes/origin/dev)\nFinished: FAILURE\n", encoding="utf-8")
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps([{"build": 1, "result": "SUCCESS", "branch": "dev", "headCommit": base}]), encoding="utf-8")
+    monkeypatch.setattr("sys.argv", ["batch", "--log-dir", str(log_dir), "--out-dir", str(out_dir), "--manifest-file", str(manifest), "--dry-run"])
+    assert main() == 0
+    records = [json.loads(line) for line in (out_dir / "index.jsonl").read_text(encoding="utf-8").splitlines()]
+    failure = next(item for item in records if item["build"] == 2)
+    assert failure["baseCommit"] == base and failure["dryRun"] is True
 
 
 def test_extract_history_stats_from_structured_notice():
