@@ -120,7 +120,7 @@ class WeComBotWorker:
         if lease_token is None:
             logging.getLogger(__name__).error("Invalid notification outbox item without lease token")
             return True
-        if (delivery_key is None and document_id is None) or chat_id is None or markdown is None or not target_matches:
+        if delivery_key is None or chat_id is None or markdown is None or not target_matches:
             reason = "notification target does not match configured chat" if not target_matches else "invalid notification outbox item"
             marked = await asyncio.to_thread(self.notification_outbox.mark_invalid_dead, lease_token=lease_token,
                                               delivery_key=delivery_key, document_id=document_id, reason=reason)

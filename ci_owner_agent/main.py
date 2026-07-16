@@ -4,6 +4,7 @@ import argparse
 import csv
 import io
 import json
+import logging
 import sys
 from contextlib import nullcontext
 from pathlib import Path
@@ -309,13 +310,14 @@ def main(argv: list[str] | None = None) -> int:
                 force=args.force,
                 feedback_base_url=args.feedback_base_url or settings.feedback_base_url,
             )
-        except Exception as exc:
-            print(f"ERROR: notify failed unexpectedly: {exc}", file=sys.stderr)
+        except Exception:
+            print("ERROR: notify failed unexpectedly", file=sys.stderr)
             return 2
         if dry_run:
             print(result["markdown"])
         elif not result.get("ok"):
             print(f"WARNING: notify failed: {result.get('error')}", file=sys.stderr)
+            return 2
         else:
             print(json.dumps({key: result.get(key) for key in ("ok", "status", "inserted", "deliveryKey")}, ensure_ascii=False))
         return 0
@@ -479,8 +481,8 @@ def _maybe_notify_notice(notice: CiResponsibilityNotice, settings, cli_notify: b
         return
     try:
         result = _notify_notice(notice, settings, dry_run=cli_dry_run or settings.wecom_notify_dry_run, force=force, feedback_base_url=settings.feedback_base_url)
-    except Exception as exc:
-        print(f"WARNING: notify failed unexpectedly: {exc}", file=sys.stderr)
+    except Exception:
+        print("WARNING: notify failed unexpectedly", file=sys.stderr)
         return
     if not result.get("ok"):
         print(f"WARNING: notify failed: {result.get('error')}", file=sys.stderr)
@@ -559,12 +561,16 @@ def _notify_notice(notice: CiResponsibilityNotice, settings, *, dry_run: bool, f
         dedup_key = json.dumps({"notificationType": "ci_notice", "repo": notice.repo or "", "job": notice.job,
                                 "branch": notice.branch, "buildNumber": notice.buildNumber, "notificationDigest": digest},
                                ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-        queued = WeComNotificationOutbox(store, lease_seconds=settings.wecom_bot_notify_lease_seconds,
-                                         max_attempts=settings.wecom_bot_notify_max_attempts).enqueue_markdown(
-            notification_type="ci_notice", target_chat_id=settings.wecom_bot_notify_chat_id, markdown=markdown,
-            dedup_key=dedup_key, force=force or not settings.notification_dedup_enabled,
-            metadata={"repo": notice.repo or "", "job": notice.job, "branch": notice.branch,
-                      "buildNumber": notice.buildNumber, "noticeHash": digest})
+        try:
+            queued = WeComNotificationOutbox(store, lease_seconds=settings.wecom_bot_notify_lease_seconds,
+                                             max_attempts=settings.wecom_bot_notify_max_attempts).enqueue_markdown(
+                notification_type="ci_notice", target_chat_id=settings.wecom_bot_notify_chat_id, markdown=markdown,
+                dedup_key=dedup_key, force=force or not settings.notification_dedup_enabled,
+                metadata={"repo": notice.repo or "", "job": notice.job, "branch": notice.branch,
+                          "buildNumber": notice.buildNumber, "noticeHash": digest})
+        except Exception as exc:
+            logging.getLogger(__name__).warning("WeCom notification enqueue failed: %s", type(exc).__name__)
+            return {"ok": False, "status": "enqueue_failed", "error": "notification outbox is unavailable"}
         if not queued["inserted"] and queued["status"] == "dead":
             return {"ok": False, "status": "dead", "inserted": False, "reason": "existing_dead_delivery",
                     "error": "existing notification delivery is dead; retry with --force",

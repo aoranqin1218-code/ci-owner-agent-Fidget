@@ -110,6 +110,25 @@ def test_notification_target_mismatch_is_marked_dead(caplog):
     assert "unexpected-chat" not in caplog.text and "configured-chat" not in caplog.text and "private markdown" not in caplog.text
 
 
+def test_missing_delivery_key_is_dead_lettered_without_send(caplog, monkeypatch):
+    import asyncio
+    from datetime import datetime, timezone
+
+    adapter = _MockAdapter(); store = make_store(); worker = WeComBotWorker(adapter, store, notification_chat_id="configured-chat")
+    now = datetime.now(timezone.utc)
+    store.wecom_notification_outbox.insert_one({"_id": "broken-no-key", "status": "pending", "nextAttemptAt": now,
+        "createdAt": now, "attemptCount": 0, "targetChatId": "configured-chat", "messageType": "markdown",
+        "notificationType": "ci_notice", "payload": {"content": "private markdown"}})
+    monkeypatch.setattr(worker.notification_outbox, "mark_sent", lambda **kwargs: (_ for _ in ()).throw(AssertionError("must not mark sent")))
+    monkeypatch.setattr(worker.notification_outbox, "mark_failed", lambda **kwargs: (_ for _ in ()).throw(AssertionError("must not mark failed")))
+    assert asyncio.run(worker.deliver_one_notification()) is True
+    doc = store.wecom_notification_outbox.docs[0]
+    assert adapter.send_markdown_calls == [] and doc["status"] == "dead" and doc["deadAt"] is not None
+    assert doc["nextAttemptAt"] is None and doc["leaseToken"] is None and doc["leaseUntil"] is None
+    assert doc["lastErrorType"] == "InvalidOutboxItem" and worker.notification_outbox.claim_next() is None
+    assert "configured-chat" not in caplog.text and "private markdown" not in caplog.text
+
+
 
 def test_completed_card_event_replays_with_userids():
     """Completed card event replay should preserve userids via Worker handler."""

@@ -391,7 +391,7 @@ def test_notify_notice_unexpected_error_returns_2_without_traceback(tmp_path, ca
     monkeypatch.setenv("CI_AGENT_MODEL_PROVIDER", "fake")
 
     def raise_notify(*args, **kwargs):
-        raise RuntimeError("mongo down")
+        raise RuntimeError("mongodb://user:password@secret-host/db")
 
     monkeypatch.setattr("ci_owner_agent.main._notify_notice", raise_notify)
 
@@ -399,7 +399,8 @@ def test_notify_notice_unexpected_error_returns_2_without_traceback(tmp_path, ca
     captured = capsys.readouterr()
 
     assert rc == 2
-    assert "ERROR: notify failed unexpectedly: mongo down" in captured.err
+    assert "ERROR: notify failed unexpectedly" in captured.err
+    assert "mongodb://" not in captured.err and "password" not in captured.err and "secret-host" not in captured.err
     assert "Traceback" not in captured.err
     assert captured.out == ""
 
@@ -513,13 +514,29 @@ def test_notify_notice_existing_dead_returns_error_and_force_creates_new_deliver
     assert forced["ok"] is True and forced["inserted"] is True and len(store.wecom_notification_outbox.docs) == 2
 
 
+def test_notify_notice_handles_outbox_exception_safely(monkeypatch, caplog):
+    store = make_store()
+    notice = CiResponsibilityNotice.model_validate(notice_payload([item()]))
+    settings = replace(load_settings(), wecom_bot_notify_chat_id="chat")
+    monkeypatch.setattr("ci_owner_agent.main.get_history_store", lambda _: store)
+    monkeypatch.setattr(
+        "ci_owner_agent.services.wecom_notification_outbox.WeComNotificationOutbox.enqueue_markdown",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("mongodb://user:password@secret-host/ci_owner_agent")),
+    )
+    result = _notify_notice(notice, settings, dry_run=False, force=False, feedback_base_url=None)
+    rendered = str(result)
+    assert result["ok"] is False and result["status"] == "enqueue_failed"
+    assert result["error"] == "notification outbox is unavailable"
+    assert all(value not in rendered and value not in caplog.text for value in ("mongodb://", "password", "secret-host"))
+
+
 def test_analyze_notify_exception_stays_json(monkeypatch, capsys):
     notice = CiResponsibilityNotice.model_validate(notice_payload([item()]))
     monkeypatch.setenv("CI_AGENT_MODEL_PROVIDER", "fake")
     monkeypatch.setattr("ci_owner_agent.main.analyze_local", lambda **kwargs: notice)
 
     def raise_notify(*args, **kwargs):
-        raise RuntimeError("mongo down")
+        raise RuntimeError("mongodb://user:password@secret-host/db")
 
     monkeypatch.setattr("ci_owner_agent.main._notify_notice", raise_notify)
     rc = main(
@@ -548,7 +565,8 @@ def test_analyze_notify_exception_stays_json(monkeypatch, capsys):
     assert parsed["buildNumber"] == 5099
     assert "WARNING" not in captured.out
     assert "CI 单测失败" not in captured.out
-    assert "WARNING: notify failed unexpectedly: mongo down" in captured.err
+    assert "WARNING: notify failed unexpectedly" in captured.err
+    assert all(value not in captured.out and value not in captured.err for value in ("mongodb://", "password", "secret-host"))
 
 def test_fallback_userids_appended_when_no_owner():
     no_owner = item("无高可信责任人", "no_high_confidence_owner", "no_high_confidence_owner", "证据不足。")
