@@ -589,6 +589,8 @@ python -m ci_owner_agent serve-feedback --host 0.0.0.0 --port 8765
 
 `SUCCESS` 只为同一逻辑分支更新基线；`FAILURE`、`UNSTABLE`、`UNKNOWN` 会分析，`ABORTED`/`NOT_BUILT` 跳过。脚本会正式传入 `--output-file`、`--result` 和可用的时间戳，绝不从 stdout 的 JSON 猜测 notice；`--resume` 会校验 notice schema 及任务元数据后才跳过。
 
+日志包含 checkout ref 时，每一个 ref 都必须是可规范化的业务分支；tag、pull ref、`HEAD` 或未知 ref 都会成为 validation failure，不能回退到命令行分支。validation failure、超时、子进程或 notice 校验失败会令批次返回非零；只有状态性跳过（`SUCCESS`、`ABORTED`、`NOT_BUILT`）是正常跳过。manifest-only 条目仅用于补充历史和成功基线，失败类条目必须有真实 console log 才会分析。输出中的 `baselineFromObservedSuccess` 仅表示基线来自观测到的 SUCCESS，并不宣称历史连续完整。
+
 示例：
 
 ```powershell

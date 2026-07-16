@@ -18,12 +18,7 @@ if str(_SCRIPT_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_REPO_ROOT))
 from scripts._runtime import REPO_ROOT, build_subprocess_env, ensure_repo_on_sys_path, resolve_repo_default_path, resolve_user_path
 ensure_repo_on_sys_path()
-
-try:
-    from dotenv import load_dotenv
-    load_dotenv()
-except Exception:
-    pass
+from scripts.batch_analyze_company_logs import cleanup_previous_outputs, load_env_file
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -51,6 +46,8 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument("--out-dir", default=None)
+    parser.add_argument("--env-file", default=None)
+    parser.add_argument("--env-override", action="store_true")
     parser.add_argument("--python", default=sys.executable)
     parser.add_argument("--ignore-checkout-commit-mismatch", action="store_true")
     parser.add_argument("--notify", action="store_true")
@@ -117,6 +114,20 @@ def extract_json_object(text: str) -> dict[str, Any] | None:
 def read_notice(path: Path) -> dict[str, Any] | None:
     if not path.exists():
         return None
+
+
+def validate_notice(notice: dict[str, Any] | None, args: argparse.Namespace) -> str | None:
+    if notice is None:
+        return "notice missing or invalid"
+    expected = {"repo": args.repo, "job": args.job, "buildNumber": args.build, "baseCommit": args.base_commit, "headCommit": args.head_commit}
+    if args.branch is not None:
+        expected["branch"] = args.branch
+    if args.result is not None:
+        expected["result"] = args.result
+    for field, value in expected.items():
+        if notice.get(field) != value:
+            return f"notice metadata mismatch: {field}"
+    return None
     try:
         from ci_owner_agent.schemas import CiResponsibilityNotice
         return CiResponsibilityNotice.model_validate_json(path.read_text(encoding="utf-8")).model_dump(mode="json")
@@ -543,6 +554,8 @@ def main() -> int:
     console_file = resolve_user_path(args.console_file)
     if not console_file.exists():
         raise SystemExit(f"console file not found: {console_file}")
+    env_file = resolve_user_path(args.env_file) if args.env_file else resolve_repo_default_path(".env")
+    load_env_file(env_file, override=args.env_override)
 
     out_dir = resolve_user_path(args.out_dir) if args.out_dir else resolve_repo_default_path("runs/rerun-analyze-local")
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -576,6 +589,11 @@ def main() -> int:
         command_file = run_dir / "command.txt"
         trace_file = run_dir / "trace.json"
         trace_summary_file = run_dir / "trace-summary.json"
+
+        cleanup_warnings = cleanup_previous_outputs([notice_file, stdout_file, stderr_file, metrics_file, command_file, trace_file, trace_summary_file])
+        if cleanup_warnings:
+            rows.append({"run": run_index, "status": "FAILED", "error": "; ".join(cleanup_warnings)})
+            continue
 
         run_args = argparse.Namespace(**vars(args))
         run_args.console_file = str(console_file)
@@ -664,6 +682,9 @@ def main() -> int:
 
         metrics = read_last_jsonl(metrics_file)
         notice = read_notice(notice_file)
+        notice_error = validate_notice(notice, args)
+        if not timed_out and exit_code == 0 and notice_error:
+            status = "FAILED"
         notice_summary = summarize_notice(notice)
 
         row = {
@@ -688,6 +709,7 @@ def main() -> int:
             "traceError": trace_result.get("error") if trace_result and not trace_result.get("ok") else None,
             "stdoutFile": str(stdout_file),
             "noticeFile": str(notice_file),
+            "noticeValidationError": notice_error,
             "stderrFile": str(stderr_file),
             "metricsFile": str(metrics_file),
             "traceFile": str(trace_file) if args.fetch_trace else None,
@@ -730,7 +752,7 @@ def main() -> int:
     print(f"Summary CSV : {summary_csv}")
     print(f"Summary JSON: {summary_json}")
 
-    return 0
+    return 0 if rows and all(row.get("status") == "OK" for row in rows) else 1
 
 
 if __name__ == "__main__":

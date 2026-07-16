@@ -11,7 +11,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 _SCRIPT_REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_SCRIPT_REPO_ROOT) not in sys.path:
@@ -35,23 +35,30 @@ SHA_RE = re.compile(r"^[0-9a-f]{40}$", re.I)
 @dataclass
 class BuildLog:
     build: int
-    path: Path
+    console_path: Path | None
     status: str
     head_commit: str | None
     branch: str | None = None
+    checkout_refs: tuple[str, ...] = ()
+    normalized_checkout_branches: tuple[str, ...] = ()
+    invalid_checkout_refs: tuple[str, ...] = ()
+    branch_error: str | None = None
     checkout_ambiguous: bool = False
     checkout_error: str | None = None
     branch_ambiguous: bool = False
     status_error: str | None = None
     build_timestamp: str | None = None
-    source: str = "log"
+    source: Literal["log", "manifest", "log+manifest"] = "log"
     baseline_source: str | None = None
-    history_complete: bool = False
+    baseline_from_observed_success: bool = False
     base_commit: str | None = None
     last_success_build_number: int | None = None
     previous_build_number: int | None = None
     previous_commit: str | None = None
     skip_reason: str | None = None
+    skip_kind: str | None = None
+    validation_failed: bool = False
+    error_kind: str | None = None
 
 
 def load_env_file(env_file: Path, override: bool = False) -> None:
@@ -115,16 +122,22 @@ def parse_build_log(path: Path) -> BuildLog | None:
 
     text = path.read_text(encoding="utf-8", errors="replace")
     resolution = resolve_checkout_revision_from_console_log(text)
-    branches = {branch for branch in (normalize_branch_name(ref) for ref in resolution.refs) if branch}
+    normalized = tuple(sorted({branch for branch in (normalize_branch_name(ref) for ref in resolution.refs) if branch}))
+    invalid = tuple(sorted(ref for ref in resolution.refs if normalize_branch_name(ref) is None))
+    branch_error = "invalid checkout ref" if invalid else ("ambiguous checkout branch" if len(normalized) > 1 else None)
     return BuildLog(
         build=build,
-        path=path,
+        console_path=path,
         status=parse_status(text),
         head_commit=resolution.commit,
-        branch=next(iter(branches)) if len(branches) == 1 else None,
+        branch=normalized[0] if len(normalized) == 1 else None,
+        checkout_refs=resolution.refs,
+        normalized_checkout_branches=normalized,
+        invalid_checkout_refs=invalid,
+        branch_error=branch_error,
         checkout_ambiguous=resolution.ambiguous,
         checkout_error="ambiguous trusted checkout commit" if resolution.ambiguous else ("missing trusted checkout commit" if not resolution.commit else None),
-        branch_ambiguous=len(branches) > 1,
+        branch_ambiguous=len(normalized) > 1,
     )
 
 
@@ -156,7 +169,7 @@ def load_manifest(path: Path) -> list[BuildLog]:
         if timestamp is not None and not isinstance(timestamp, str):
             raise ValueError("manifest buildTimestamp must be a string")
         seen.add(build)
-        items.append(BuildLog(build, path, result.upper(), commit.lower(), branch=branch, build_timestamp=timestamp, source="manifest"))
+        items.append(BuildLog(build, None, result.upper(), commit.lower(), branch=branch, build_timestamp=timestamp, source="manifest"))
     return items
 
 
@@ -165,8 +178,12 @@ def merge_build_history(logs: list[BuildLog], manifest: list[BuildLog]) -> list[
     for item in manifest:
         existing = by_build.get(item.build)
         if existing is not None:
-            if existing.head_commit != item.head_commit or existing.branch != item.branch:
+            if (existing.head_commit != item.head_commit or existing.branch != item.branch
+                    or existing.status != item.status
+                    or (existing.build_timestamp and item.build_timestamp and existing.build_timestamp != item.build_timestamp)):
                 raise ValueError(f"manifest conflicts with log for build {item.build}")
+            existing.source = "log+manifest"
+            existing.build_timestamp = existing.build_timestamp or item.build_timestamp
             continue
         by_build[item.build] = item
     return sorted(by_build.values(), key=lambda item: item.build)
@@ -177,7 +194,8 @@ def _apply_history(logs: list[BuildLog], initial_base_commit: str | None, branch
     for item in logs:
         item.base_commit = item.previous_commit = None
         item.last_success_build_number = item.previous_build_number = None
-        item.baseline_source = item.skip_reason = None
+        item.baseline_source = item.skip_reason = item.skip_kind = item.error_kind = None
+        item.validation_failed = False
     return _assign_history(logs, initial_base_commit, branch)
 
 
@@ -187,29 +205,39 @@ def _assign_history(logs: list[BuildLog], initial_base_commit: str | None, branc
     previous: dict[str, tuple[int, str]] = {}
     if initial_base_commit:
         baselines[configured_branch] = (initial_base_commit, None, "initial-base-commit")
+
+    def validation_failure(item: BuildLog, kind: str, reason: str) -> None:
+        item.skip_reason, item.skip_kind, item.error_kind = reason, "validation", kind
+        item.validation_failed = True
+
     for item in sorted(logs, key=lambda value: value.build):
+        if item.branch_error:
+            validation_failure(item, "branch_validation", item.branch_error)
+            continue
         effective_branch = item.branch or configured_branch
         if item.branch and item.branch != configured_branch:
-            item.skip_reason = f"branch mismatch: log={item.branch} requested={configured_branch}"
+            validation_failure(item, "branch_validation", f"branch mismatch: log={item.branch} requested={configured_branch}")
             continue
-        item.branch, item.history_complete = effective_branch, False
+        item.branch, item.baseline_from_observed_success = effective_branch, False
         if item.checkout_ambiguous or item.branch_ambiguous:
-            item.skip_reason = item.checkout_error or "ambiguous branch"; continue
+            validation_failure(item, "checkout_validation" if item.checkout_ambiguous else "branch_validation", item.checkout_error or "ambiguous branch"); continue
         if item.status == "SUCCESS":
             if item.head_commit:
                 baselines[effective_branch] = (item.head_commit, item.build, f"success-{item.source}")
                 previous[effective_branch] = (item.build, item.head_commit)
-            else: item.skip_reason = "success build missing trusted checkout commit"
+            else: validation_failure(item, "checkout_validation", "success build missing trusted checkout commit")
             continue
         if item.status in {"ABORTED", "NOT_BUILT"}:
-            item.skip_reason = f"skip status {item.status}"; continue
+            item.skip_reason, item.skip_kind = f"skip status {item.status}", "status"; continue
         if not item.head_commit:
-            item.skip_reason = "missing trusted checkout commit"; continue
+            validation_failure(item, "checkout_validation", "missing trusted checkout commit"); continue
+        if item.console_path is None:
+            validation_failure(item, "manifest_validation", "failure build missing real console log"); continue
         baseline = baselines.get(effective_branch)
         if not baseline:
-            item.skip_reason = "missing previous successful commit"; continue
+            validation_failure(item, "baseline_validation", "missing reliable successful baseline"); continue
         item.base_commit, item.last_success_build_number, item.baseline_source = baseline
-        item.history_complete = item.baseline_source != "initial-base-commit"
+        item.baseline_from_observed_success = item.baseline_source.startswith("success-")
         if effective_branch in previous: item.previous_build_number, item.previous_commit = previous[effective_branch]
         previous[effective_branch] = (item.build, item.head_commit)
     return logs
@@ -456,6 +484,7 @@ def build_analyze_command(
 ) -> list[str]:
     assert item.base_commit
     assert item.head_commit
+    assert item.console_path
 
     command = [
         sys.executable,
@@ -475,7 +504,7 @@ def build_analyze_command(
         "--head-commit",
         item.head_commit,
         "--console-file",
-        str(item.path),
+        str(item.console_path),
         "--build-url",
         f"{build_url_prefix.rstrip('/')}/{item.build}",
         "--result",
@@ -772,13 +801,16 @@ def main() -> int:
                     "branch": item.branch,
                     "checkoutAmbiguous": item.checkout_ambiguous,
                     "baselineSource": item.baseline_source,
-                    "historyComplete": item.history_complete,
+                    "baselineFromObservedSuccess": item.baseline_from_observed_success,
                     "baseCommit": item.base_commit,
                     "lastSuccessfulBuildNumber": item.last_success_build_number,
                     "previousBuildNumber": item.previous_build_number,
                     "previousCommit": item.previous_commit,
-                    "consoleFile": str(item.path),
-                    "skipped": True,
+                    "consoleFile": str(item.console_path) if item.console_path else None,
+                    "skipped": not item.validation_failed,
+                    "validationFailed": item.validation_failed,
+                    "errorKind": item.error_kind,
+                    "error": item.skip_reason if item.validation_failed else None,
                     "skipReason": item.skip_reason or f"skip status {item.status}",
                 }
                 index_file.write(json.dumps(record, ensure_ascii=False) + "\n")
@@ -815,11 +847,11 @@ def main() -> int:
                 "branch": item.branch,
                 "checkoutAmbiguous": item.checkout_ambiguous,
                 "baselineSource": item.baseline_source,
-                "historyComplete": item.history_complete,
+                "baselineFromObservedSuccess": item.baseline_from_observed_success,
                 "lastSuccessfulBuildNumber": item.last_success_build_number,
                 "previousBuildNumber": item.previous_build_number,
                 "previousCommit": item.previous_commit,
-                "consoleFile": str(item.path),
+                "consoleFile": str(item.console_path) if item.console_path else None,
                 "noticeFile": str(notice_path),
                 "stdoutFile": str(stdout_path),
                 "stderrFile": str(stderr_path),
@@ -964,7 +996,8 @@ def main() -> int:
         "branch",
         "checkoutAmbiguous",
         "baselineSource",
-        "historyComplete",
+        "baselineFromObservedSuccess",
+        "validationFailed",
         "noticeValid",
         "resumeValidated",
         "resumeInvalidReason",
@@ -1014,7 +1047,7 @@ def main() -> int:
     print(f"index:   {index_path}")
     print(f"summary: {summary_path}")
 
-    return 1 if any(not row.get("skipped") and (row.get("error") or row.get("returnCode") not in (None, 0) or row.get("noticeValid") is False) for row in rows) else 0
+    return 1 if any(row.get("validationFailed") or (not row.get("skipped") and (row.get("error") or row.get("returnCode") not in (None, 0) or row.get("noticeValid") is False)) for row in rows) else 0
 
 
 if __name__ == "__main__":

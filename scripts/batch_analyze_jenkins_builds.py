@@ -457,8 +457,13 @@ def main() -> int:
                     record["errorKind"] = "notice_validation"
                     record["error"] = f"invalid output notice: {type(exc).__name__}: {exc}"
                 if notice is not None:
-                    record["noticeValid"] = True
-                    record.update(notice_record_fields(notice))
+                    if notice["repo"] != args.repo or notice["job"] != args.job or notice["buildNumber"] != build:
+                        record["noticeValid"] = False
+                        record["errorKind"] = "notice_validation"
+                        record["error"] = "notice metadata mismatch"
+                    else:
+                        record["noticeValid"] = True
+                        record.update(notice_record_fields(notice))
 
                 if args.fetch_trace:
                     trace_result = fetch_langsmith_trace(
@@ -482,12 +487,14 @@ def main() -> int:
             except subprocess.TimeoutExpired as exc:
                 record["durationSeconds"] = round(time.monotonic() - started_monotonic, 3)
                 record["error"] = f"analyze timeout after {args.timeout_seconds}s"
+                record["errorKind"] = "timeout"
                 stdout_path.write_text(exc.stdout or "", encoding="utf-8")
                 stderr_path.write_text(exc.stderr or "", encoding="utf-8")
                 cleanup_previous_outputs([notice_path, trace_path])
             except Exception as exc:
                 record["durationSeconds"] = round(time.monotonic() - started_monotonic, 3)
                 record["error"] = str(exc)
+                record["errorKind"] = "execution"
 
             if "aiHistoryEligibleCurrentFactsCount" not in record:
                 record.update(extract_ai_history_stats_from_trace_or_notice(notice, trace_payload))
@@ -503,7 +510,7 @@ def main() -> int:
     print("\nDone.")
     print(f"index:   {index_path}")
     print(f"summary: {summary_path}")
-    return 0
+    return 1 if any(not row.get("skipped") and (row.get("error") or row.get("returnCode") not in (None, 0) or row.get("noticeValid") is False) for row in rows) else 0
 
 
 if __name__ == "__main__":

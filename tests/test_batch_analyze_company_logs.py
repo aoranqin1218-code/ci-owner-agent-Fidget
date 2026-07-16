@@ -27,6 +27,21 @@ def test_real_company_logs_use_trusted_checkout_evidence_and_normalize_branch():
         assert item.checkout_ambiguous is False
 
 
+@pytest.mark.parametrize("ref", ["refs/tags/v1", "refs/pull/1/head", "HEAD", "refs/unknown/foo"])
+def test_invalid_checkout_ref_is_not_treated_as_missing_ref(tmp_path, ref):
+    sha = "a" * 40
+    path = tmp_path / "company-unittest-1.log"
+    path.write_text(f"Checking out Revision {sha} ({ref})\nFinished: FAILURE\n", encoding="utf-8")
+    item = parse_build_log(path)
+    assert item is not None
+    assert item.checkout_refs == (ref,)
+    assert item.invalid_checkout_refs == (ref,)
+    assert item.branch_error == "invalid checkout ref"
+    analyzed = load_logs(tmp_path, "*.log", initial_base_commit="b" * 40, branch="dev")[0]
+    assert analyzed.validation_failed is True
+    assert analyzed.error_kind == "branch_validation"
+
+
 def write_log(log_dir, build: int, commit: str, status: str) -> None:
     log_dir.joinpath(f"company-unittest-{build}.log").write_text(
         f"Checking out Revision {commit}\nAssertionError\nFinished: {status}\n",
