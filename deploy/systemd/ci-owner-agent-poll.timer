@@ -1,0 +1,13 @@
+[Unit]
+Description=Poll Jenkins for unanalyzed builds every two minutes
+
+[Timer]
+OnBootSec=1min
+OnUnitInactiveSec=2min
+AccuracySec=10s
+RandomizedDelaySec=10s
+Persistent=true
+Unit=ci-owner-agent-poll.service
+
+[Install]
+WantedBy=timers.target

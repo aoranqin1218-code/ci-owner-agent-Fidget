@@ -1,0 +1,11 @@
+[Unit]
+Description=Send the previous week's CI failure report every Monday at 10:00 Asia/Shanghai
+
+[Timer]
+OnCalendar=Mon *-*-* 10:00:00 Asia/Shanghai
+AccuracySec=1min
+Persistent=true
+Unit=ci-owner-agent-weekly-report.service
+
+[Install]
+WantedBy=timers.target

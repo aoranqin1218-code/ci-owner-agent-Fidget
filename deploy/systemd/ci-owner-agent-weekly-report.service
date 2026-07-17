@@ -1,0 +1,16 @@
+[Unit]
+Description=CI Owner Agent previous-week failure report
+After=network-online.target mongod.service ci-owner-agent-wecom-bot.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ci-owner-agent
+Group=ci-owner-agent
+WorkingDirectory=/opt/ci-owner-agent
+EnvironmentFile=-/opt/ci-owner-agent/.env
+ExecStart=/opt/ci-owner-agent/.venv/bin/python /opt/ci-owner-agent/scripts/send_weekly_failure_report.py --repo fx-code --job services/fx-code-unittest --branch dev
+TimeoutStartSec=10min
+
+[Install]
+WantedBy=multi-user.target
