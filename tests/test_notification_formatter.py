@@ -487,10 +487,19 @@ def test_notify_dry_run_does_not_enqueue(monkeypatch):
     assert store.wecom_notification_outbox.docs == []
 
 
-def test_notify_webhook_without_mongo_sends_directly(monkeypatch):
+def test_notify_webhook_without_mongo_sends_directly(tmp_path, monkeypatch):
+    mapping_file = tmp_path / "wecom-users.csv"
+    mapping_file.write_text(
+        "authorName,authorEmail,normalizedEmail,mappingKey,wecomUserId,mappingStatus,note\n"
+        "Tang.Tangerine-唐嘉伟,x@example.com,x@example.com,"
+        '"Tang.Tangerine-唐嘉伟 <x@example.com>",tang.userid,confirmed,\n',
+        encoding="utf-8",
+    )
     notice = CiResponsibilityNotice.model_validate(notice_payload([item()]))
     settings = replace(load_settings(), history_enabled=False, wecom_notify_transport="webhook",
-                       wecom_webhook_url="https://example.test/secret", wecom_notify_dry_run=False)
+                       wecom_webhook_url="https://example.test/secret", wecom_notify_dry_run=False,
+                       wecom_user_mapping_file=mapping_file, test_maintainer_mapping_file=None,
+                       wecom_fallback_userids=(), wecom_mention_mode="userid")
     calls = []
     monkeypatch.setattr("ci_owner_agent.main.get_history_store", lambda _: None)
     monkeypatch.setattr("ci_owner_agent.main.send_wecom_markdown",
@@ -498,7 +507,27 @@ def test_notify_webhook_without_mongo_sends_directly(monkeypatch):
                         {"ok": True, "statusCode": 200, "response": "ok", "error": None})
     result = _notify_notice(notice, settings, dry_run=False, force=False, feedback_base_url=None)
     assert result["ok"] is True and result["status"] == "sent" and result["transport"] == "webhook"
-    assert len(calls) == 1 and "<@" in calls[0][1]
+    assert len(calls) == 1 and "<@tang.userid>" in calls[0][1]
+
+
+def test_notify_webhook_without_mapping_falls_back_to_name(tmp_path, monkeypatch):
+    notice = CiResponsibilityNotice.model_validate(notice_payload([item()]))
+    settings = replace(load_settings(), history_enabled=False, wecom_notify_transport="webhook",
+                       wecom_webhook_url="https://example.test/secret", wecom_notify_dry_run=False,
+                       wecom_user_mapping_file=tmp_path / "missing-users.csv",
+                       test_maintainer_mapping_file=None, wecom_fallback_userids=(),
+                       wecom_mention_mode="userid")
+    calls = []
+    monkeypatch.setattr("ci_owner_agent.main.get_history_store", lambda _: None)
+    monkeypatch.setattr("ci_owner_agent.main.send_wecom_markdown",
+                        lambda url, markdown: calls.append((url, markdown)) or
+                        {"ok": True, "statusCode": 200, "response": "ok", "error": None})
+
+    result = _notify_notice(notice, settings, dry_run=False, force=False, feedback_base_url=None)
+
+    assert result["ok"] is True and len(calls) == 1
+    assert "@Tang.Tangerine-唐嘉伟" in calls[0][1]
+    assert "<@Tang.Tangerine-唐嘉伟>" not in calls[0][1]
 
 
 def test_notify_webhook_records_sent_failed_dedup_and_force(monkeypatch):

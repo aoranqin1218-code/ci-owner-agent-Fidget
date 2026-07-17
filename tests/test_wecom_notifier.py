@@ -37,7 +37,7 @@ def test_send_wecom_markdown_rejects_nonzero_errcode(monkeypatch):
                         lambda *a, **k: _Response(body={"errcode": 40001, "errmsg": "invalid"}))
     result = send_wecom_markdown("https://example.test/secret", "private markdown")
     assert result["ok"] is False and "40001" in result["error"]
-    assert "private markdown" not in result["error"]
+    assert "private markdown" not in result["error"] and "https://example.test/secret" not in result["error"]
 
 
 def test_send_wecom_markdown_rejects_non_2xx(monkeypatch):
@@ -45,6 +45,7 @@ def test_send_wecom_markdown_rejects_non_2xx(monkeypatch):
                         lambda *a, **k: _Response(status_code=503, text="unavailable"))
     result = send_wecom_markdown("https://example.test/secret", "private markdown")
     assert result["ok"] is False and result["statusCode"] == 503 and "503" in result["error"]
+    assert "private markdown" not in result["error"] and "https://example.test/secret" not in result["error"]
 
 
 def test_send_wecom_markdown_requires_exact_http_200(monkeypatch):

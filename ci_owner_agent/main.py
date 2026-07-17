@@ -34,6 +34,24 @@ if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 
+_NOTIFICATION_SUMMARY_KEYS = (
+    "ok",
+    "status",
+    "transport",
+    "sent",
+    "reason",
+    "inserted",
+    "deliveryKey",
+    "importantItemCount",
+    "normalItemCount",
+    "ignoredItemCount",
+)
+
+
+def _notification_result_summary(result: dict) -> dict:
+    return {key: result.get(key) for key in _NOTIFICATION_SUMMARY_KEYS if key in result}
+
+
 def _serialize_json(model) -> str:
     return json.dumps(model.model_dump(mode="json"), ensure_ascii=False, indent=2) + "\n"
 
@@ -244,7 +262,7 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"ERROR: weekly report notification failed: {result.get('error')}", file=sys.stderr)
                 return 2
             if result.get("reason") or result.get("status"):
-                print(json.dumps({k: v for k, v in result.items() if k != "markdown"}, ensure_ascii=False))
+                print(json.dumps(_notification_result_summary(result), ensure_ascii=False))
         return 0
     if args.command == "analyze":
         recorder = _start_metrics(settings, args.job, args.build, args.repo, "analyze")
@@ -326,8 +344,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"WARNING: notify failed: {result.get('error')}", file=sys.stderr)
             return 2
         else:
-            summary_keys = ("ok", "status", "transport", "sent", "inserted", "deliveryKey")
-            print(json.dumps({key: result.get(key) for key in summary_keys}, ensure_ascii=False))
+            print(json.dumps(_notification_result_summary(result), ensure_ascii=False))
         return 0
     if args.command == "feedback":
         store = get_history_store(settings)
@@ -399,13 +416,16 @@ def main(argv: list[str] | None = None) -> int:
         if not secret:
             print("ERROR: Secret is required (--secret or CI_AGENT_WECOM_BOT_SECRET)", file=sys.stderr)
             return 2
-        bot_notification_enabled = (
-            settings.wecom_notify_enabled
-            and settings.wecom_notify_transport == "bot"
-        )
-        if bot_notification_enabled and not settings.wecom_bot_notify_chat_id:
-            print("ERROR: CI_AGENT_WECOM_BOT_NOTIFY_CHAT_ID is required when notifications are enabled", file=sys.stderr)
+        bot_transport_enabled = settings.wecom_notify_transport == "bot"
+        default_bot_notification_enabled = settings.wecom_notify_enabled and bot_transport_enabled
+        if default_bot_notification_enabled and not settings.wecom_bot_notify_chat_id:
+            print(
+                "ERROR: CI_AGENT_WECOM_BOT_NOTIFY_CHAT_ID is required "
+                "when default bot notifications are enabled",
+                file=sys.stderr,
+            )
             return 2
+        notification_chat_id = settings.wecom_bot_notify_chat_id if bot_transport_enabled else None
         store = get_history_store(settings)
         if store is None:
             print("ERROR: MongoDB history storage is unavailable", file=sys.stderr)
@@ -439,7 +459,7 @@ def main(argv: list[str] | None = None) -> int:
             ai_parser=ai_parser,
             card_action_url=card_action_url,
             discover_chat_id=settings.wecom_bot_discover_chat_id,
-            notification_chat_id=(settings.wecom_bot_notify_chat_id if bot_notification_enabled else None),
+            notification_chat_id=notification_chat_id,
             notification_poll_seconds=settings.wecom_bot_notify_poll_seconds,
             notification_lease_seconds=settings.wecom_bot_notify_lease_seconds,
             notification_max_attempts=settings.wecom_bot_notify_max_attempts,
