@@ -11,16 +11,20 @@ from ci_owner_agent.services.weekly_test_report_formatter import classify_weekly
 from ci_owner_agent.services.weekly_test_report_config import WeeklyTestReportConfig
 from ci_owner_agent.services.responsibility_path_enricher import is_test_file_path
 from ci_owner_agent.services.wecom_notification_outbox import WeComNotificationOutbox
+from ci_owner_agent.services.wecom_notifier import send_wecom_markdown
 from ci_owner_agent.services.scope_normalization import normalize_branch_scope_values, normalize_scope_values
 
 
 class WeeklyTestReportService:
     def __init__(self, store, config: WeeklyTestReportConfig, *, resolver: TestMaintainerResolver | None = None,
-                 fallback_userids: tuple[str, ...] = (), notification_chat_id: str | None = None,
+                 fallback_userids: tuple[str, ...] = (), notification_transport: str = "webhook",
+                 webhook_url: str | None = None, notification_chat_id: str | None = None,
                  notification_dedup_enabled: bool = True, outbox_lease_seconds: int = 30,
                  outbox_max_attempts: int = 5, mention_mode: str = "userid") -> None:
         self.store, self.config = store, config
         self.resolver = resolver or TestMaintainerResolver()
+        self.notification_transport = notification_transport.strip().lower()
+        self.webhook_url = (webhook_url or "").strip() or None
         self.fallback_userids, self.notification_chat_id = fallback_userids, (notification_chat_id or "").strip() or None
         self.notification_dedup_enabled = notification_dedup_enabled
         self.outbox = WeComNotificationOutbox(store, lease_seconds=outbox_lease_seconds, max_attempts=outbox_max_attempts)
@@ -76,15 +80,70 @@ class WeeklyTestReportService:
                period_start: dt.datetime, period_end: dt.datetime, dry_run: bool = False, force: bool = False) -> dict:
         jobs, branches = normalize_scope_values(jobs), normalize_branch_scope_values(branches)
         if report["importantItemCount"] == 0 and not self.config.notification.sendWhenNoImportantItems:
-            return {"ok": True, "sent": False, "reason": "no_important_test_failures",
+            return {"ok": True, "sent": False, "transport": self.notification_transport,
+                    "reason": "no_important_test_failures",
                     "importantItemCount": 0, "normalItemCount": report["normalItemCount"],
                     "ignoredItemCount": report.get("ignoredItemCount", 0)}
         if dry_run:
-            return {"ok": True, "sent": False, "reason": "dry_run", "markdown": report["markdown"],
+            return {"ok": True, "sent": False, "transport": self.notification_transport,
+                    "reason": "dry_run", "markdown": report["markdown"],
                     "importantItemCount": report["importantItemCount"], "normalItemCount": report["normalItemCount"],
                     "ignoredItemCount": report.get("ignoredItemCount", 0)}
+        if self.notification_transport == "webhook":
+            return self._notify_via_webhook(
+                report, repo=repo, jobs=jobs, branches=branches,
+                period_start=period_start, period_end=period_end, force=force,
+            )
+        return self._notify_via_bot(report, repo=repo, jobs=jobs, branches=branches,
+                                    period_start=period_start, period_end=period_end, force=force)
+
+    def _notify_via_webhook(self, report: dict, *, repo: str, jobs: list[str] | None,
+                            branches: list[str] | None, period_start: dt.datetime,
+                            period_end: dt.datetime, force: bool) -> dict:
+        key = {
+            "notificationType": "weekly_test_failure_report",
+            "repo": repo or "",
+            "job": ",".join(jobs or []),
+            "branch": None if branches is None else ",".join(branches),
+            "periodStart": period_start,
+            "periodEnd": period_end,
+            "channel": "wecom",
+        }
+        if self.notification_dedup_enabled and not force:
+            try:
+                if self.store.report_notifications.find_one({**key, "status": "sent"}):
+                    return {"ok": True, "sent": False, "status": "skipped", "transport": "webhook",
+                            "reason": "already_sent", "importantItemCount": report["importantItemCount"],
+                            "normalItemCount": report["normalItemCount"],
+                            "ignoredItemCount": report.get("ignoredItemCount", 0)}
+            except Exception as exc:
+                logging.getLogger(__name__).warning("Weekly notification dedup unavailable: %s", type(exc).__name__)
+        if not self.webhook_url:
+            send_result = {"ok": False, "statusCode": None, "response": None,
+                           "error": "CI_AGENT_WECOM_WEBHOOK_URL is not configured"}
+        else:
+            send_result = send_wecom_markdown(self.webhook_url, report["markdown"])
+        status = "sent" if send_result.get("ok") else "failed"
+        now = dt.datetime.now(dt.timezone.utc)
+        doc = {**key, "digest": report["digest"], "status": status,
+               "messagePreview": report["markdown"][:1000], "error": send_result.get("error"), "updatedAt": now}
+        try:
+            self.store.report_notifications.update_one(
+                key, {"$set": doc, "$setOnInsert": {"createdAt": now}}, upsert=True
+            )
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Weekly notification history unavailable: %s", type(exc).__name__)
+        return {**send_result, "status": status, "transport": "webhook",
+                "sent": bool(send_result.get("ok")), "importantItemCount": report["importantItemCount"],
+                "normalItemCount": report["normalItemCount"],
+                "ignoredItemCount": report.get("ignoredItemCount", 0)}
+
+    def _notify_via_bot(self, report: dict, *, repo: str, jobs: list[str] | None,
+                        branches: list[str] | None, period_start: dt.datetime,
+                        period_end: dt.datetime, force: bool) -> dict:
         if not self.notification_chat_id:
-            return {"ok": False, "error": "CI_AGENT_WECOM_BOT_NOTIFY_CHAT_ID is not configured"}
+            return {"ok": False, "transport": "bot",
+                    "error": "CI_AGENT_WECOM_BOT_NOTIFY_CHAT_ID is not configured"}
         try:
             queued = self.outbox.enqueue_markdown(notification_type="weekly_test_failure_report", target_chat_id=self.notification_chat_id,
                 markdown=report["markdown"], dedup_key=report["digest"], force=force or not self.notification_dedup_enabled,
@@ -92,12 +151,14 @@ class WeeklyTestReportService:
                           "periodEnd": period_end, "digest": report["digest"]})
         except Exception as exc:
             logging.getLogger(__name__).warning("Weekly notification enqueue failed: %s", type(exc).__name__)
-            return {"ok": False, "sent": False, "status": "enqueue_failed", "error": "notification outbox is unavailable"}
+            return {"ok": False, "sent": False, "status": "enqueue_failed", "transport": "bot",
+                    "error": "notification outbox is unavailable"}
         if not queued["inserted"] and queued["status"] == "dead":
-            return {"ok": False, "sent": False, "status": "dead", "inserted": False,
+            return {"ok": False, "sent": False, "status": "dead", "transport": "bot", "inserted": False,
                     "reason": "existing_dead_delivery", "error": "existing notification delivery is dead; retry with --force",
                     "deliveryKey": queued["deliveryKey"]}
-        return {"ok": True, "sent": False, "status": queued["status"], "inserted": queued["inserted"],
+        return {"ok": True, "sent": False, "status": queued["status"], "transport": "bot",
+                "inserted": queued["inserted"],
                 "deliveryKey": queued["deliveryKey"], "importantItemCount": report["importantItemCount"],
                 "normalItemCount": report["normalItemCount"], "ignoredItemCount": report.get("ignoredItemCount", 0)}
 

@@ -39,8 +39,8 @@ Jenkins 在线构建 / 本地 console log
   -> 生成 CiResponsibilityNotice
   -> 本地校验、补充 failure signature / path，并降级弱证据
   -> 可选保存 MongoDB 历史、测试文件失败事件和 metrics
-  -> 可选将企业微信通知写入 MongoDB Outbox
-  -> 由 serve-wecom-bot 长连接 Worker 投递通知并处理群内反馈
+  -> 按配置通过群机器人 Webhook 直发，或写入 MongoDB Outbox
+  -> Bot transport 由 serve-wecom-bot 长连接 Worker 投递；机器人在两种 transport 下都处理群内反馈
 ```
 
 ### 1.2 三种主要分析入口
@@ -377,7 +377,9 @@ metrics 包含总耗时、阶段耗时、LLM calls、provider 返回的 token us
 | 配置 | 默认值 | 说明 |
 | --- | --- | --- |
 | `CI_AGENT_WECOM_NOTIFY_ENABLED` | `false` | 分析命令是否默认触发通知流程。 |
-| `CI_AGENT_WECOM_NOTIFY_DRY_RUN` | `true` | 默认仅格式化，不向 Outbox 入队。 |
+| `CI_AGENT_WECOM_NOTIFY_TRANSPORT` | `webhook` | CI 通知通道，只允许 `webhook` 或 `bot`。 |
+| `CI_AGENT_WECOM_WEBHOOK_URL` | 空 | 企业微信群机器人 Webhook；公开配置输出中脱敏。 |
+| `CI_AGENT_WECOM_NOTIFY_DRY_RUN` | `true` | 默认仅格式化，不调用 Webhook、也不向 Outbox 入队。 |
 | `CI_AGENT_WECOM_NOTIFY_ON_SUCCESS` | `false` | 是否通知成功构建。 |
 | `CI_AGENT_WECOM_NOTIFY_ON_NO_OWNER` | `true` | 无高可信责任人时是否仍通知。 |
 | `CI_AGENT_WECOM_USER_MAPPING_FILE` | 空 | Mongo 用户映射不可用时的 CSV fallback。 |
@@ -387,6 +389,23 @@ metrics 包含总耗时、阶段耗时、LLM calls、provider 返回的 token us
 | `CI_AGENT_NOTIFICATION_DEDUP_ENABLED` | `true` | 是否按通知 digest 去重。 |
 
 测试维护人不是失败责任人。no-owner 责任项仍保持 `no_high_confidence_owner / 无高可信责任人`，维护人只显示在通知的“待确认维护人”区域。
+
+CI 通知默认使用群机器人 Webhook。`userid` 映射成功时 Markdown 继续生成 `<@userid>`，Webhook 能在企业微信群中呈现蓝色真实成员 @。智能机器人与通知 transport 相互独立：即使 CI 通知使用 Webhook，机器人仍可处理文本反馈、模板卡片、AI 解析和二次确认。需要保留原有主动 Bot 通知链路时设置 `CI_AGENT_WECOM_NOTIFY_TRANSPORT=bot`。
+
+生产 Webhook 示例：
+
+```env
+CI_AGENT_WECOM_NOTIFY_ENABLED=true
+CI_AGENT_WECOM_NOTIFY_TRANSPORT=webhook
+CI_AGENT_WECOM_WEBHOOK_URL=https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=***
+CI_AGENT_WECOM_NOTIFY_DRY_RUN=false
+CI_AGENT_WECOM_MENTION_MODE=userid
+
+CI_AGENT_HISTORY_ENABLED=true
+CI_AGENT_WECOM_BOT_ENABLED=true
+CI_AGENT_WECOM_BOT_ID=***
+CI_AGENT_WECOM_BOT_SECRET=***
+```
 
 `config/test-maintainers.example.yml` 示例：
 
@@ -413,7 +432,7 @@ rules:
 | `CI_AGENT_WECOM_BOT_ID` | 空 | Bot ID。 |
 | `CI_AGENT_WECOM_BOT_SECRET` | 空 | Bot Secret。 |
 | `CI_AGENT_WECOM_BOT_DISCOVER_CHAT_ID` | `false` | 临时发现目标群 chatid；正常运行必须关闭。 |
-| `CI_AGENT_WECOM_BOT_NOTIFY_CHAT_ID` | 空 | 通知目标群 chatid。 |
+| `CI_AGENT_WECOM_BOT_NOTIFY_CHAT_ID` | 空 | 仅 `CI_AGENT_WECOM_NOTIFY_TRANSPORT=bot` 时使用的通知目标群 chatid。 |
 | `CI_AGENT_WECOM_BOT_NOTIFY_POLL_SECONDS` | `2` | Outbox 轮询间隔。 |
 | `CI_AGENT_WECOM_BOT_NOTIFY_LEASE_SECONDS` | `30` | 单条通知发送租约。 |
 | `CI_AGENT_WECOM_BOT_NOTIFY_MAX_ATTEMPTS` | `5` | 最大投递次数。 |
@@ -423,7 +442,17 @@ rules:
 | `CI_AGENT_WECOM_BOT_LLM_ENABLED` | `false` | 启用可选自然语言反馈解析。 |
 | `CI_AGENT_WECOM_BOT_LLM_MAX_INPUT_CHARS` | `2000` | 自然语言解析最大输入字符数。 |
 
-固定反馈命令不依赖 LLM。正式使用自然语言解析时，应配置真实模型；fake parser 只适合测试。
+固定反馈命令不依赖 LLM。正式使用自然语言解析时，应配置真实模型；fake parser 只适合测试。Bot 主动通知模式还需要常驻 Worker：
+
+```env
+CI_AGENT_WECOM_NOTIFY_ENABLED=true
+CI_AGENT_WECOM_NOTIFY_TRANSPORT=bot
+CI_AGENT_WECOM_NOTIFY_DRY_RUN=false
+CI_AGENT_WECOM_BOT_ENABLED=true
+CI_AGENT_WECOM_BOT_ID=***
+CI_AGENT_WECOM_BOT_SECRET=***
+CI_AGENT_WECOM_BOT_NOTIFY_CHAT_ID=***
+```
 
 ### 4.9 反馈服务
 
@@ -527,7 +556,7 @@ python -m ci_owner_agent notify-notice `
 | 参数 | 说明 |
 | --- | --- |
 | `--notice-file` | `CiResponsibilityNotice` JSON，支持 UTF-8 和 UTF-8 BOM。 |
-| `--dry-run` | 打印 Markdown，不向 Outbox 入队。 |
+| `--dry-run` | 打印 Markdown，不调用 Webhook、也不向 Outbox 入队。 |
 | `--force` | 忽略通知去重。 |
 | `--feedback-base-url` | 覆盖反馈 URL。 |
 
@@ -667,7 +696,7 @@ python -m ci_owner_agent serve-wecom-bot
 - MongoDB 可连接；
 - `CI_AGENT_WECOM_BOT_ENABLED=true`；
 - 配置 Bot ID 和 Secret；
-- 如果真实通知开启，还需配置目标群 chatid。
+- 仅当 CI 通知使用 `bot` transport 时，还需配置目标群 chatid。
 
 命令行 `--bot-id` / `--secret` 优先于环境变量。
 
@@ -1044,13 +1073,23 @@ token 只累计 provider 实际返回的 usage，不估算缺失值。
 | `ci_wecom_bot_events` | 机器人消息幂等与处理租约。 |
 | `ci_wecom_notification_outbox` | 待发送、发送中、已发送或 dead 的通知。 |
 
-代码还初始化 `ci_notifications`、`ci_report_notifications` 等辅助集合；当前企业微信真实投递主路径使用 `ci_wecom_notification_outbox`。
+代码还初始化 `ci_notifications`、`ci_report_notifications` 等辅助集合；Webhook 模式用它们做可选发送记录和去重，Bot 模式使用 `ci_wecom_notification_outbox`。
 
 `buildTimestamp` 表示 Jenkins / 输入提供的真实构建时间；`analyzedAt` 表示 Agent 执行时间。没有 `buildTimestamp` 的历史仍可参与总量统计，但不能可靠归入自然周。
 
 ### 7.7 企业微信通知链路
 
-真实通知流程不是分析进程直接调用 webhook：
+真实通知有两条可选路径。默认 Webhook 路径不强制依赖 MongoDB；MongoDB 可用时仍保存通知快照、反馈码、去重和发送结果：
+
+```text
+analyze / notify-notice / weekly-test-report
+  -> 格式化同一份 Markdown（保留 <@userid>）
+  -> 可选 MongoDB 去重
+  -> 企业微信群机器人 Webhook 直发
+  -> 保存 sent / failed 结果（MongoDB 可用时）
+```
+
+Bot 路径完整保留 Outbox、租约、重试和 dead 状态：
 
 ```text
 analyze / notify-notice / weekly-test-report

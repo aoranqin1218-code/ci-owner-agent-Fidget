@@ -189,6 +189,44 @@ def test_notify_notice_accepts_plain_utf8_json(tmp_path):
     assert "Traceback" not in completed.stderr
 
 
+def test_notify_notice_webhook_success_prints_transport_safe_summary(tmp_path, monkeypatch, capsys):
+    from dataclasses import replace
+    from ci_owner_agent.config import load_settings
+    from ci_owner_agent.main import main
+
+    notice_file = tmp_path / "notice.json"
+    notice_file.write_text(_notice_json_text(), encoding="utf-8")
+    settings = replace(load_settings(), wecom_notify_dry_run=False, wecom_notify_transport="webhook",
+                       wecom_webhook_url="https://example.test/secret-key", history_enabled=False)
+    monkeypatch.setattr("ci_owner_agent.main.load_settings", lambda: settings)
+    monkeypatch.setattr("ci_owner_agent.main.get_history_store", lambda _: None)
+    monkeypatch.setattr("ci_owner_agent.main.send_wecom_markdown",
+                        lambda *args: {"ok": True, "statusCode": 200, "response": "ok", "error": None})
+    assert main(["notify-notice", "--notice-file", str(notice_file)]) == 0
+    captured = capsys.readouterr()
+    summary = json.loads(captured.out)
+    assert summary["status"] == "sent" and summary["transport"] == "webhook" and summary["sent"] is True
+    assert "secret-key" not in captured.out + captured.err
+
+
+def test_notify_notice_bot_queue_prints_transport_safe_summary(tmp_path, monkeypatch, capsys):
+    from dataclasses import replace
+    from ci_owner_agent.config import load_settings
+    from ci_owner_agent.main import main
+    from tests.test_history_store import make_store
+
+    notice_file = tmp_path / "notice.json"
+    notice_file.write_text(_notice_json_text(), encoding="utf-8")
+    settings = replace(load_settings(), wecom_notify_dry_run=False, wecom_notify_transport="bot",
+                       wecom_bot_notify_chat_id="chat", history_enabled=True)
+    monkeypatch.setattr("ci_owner_agent.main.load_settings", lambda: settings)
+    monkeypatch.setattr("ci_owner_agent.main.get_history_store", lambda _: make_store())
+    assert main(["notify-notice", "--notice-file", str(notice_file)]) == 0
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["status"] == "pending" and summary["transport"] == "bot"
+    assert summary["inserted"] is True and summary["deliveryKey"]
+
+
 def test_analyze_output_file_writes_utf8_without_bom(tmp_path):
     output_file = tmp_path / "subdir" / "notice.json"
     completed = _run_module(
@@ -435,6 +473,7 @@ def test_serve_wecom_bot_passes_ai_parser_to_worker(monkeypatch):
         def __init__(self, adapter, store, **kwargs):
             captured["ai_parser"] = kwargs["ai_parser"]
             captured["discover_chat_id"] = kwargs["discover_chat_id"]
+            captured["notification_chat_id"] = kwargs["notification_chat_id"]
         def run(self):
             pass
 
@@ -446,7 +485,10 @@ def test_serve_wecom_bot_passes_ai_parser_to_worker(monkeypatch):
     monkeypatch.setenv("CI_AGENT_HISTORY_ENABLED", "true")
     monkeypatch.setenv("CI_AGENT_WECOM_BOT_ENABLED", "true")
     monkeypatch.setenv("CI_AGENT_WECOM_BOT_LLM_ENABLED", "true")
-    monkeypatch.setenv("CI_AGENT_WECOM_NOTIFY_ENABLED", "false")
+    monkeypatch.setenv("CI_AGENT_WECOM_NOTIFY_ENABLED", "true")
+    monkeypatch.setenv("CI_AGENT_WECOM_NOTIFY_TRANSPORT", "webhook")
+    monkeypatch.setenv("CI_AGENT_WECOM_BOT_NOTIFY_CHAT_ID", "")
+    monkeypatch.setenv("CI_AGENT_WECOM_BOT_DISCOVER_CHAT_ID", "false")
 
     result = main([
         "serve-wecom-bot",
@@ -459,6 +501,30 @@ def test_serve_wecom_bot_passes_ai_parser_to_worker(monkeypatch):
     assert result == 0
     assert captured.get("ai_parser") is sentinel_parser
     assert captured.get("discover_chat_id") is False
+    assert captured.get("notification_chat_id") is None
+
+
+def test_serve_wecom_bot_requires_chat_id_only_for_bot_notifications(monkeypatch, capsys):
+    from ci_owner_agent.main import main
+
+    monkeypatch.setenv("CI_AGENT_HISTORY_ENABLED", "true")
+    monkeypatch.setenv("CI_AGENT_WECOM_BOT_ENABLED", "true")
+    monkeypatch.setenv("CI_AGENT_WECOM_NOTIFY_ENABLED", "true")
+    monkeypatch.setenv("CI_AGENT_WECOM_NOTIFY_TRANSPORT", "bot")
+    monkeypatch.setenv("CI_AGENT_WECOM_BOT_NOTIFY_CHAT_ID", "")
+    assert main(["serve-wecom-bot", "--bot-id", "bot", "--secret", "secret"]) == 2
+    captured = capsys.readouterr()
+    assert "CI_AGENT_WECOM_BOT_NOTIFY_CHAT_ID" in captured.err and "Traceback" not in captured.err
+
+
+def test_invalid_notify_transport_exits_cleanly(monkeypatch, capsys):
+    from ci_owner_agent.main import main
+
+    monkeypatch.setenv("CI_AGENT_WECOM_NOTIFY_TRANSPORT", "smtp")
+    assert main(["notify-notice", "--notice-file", "unused.json"]) == 2
+    captured = capsys.readouterr()
+    assert "CI_AGENT_WECOM_NOTIFY_TRANSPORT" in captured.err
+    assert "Traceback" not in captured.err
 
 
 def test_weekly_notify_outbox_exception_returns_2_without_traceback(monkeypatch, capsys):

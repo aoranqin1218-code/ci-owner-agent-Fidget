@@ -64,7 +64,7 @@ def test_service_skips_no_important_and_dry_run_does_not_write():
 
 def test_notification_period_dedup_and_force():
     store = make_store(); config = WeeklyTestReportConfig.model_validate({"important": {"enabled": False}})
-    service = WeeklyTestReportService(store, config, notification_chat_id="chat")
+    service = WeeklyTestReportService(store, config, notification_transport="bot", notification_chat_id="chat")
     report = {"importantItemCount": 1, "normalItemCount": 0, "markdown": "x", "digest": "d"}
     first = service.notify(report, repo="r", jobs=["j"], branches=["dev"], period_start=START, period_end=END)
     second = service.notify(report, repo="r", jobs=["j"], branches=["dev"], period_start=START, period_end=END)
@@ -73,8 +73,27 @@ def test_notification_period_dedup_and_force():
     assert len(store.wecom_notification_outbox.docs) == 2
 
 
+def test_weekly_webhook_success_dedup_force_and_failure(monkeypatch):
+    store = make_store(); config = WeeklyTestReportConfig.model_validate({"important": {"enabled": False}})
+    service = WeeklyTestReportService(store, config, notification_transport="webhook",
+                                      webhook_url="https://example.test/secret")
+    report = {"importantItemCount": 1, "normalItemCount": 0, "markdown": "owner <@alice>", "digest": "d"}
+    outcomes = [True, False]
+    calls = []
+    monkeypatch.setattr("ci_owner_agent.services.weekly_test_report_service.send_wecom_markdown",
+                        lambda *args: calls.append(args) or {"ok": outcomes.pop(0), "statusCode": 200,
+                                                            "response": "safe", "error": None})
+    first = service.notify(report, repo="r", jobs=["b", "a"], branches=["release", "dev"], period_start=START, period_end=END)
+    skipped = service.notify(report, repo="r", jobs=["a", "b"], branches=["dev", "release"], period_start=START, period_end=END)
+    forced = service.notify(report, repo="r", jobs=["a", "b"], branches=["dev", "release"], period_start=START, period_end=END, force=True)
+    assert first["status"] == "sent" and skipped["reason"] == "already_sent" and forced["status"] == "failed"
+    assert len(calls) == 2 and calls[0][1] == "owner <@alice>"
+    assert store.report_notifications.docs[0]["status"] == "failed"
+    assert store.wecom_notification_outbox.docs == []
+
+
 def test_weekly_notify_handles_outbox_exception(monkeypatch):
-    store = make_store(); service = WeeklyTestReportService(store, WeeklyTestReportConfig.model_validate({"important": {"enabled": False}}), notification_chat_id="chat")
+    store = make_store(); service = WeeklyTestReportService(store, WeeklyTestReportConfig.model_validate({"important": {"enabled": False}}), notification_transport="bot", notification_chat_id="chat")
     monkeypatch.setattr(service.outbox, "enqueue_markdown", lambda **_: (_ for _ in ()).throw(RuntimeError("mongodb://user:password@secret-host")))
     report = {"importantItemCount": 1, "normalItemCount": 0, "markdown": "private", "digest": "d"}
     result = service.notify(report, repo="r", jobs=["j"], branches=["dev"], period_start=START, period_end=END)
@@ -83,7 +102,7 @@ def test_weekly_notify_handles_outbox_exception(monkeypatch):
 
 
 def test_weekly_existing_dead_returns_error_and_force_creates_new_delivery():
-    store = make_store(); service = WeeklyTestReportService(store, WeeklyTestReportConfig.model_validate({"important": {"enabled": False}}), notification_chat_id="chat")
+    store = make_store(); service = WeeklyTestReportService(store, WeeklyTestReportConfig.model_validate({"important": {"enabled": False}}), notification_transport="bot", notification_chat_id="chat")
     report = {"importantItemCount": 1, "normalItemCount": 0, "markdown": "x", "digest": "d"}
     first = service.notify(report, repo="r", jobs=["j"], branches=["dev"], period_start=START, period_end=END)
     store.wecom_notification_outbox.docs[0]["status"] = "dead"
@@ -135,7 +154,7 @@ def test_weekly_completed_builds_multi_job_and_period_boundaries():
 
 def test_weekly_notification_dedup_is_scope_order_independent():
     store = make_store()
-    service = WeeklyTestReportService(store, WeeklyTestReportConfig.model_validate({"important": {"enabled": False}}), notification_chat_id="chat")
+    service = WeeklyTestReportService(store, WeeklyTestReportConfig.model_validate({"important": {"enabled": False}}), notification_transport="bot", notification_chat_id="chat")
     report = {"importantItemCount": 1, "normalItemCount": 0, "markdown": "x", "digest": "d"}
     first = service.notify(report, repo="r", jobs=["job-b", "job-a", "job-a"], branches=["release", "dev", "dev"], period_start=START, period_end=END)
     second = service.notify(report, repo="r", jobs=["job-a", "job-b"], branches=["dev", "release"], period_start=START, period_end=END)
@@ -168,7 +187,7 @@ def test_weekly_invalid_or_empty_branch_filter_matches_no_data():
     store = make_store()
     _save_build(store, job="job", number=1, result="SUCCESS", timestamp=START, branch="dev")
     _save_build(store, job="job", number=2, result="SUCCESS", timestamp=START, branch="release")
-    service = WeeklyTestReportService(store, WeeklyTestReportConfig.model_validate({"important": {"enabled": False}}), notification_chat_id="chat")
+    service = WeeklyTestReportService(store, WeeklyTestReportConfig.model_validate({"important": {"enabled": False}}), notification_transport="bot", notification_chat_id="chat")
     for branches in (["refs/tags/v1"], []):
         report = service.generate(repo="r", jobs=["job"], branches=branches, period_start=START, period_end=END)
         assert report["stats"] == [] and report["completedBuildCount"] == 0 and report["failedBuildCount"] == 0
