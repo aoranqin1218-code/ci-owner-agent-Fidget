@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 
+from ci_owner_agent.services.history_store import record_notification_attempt
 from ci_owner_agent.services.test_failure_stats import TestFailureStatsService
 from ci_owner_agent.services.test_maintainer_mapping import TestMaintainerResolver
 from ci_owner_agent.services.weekly_test_report_formatter import classify_weekly_report_stats, format_weekly_test_report
@@ -125,11 +126,15 @@ class WeeklyTestReportService:
             send_result = send_wecom_markdown(self.webhook_url, report["markdown"])
         status = "sent" if send_result.get("ok") else "failed"
         now = dt.datetime.now(dt.timezone.utc)
-        doc = {**key, "digest": report["digest"], "status": status,
-               "messagePreview": report["markdown"][:1000], "error": send_result.get("error"), "updatedAt": now}
         try:
-            self.store.report_notifications.update_one(
-                key, {"$set": doc, "$setOnInsert": {"createdAt": now}}, upsert=True
+            record_notification_attempt(
+                self.store.report_notifications,
+                key,
+                attempt_status=status,
+                message_preview=report["markdown"],
+                error=send_result.get("error"),
+                now=now,
+                extra_fields={"digest": report["digest"]},
             )
         except Exception as exc:
             logging.getLogger(__name__).warning("Weekly notification history unavailable: %s", type(exc).__name__)

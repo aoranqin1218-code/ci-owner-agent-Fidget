@@ -530,7 +530,7 @@ def test_notify_webhook_without_mapping_falls_back_to_name(tmp_path, monkeypatch
     assert "<@Tang.Tangerine-唐嘉伟>" not in calls[0][1]
 
 
-def test_notify_webhook_records_sent_failed_dedup_and_force(monkeypatch):
+def test_webhook_force_failure_does_not_erase_prior_success(monkeypatch):
     store = make_store()
     notice = CiResponsibilityNotice.model_validate(notice_payload([item()]))
     settings = replace(load_settings(), wecom_notify_transport="webhook",
@@ -538,15 +538,46 @@ def test_notify_webhook_records_sent_failed_dedup_and_force(monkeypatch):
     outcomes = [True, False]
     calls = []
     monkeypatch.setattr("ci_owner_agent.main.get_history_store", lambda _: store)
-    monkeypatch.setattr("ci_owner_agent.main.send_wecom_markdown",
-                        lambda *args: calls.append(args) or {"ok": outcomes.pop(0), "statusCode": 200,
-                                                            "response": "safe", "error": None})
+    def send(*args):
+        calls.append(args)
+        ok = outcomes.pop(0)
+        return {"ok": ok, "statusCode": 200, "response": "safe",
+                "error": None if ok else "safe failure"}
+
+    monkeypatch.setattr("ci_owner_agent.main.send_wecom_markdown", send)
     first = _notify_notice(notice, settings, dry_run=False, force=False, feedback_base_url=None)
-    skipped = _notify_notice(notice, settings, dry_run=False, force=False, feedback_base_url=None)
     forced = _notify_notice(notice, settings, dry_run=False, force=True, feedback_base_url=None)
-    assert first["status"] == "sent" and skipped["status"] == "skipped" and forced["status"] == "failed"
-    assert len(calls) == 2 and store.notifications.docs[0]["status"] == "failed"
+    skipped = _notify_notice(notice, settings, dry_run=False, force=False, feedback_base_url=None)
+    doc = store.notifications.docs[0]
+    assert first["status"] == "sent" and forced["status"] == "failed" and skipped["status"] == "skipped"
+    assert len(calls) == 2 and doc["status"] == "sent"
+    assert doc["lastAttemptStatus"] == "failed" and doc["lastAttemptError"] == "safe failure"
     assert store.wecom_notification_outbox.docs == []
+
+
+def test_webhook_initial_failure_can_retry_and_upgrade_to_sent(monkeypatch):
+    store = make_store()
+    notice = CiResponsibilityNotice.model_validate(notice_payload([item()]))
+    settings = replace(load_settings(), wecom_notify_transport="webhook",
+                       wecom_webhook_url="https://example.test/secret", notification_dedup_enabled=True)
+    outcomes = [False, True]
+    calls = []
+    monkeypatch.setattr("ci_owner_agent.main.get_history_store", lambda _: store)
+
+    def send(*args):
+        calls.append(args)
+        ok = outcomes.pop(0)
+        return {"ok": ok, "statusCode": 200, "response": "safe",
+                "error": None if ok else "safe failure"}
+
+    monkeypatch.setattr("ci_owner_agent.main.send_wecom_markdown", send)
+    failed = _notify_notice(notice, settings, dry_run=False, force=False, feedback_base_url=None)
+    sent = _notify_notice(notice, settings, dry_run=False, force=False, feedback_base_url=None)
+    skipped = _notify_notice(notice, settings, dry_run=False, force=False, feedback_base_url=None)
+    doc = store.notifications.docs[0]
+    assert failed["status"] == "failed" and sent["status"] == "sent" and skipped["status"] == "skipped"
+    assert len(calls) == 2 and doc["status"] == "sent"
+    assert doc["lastAttemptStatus"] == "sent" and doc["lastAttemptError"] is None
 
 
 def test_notify_dry_run_never_calls_webhook_or_outbox(monkeypatch):

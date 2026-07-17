@@ -38,6 +38,62 @@ def _create_index(collection: Any, spec: list[tuple[str, int]], **options: Any) 
         return collection.create_index(spec, unique=bool(options.get("unique", False)))
 
 
+def record_notification_attempt(
+    collection: Any,
+    key: dict,
+    *,
+    attempt_status: str,
+    message_preview: str,
+    error: str | None,
+    now: dt.datetime,
+    extra_fields: dict | None = None,
+) -> dict:
+    """Record the latest attempt without ever downgrading a successful delivery."""
+    if attempt_status not in {"sent", "failed"}:
+        raise ValueError("attempt_status must be sent or failed")
+    preview = message_preview[:1000]
+    extra = dict(extra_fields or {})
+    attempt_fields = {
+        "lastAttemptStatus": attempt_status,
+        "lastAttemptError": error if attempt_status == "failed" else None,
+        "lastAttemptAt": now,
+        "updatedAt": now,
+    }
+    if attempt_status == "sent":
+        fields = {
+            **extra,
+            "status": "sent",
+            "error": None,
+            "messagePreview": preview,
+            **attempt_fields,
+        }
+        collection.update_one(key, {"$set": fields, "$setOnInsert": {"createdAt": now}}, upsert=True)
+    else:
+        failure_fields = {
+            **extra,
+            "status": "failed",
+            "error": error,
+            "messagePreview": preview,
+            **attempt_fields,
+        }
+        collection.update_one({**key, "status": {"$ne": "sent"}}, {"$set": failure_fields}, upsert=False)
+        collection.update_one(
+            key,
+            {
+                "$set": attempt_fields,
+                "$setOnInsert": {
+                    **extra,
+                    "status": "failed",
+                    "error": error,
+                    "messagePreview": preview,
+                    "createdAt": now,
+                },
+            },
+            upsert=True,
+        )
+    return collection.find_one(key) or {**key, "status": attempt_status, **attempt_fields}
+
+
 def _canonical_history_chunk(chunk: dict) -> dict:
     result = dict(chunk)
     signature = dict(chunk.get("signature") or {})
@@ -473,14 +529,14 @@ class MongoHistoryStore:
             "noticeHash": notice_hash,
             "channel": channel,
         }
-        doc = {
-            **key,
-            "status": status,
-            "messagePreview": message[:1000],
-            "error": error,
-            "updatedAt": now,
-        }
-        self.notifications.update_one(key, {"$set": doc, "$setOnInsert": {"createdAt": now}}, upsert=True)
+        doc = record_notification_attempt(
+            self.notifications,
+            key,
+            attempt_status=status,
+            message_preview=message,
+            error=error,
+            now=now,
+        )
         return {"ok": True, **doc}
 
 

@@ -73,23 +73,53 @@ def test_notification_period_dedup_and_force():
     assert len(store.wecom_notification_outbox.docs) == 2
 
 
-def test_weekly_webhook_success_dedup_force_and_failure(monkeypatch):
+def test_weekly_webhook_force_failure_preserves_sent_dedup(monkeypatch):
     store = make_store(); config = WeeklyTestReportConfig.model_validate({"important": {"enabled": False}})
     service = WeeklyTestReportService(store, config, notification_transport="webhook",
                                       webhook_url="https://example.test/secret")
     report = {"importantItemCount": 1, "normalItemCount": 0, "markdown": "owner <@alice>", "digest": "d"}
     outcomes = [True, False]
     calls = []
-    monkeypatch.setattr("ci_owner_agent.services.weekly_test_report_service.send_wecom_markdown",
-                        lambda *args: calls.append(args) or {"ok": outcomes.pop(0), "statusCode": 200,
-                                                            "response": "safe", "error": None})
+    def send(*args):
+        calls.append(args)
+        ok = outcomes.pop(0)
+        return {"ok": ok, "statusCode": 200, "response": "safe",
+                "error": None if ok else "safe failure"}
+
+    monkeypatch.setattr("ci_owner_agent.services.weekly_test_report_service.send_wecom_markdown", send)
     first = service.notify(report, repo="r", jobs=["b", "a"], branches=["release", "dev"], period_start=START, period_end=END)
-    skipped = service.notify(report, repo="r", jobs=["a", "b"], branches=["dev", "release"], period_start=START, period_end=END)
     forced = service.notify(report, repo="r", jobs=["a", "b"], branches=["dev", "release"], period_start=START, period_end=END, force=True)
-    assert first["status"] == "sent" and skipped["reason"] == "already_sent" and forced["status"] == "failed"
+    skipped = service.notify(report, repo="r", jobs=["a", "b"], branches=["dev", "release"], period_start=START, period_end=END)
+    doc = store.report_notifications.docs[0]
+    assert first["status"] == "sent" and forced["status"] == "failed" and skipped["reason"] == "already_sent"
     assert len(calls) == 2 and calls[0][1] == "owner <@alice>"
-    assert store.report_notifications.docs[0]["status"] == "failed"
+    assert doc["status"] == "sent" and doc["messagePreview"] == "owner <@alice>"
+    assert doc["lastAttemptStatus"] == "failed" and doc["lastAttemptError"] == "safe failure"
     assert store.wecom_notification_outbox.docs == []
+
+
+def test_weekly_webhook_initial_failure_can_retry(monkeypatch):
+    store = make_store(); config = WeeklyTestReportConfig.model_validate({"important": {"enabled": False}})
+    service = WeeklyTestReportService(store, config, notification_transport="webhook",
+                                      webhook_url="https://example.test/secret")
+    report = {"importantItemCount": 1, "normalItemCount": 0, "markdown": "owner <@alice>", "digest": "d"}
+    outcomes = [False, True]
+    calls = []
+
+    def send(*args):
+        calls.append(args)
+        ok = outcomes.pop(0)
+        return {"ok": ok, "statusCode": 200, "response": "safe",
+                "error": None if ok else "safe failure"}
+
+    monkeypatch.setattr("ci_owner_agent.services.weekly_test_report_service.send_wecom_markdown", send)
+    failed = service.notify(report, repo="r", jobs=["j"], branches=["dev"], period_start=START, period_end=END)
+    sent = service.notify(report, repo="r", jobs=["j"], branches=["dev"], period_start=START, period_end=END)
+    skipped = service.notify(report, repo="r", jobs=["j"], branches=["dev"], period_start=START, period_end=END)
+    doc = store.report_notifications.docs[0]
+    assert failed["status"] == "failed" and sent["status"] == "sent" and skipped["reason"] == "already_sent"
+    assert len(calls) == 2 and doc["status"] == "sent"
+    assert doc["lastAttemptStatus"] == "sent" and doc["lastAttemptError"] is None
 
 
 def test_weekly_notify_handles_outbox_exception(monkeypatch):
