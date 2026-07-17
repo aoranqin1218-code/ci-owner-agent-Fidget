@@ -23,6 +23,7 @@ from ci_owner_agent.services.notification_formatter import format_wecom_markdown
 from ci_owner_agent.services.test_maintainer_mapping import TestMaintainerResolver
 from ci_owner_agent.services.wecom_mongo_user_mapping import build_wecom_notice_mapper
 from ci_owner_agent.services.wecom_notification_outbox import WeComNotificationOutbox
+from ci_owner_agent.services.wecom_notifier import send_wecom_markdown
 from ci_owner_agent.services.test_failure_stats import TestFailureStatsService
 from ci_owner_agent.services.weekly_test_report_config import load_weekly_test_report_config, parse_aware_datetime, resolve_period
 from ci_owner_agent.services.weekly_test_report_service import WeeklyTestReportService
@@ -31,6 +32,24 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
+
+_NOTIFICATION_SUMMARY_KEYS = (
+    "ok",
+    "status",
+    "transport",
+    "sent",
+    "reason",
+    "inserted",
+    "deliveryKey",
+    "importantItemCount",
+    "normalItemCount",
+    "ignoredItemCount",
+)
+
+
+def _notification_result_summary(result: dict) -> dict:
+    return {key: result.get(key) for key in _NOTIFICATION_SUMMARY_KEYS if key in result}
 
 
 def _serialize_json(model) -> str:
@@ -147,7 +166,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    settings = load_settings()
+    try:
+        settings = load_settings()
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
     parser = build_parser()
     try:
         args = parser.parse_args(argv)
@@ -218,6 +241,8 @@ def main(argv: list[str] | None = None) -> int:
         resolver = TestMaintainerResolver.from_yaml(settings.test_maintainer_mapping_file)
         service = WeeklyTestReportService(store, config, resolver=resolver,
                                           fallback_userids=settings.wecom_fallback_userids,
+                                          notification_transport=getattr(settings, "wecom_notify_transport", "webhook"),
+                                          webhook_url=getattr(settings, "wecom_webhook_url", None),
                                           notification_chat_id=settings.wecom_bot_notify_chat_id,
                                           notification_dedup_enabled=settings.notification_dedup_enabled,
                                           outbox_lease_seconds=settings.wecom_bot_notify_lease_seconds,
@@ -237,7 +262,7 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"ERROR: weekly report notification failed: {result.get('error')}", file=sys.stderr)
                 return 2
             if result.get("reason") or result.get("status"):
-                print(json.dumps({k: v for k, v in result.items() if k != "markdown"}, ensure_ascii=False))
+                print(json.dumps(_notification_result_summary(result), ensure_ascii=False))
         return 0
     if args.command == "analyze":
         recorder = _start_metrics(settings, args.job, args.build, args.repo, "analyze")
@@ -319,7 +344,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"WARNING: notify failed: {result.get('error')}", file=sys.stderr)
             return 2
         else:
-            print(json.dumps({key: result.get(key) for key in ("ok", "status", "inserted", "deliveryKey")}, ensure_ascii=False))
+            print(json.dumps(_notification_result_summary(result), ensure_ascii=False))
         return 0
     if args.command == "feedback":
         store = get_history_store(settings)
@@ -391,9 +416,16 @@ def main(argv: list[str] | None = None) -> int:
         if not secret:
             print("ERROR: Secret is required (--secret or CI_AGENT_WECOM_BOT_SECRET)", file=sys.stderr)
             return 2
-        if settings.wecom_notify_enabled and not settings.wecom_bot_notify_chat_id:
-            print("ERROR: CI_AGENT_WECOM_BOT_NOTIFY_CHAT_ID is required when notifications are enabled", file=sys.stderr)
+        bot_transport_enabled = settings.wecom_notify_transport == "bot"
+        default_bot_notification_enabled = settings.wecom_notify_enabled and bot_transport_enabled
+        if default_bot_notification_enabled and not settings.wecom_bot_notify_chat_id:
+            print(
+                "ERROR: CI_AGENT_WECOM_BOT_NOTIFY_CHAT_ID is required "
+                "when default bot notifications are enabled",
+                file=sys.stderr,
+            )
             return 2
+        notification_chat_id = settings.wecom_bot_notify_chat_id if bot_transport_enabled else None
         store = get_history_store(settings)
         if store is None:
             print("ERROR: MongoDB history storage is unavailable", file=sys.stderr)
@@ -427,7 +459,7 @@ def main(argv: list[str] | None = None) -> int:
             ai_parser=ai_parser,
             card_action_url=card_action_url,
             discover_chat_id=settings.wecom_bot_discover_chat_id,
-            notification_chat_id=settings.wecom_bot_notify_chat_id,
+            notification_chat_id=notification_chat_id,
             notification_poll_seconds=settings.wecom_bot_notify_poll_seconds,
             notification_lease_seconds=settings.wecom_bot_notify_lease_seconds,
             notification_max_attempts=settings.wecom_bot_notify_max_attempts,
@@ -554,30 +586,79 @@ def _notify_notice(notice: CiResponsibilityNotice, settings, *, dry_run: bool, f
             mention_mode=settings.wecom_mention_mode,
         )
         if dry_run:
-            return {"ok": True, "status": "dry_run", "markdown": markdown}
-        if store is None:
-            return {"ok": False, "error": "MongoDB history storage is required for WeCom bot notifications", "markdown": markdown}
-        if not settings.wecom_bot_notify_chat_id:
-            return {"ok": False, "error": "CI_AGENT_WECOM_BOT_NOTIFY_CHAT_ID is not configured", "markdown": markdown}
-        dedup_key = json.dumps({"notificationType": "ci_notice", "repo": notice.repo or "", "job": notice.job,
-                                "branch": notice.branch, "buildNumber": notice.buildNumber, "notificationDigest": digest},
-                               ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            return {"ok": True, "status": "dry_run", "transport": settings.wecom_notify_transport,
+                    "markdown": markdown}
+        if settings.wecom_notify_transport == "webhook":
+            return _notify_notice_via_webhook(
+                notice, settings, store=store, markdown=markdown, digest=digest, force=force
+            )
+        return _notify_notice_via_bot(
+            notice, settings, store=store, markdown=markdown, digest=digest, force=force
+        )
+
+
+def _notify_notice_via_webhook(notice, settings, *, store, markdown: str, digest: str, force: bool) -> dict:
+    if store is not None and settings.notification_dedup_enabled and not force:
         try:
-            queued = WeComNotificationOutbox(store, lease_seconds=settings.wecom_bot_notify_lease_seconds,
-                                             max_attempts=settings.wecom_bot_notify_max_attempts).enqueue_markdown(
-                notification_type="ci_notice", target_chat_id=settings.wecom_bot_notify_chat_id, markdown=markdown,
-                dedup_key=dedup_key, force=force or not settings.notification_dedup_enabled,
-                metadata={"repo": notice.repo or "", "job": notice.job, "branch": notice.branch,
-                          "buildNumber": notice.buildNumber, "noticeHash": digest})
+            if store.notification_sent(
+                repo=str(notice.repo or ""), job=notice.job, branch=notice.branch,
+                build_number=notice.buildNumber, notice_hash=digest, channel="wecom",
+            ):
+                return {"ok": True, "status": "skipped", "transport": "webhook", "sent": False,
+                        "markdown": markdown}
         except Exception as exc:
-            logging.getLogger(__name__).warning("WeCom notification enqueue failed: %s", type(exc).__name__)
-            return {"ok": False, "status": "enqueue_failed", "error": "notification outbox is unavailable"}
-        if not queued["inserted"] and queued["status"] == "dead":
-            return {"ok": False, "status": "dead", "inserted": False, "reason": "existing_dead_delivery",
-                    "error": "existing notification delivery is dead; retry with --force",
-                    "deliveryKey": queued["deliveryKey"], "markdown": markdown}
-        return {"ok": True, "status": queued["status"], "inserted": queued["inserted"],
+            logging.getLogger(__name__).warning("WeCom notification dedup unavailable: %s", type(exc).__name__)
+    if not settings.wecom_webhook_url:
+        error = "CI_AGENT_WECOM_WEBHOOK_URL is not configured"
+        _save_webhook_notification(store, notice, digest, markdown, status="failed", error=error)
+        return {"ok": False, "status": "failed", "transport": "webhook", "sent": False,
+                "error": error, "markdown": markdown}
+    send_result = send_wecom_markdown(settings.wecom_webhook_url, markdown)
+    status = "sent" if send_result.get("ok") else "failed"
+    _save_webhook_notification(store, notice, digest, markdown, status=status, error=send_result.get("error"))
+    return {**send_result, "status": status, "transport": "webhook", "sent": bool(send_result.get("ok")),
+            "markdown": markdown}
+
+
+def _save_webhook_notification(store, notice, digest: str, markdown: str, *, status: str, error: str | None) -> None:
+    if store is None:
+        return
+    try:
+        store.save_notification(
+            notice=notice, notice_hash=digest, channel="wecom", status=status, message=markdown, error=error
+        )
+    except Exception as exc:
+        logging.getLogger(__name__).warning("WeCom notification history unavailable: %s", type(exc).__name__)
+
+
+def _notify_notice_via_bot(notice, settings, *, store, markdown: str, digest: str, force: bool) -> dict:
+    if store is None:
+        return {"ok": False, "transport": "bot",
+                "error": "MongoDB history storage is required for WeCom bot notifications", "markdown": markdown}
+    if not settings.wecom_bot_notify_chat_id:
+        return {"ok": False, "transport": "bot",
+                "error": "CI_AGENT_WECOM_BOT_NOTIFY_CHAT_ID is not configured", "markdown": markdown}
+    dedup_key = json.dumps({"notificationType": "ci_notice", "repo": notice.repo or "", "job": notice.job,
+                            "branch": notice.branch, "buildNumber": notice.buildNumber, "notificationDigest": digest},
+                           ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    try:
+        queued = WeComNotificationOutbox(store, lease_seconds=settings.wecom_bot_notify_lease_seconds,
+                                         max_attempts=settings.wecom_bot_notify_max_attempts).enqueue_markdown(
+            notification_type="ci_notice", target_chat_id=settings.wecom_bot_notify_chat_id, markdown=markdown,
+            dedup_key=dedup_key, force=force or not settings.notification_dedup_enabled,
+            metadata={"repo": notice.repo or "", "job": notice.job, "branch": notice.branch,
+                      "buildNumber": notice.buildNumber, "noticeHash": digest})
+    except Exception as exc:
+        logging.getLogger(__name__).warning("WeCom notification enqueue failed: %s", type(exc).__name__)
+        return {"ok": False, "status": "enqueue_failed", "transport": "bot",
+                "error": "notification outbox is unavailable"}
+    if not queued["inserted"] and queued["status"] == "dead":
+        return {"ok": False, "status": "dead", "transport": "bot", "inserted": False,
+                "reason": "existing_dead_delivery",
+                "error": "existing notification delivery is dead; retry with --force",
                 "deliveryKey": queued["deliveryKey"], "markdown": markdown}
+    return {"ok": True, "status": queued["status"], "transport": "bot", "inserted": queued["inserted"],
+            "deliveryKey": queued["deliveryKey"], "markdown": markdown}
 
 
 def _add_weekly_scope_arguments(parser: argparse.ArgumentParser) -> None:

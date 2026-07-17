@@ -47,6 +47,8 @@ class Settings:
     ai_history_max_fact_candidates: int
     ai_history_max_compare_calls: int
     wecom_notify_enabled: bool
+    wecom_notify_transport: str
+    wecom_webhook_url: str | None
     wecom_notify_dry_run: bool
     wecom_notify_on_success: bool
     wecom_notify_on_no_owner: bool
@@ -137,6 +139,13 @@ def _parse_fallback_userids(raw: str | None) -> tuple[str, ...]:
     return tuple(result)
 
 
+def _wecom_notify_transport_env() -> str:
+    value = (os.getenv("CI_AGENT_WECOM_NOTIFY_TRANSPORT") or "webhook").strip().lower()
+    if value not in {"webhook", "bot"}:
+        raise ValueError("CI_AGENT_WECOM_NOTIFY_TRANSPORT must be one of: webhook, bot")
+    return value
+
+
 def load_settings(env_file: str | Path | None = None) -> Settings:
     if load_dotenv is not None:
         load_dotenv(dotenv_path=env_file, override=False)
@@ -179,6 +188,8 @@ def load_settings(env_file: str | Path | None = None) -> Settings:
         ai_history_max_fact_candidates=_int_env_or_default("CI_AGENT_AI_HISTORY_MAX_FACT_CANDIDATES", 20),
         ai_history_max_compare_calls=_int_env_or_default("CI_AGENT_AI_HISTORY_MAX_COMPARE_CALLS", 20),
         wecom_notify_enabled=_bool_env("CI_AGENT_WECOM_NOTIFY_ENABLED", False),
+        wecom_notify_transport=_wecom_notify_transport_env(),
+        wecom_webhook_url=(os.getenv("CI_AGENT_WECOM_WEBHOOK_URL") or "").strip() or None,
         wecom_notify_dry_run=_bool_env("CI_AGENT_WECOM_NOTIFY_DRY_RUN", True),
         wecom_notify_on_success=_bool_env("CI_AGENT_WECOM_NOTIFY_ON_SUCCESS", False),
         wecom_notify_on_no_owner=_bool_env("CI_AGENT_WECOM_NOTIFY_ON_NO_OWNER", True),
@@ -238,6 +249,7 @@ def public_settings(settings: Settings) -> dict[str, object]:
     data["langsmith_api_key"] = "***" if settings.langsmith_api_key else None
     data["feedback_shared_token"] = "***" if settings.feedback_shared_token else None
     data["wecom_bot_secret"] = "***" if settings.wecom_bot_secret else None
+    data["wecom_webhook_url"] = "***" if settings.wecom_webhook_url else None
     data["wecom_bot_notify_chat_id"] = "***" if settings.wecom_bot_notify_chat_id else None
     data["wecom_bot_llm_max_input_chars"] = settings.wecom_bot_llm_max_input_chars
     data["repo_cache_dir"] = str(settings.repo_cache_dir)

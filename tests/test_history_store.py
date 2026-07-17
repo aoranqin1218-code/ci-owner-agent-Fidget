@@ -892,21 +892,38 @@ def test_history_search_similar_failures_lookback_when_last_success_missing(repo
     assert result["lastSuccessfulBuildNumberMissing"] is True
 
 
-def test_save_notification_preserves_created_at(repo_cache, sample_repo, logs):
+def test_save_notification_status_is_monotonic_and_tracks_latest_attempt(repo_cache, sample_repo, logs):
     context = make_lc_context(repo_cache, sample_repo, logs)
     store = make_store()
     from ci_owner_agent.schemas import CiResponsibilityNotice
 
     notice = CiResponsibilityNotice.model_validate(high_confidence_payload(context))
     digest = notice_hash(notice)
-    store.save_notification(notice=notice, notice_hash=digest, channel="wecom", status="sent", message="first")
+    store.save_notification(notice=notice, notice_hash=digest, channel="wecom", status="failed", message="first failure", error="first")
     first_doc = dict(store.notifications.docs[0])
-    store.save_notification(notice=notice, notice_hash=digest, channel="wecom", status="failed", message="second", error="boom")
-    second_doc = store.notifications.docs[0]
+    store.save_notification(notice=notice, notice_hash=digest, channel="wecom", status="failed", message="second failure", error="second")
+    assert store.notifications.docs[0]["status"] == "failed"
+    assert store.notifications.docs[0]["lastAttemptStatus"] == "failed"
 
+    store.save_notification(notice=notice, notice_hash=digest, channel="wecom", status="sent", message="successful")
+    sent_doc = dict(store.notifications.docs[0])
+    assert sent_doc["status"] == "sent" and sent_doc["error"] is None
+    assert sent_doc["lastAttemptStatus"] == "sent" and sent_doc["lastAttemptError"] is None
+
+    store.save_notification(notice=notice, notice_hash=digest, channel="wecom", status="failed", message="later failure", error="safe failure")
+    second_doc = store.notifications.docs[0]
     assert second_doc["createdAt"] == first_doc["createdAt"]
     assert second_doc["updatedAt"] != first_doc["updatedAt"]
-    assert second_doc["status"] == "failed"
+    assert second_doc["status"] == "sent" and second_doc["error"] is None
+    assert second_doc["messagePreview"] == "successful"
+    assert second_doc["lastAttemptStatus"] == "failed"
+    assert second_doc["lastAttemptError"] == "safe failure"
+    assert second_doc["lastAttemptAt"] == second_doc["updatedAt"]
+
+    store.save_notification(notice=notice, notice_hash=digest, channel="wecom", status="sent", message="successful again")
+    final_doc = store.notifications.docs[0]
+    assert final_doc["status"] == "sent" and final_doc["messagePreview"] == "successful again"
+    assert final_doc["lastAttemptStatus"] == "sent" and final_doc["lastAttemptError"] is None
 
 
 def test_save_failure_facts_insert_and_delete(repo_cache, sample_repo, logs):

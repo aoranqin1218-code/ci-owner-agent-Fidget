@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from ci_owner_agent.config import _parse_fallback_userids, load_settings, public_settings
+import pytest
 
 
 def test_parse_fallback_userids_empty():
@@ -91,3 +92,33 @@ def test_wecom_bot_chat_discovery_defaults_disabled(monkeypatch):
 def test_wecom_bot_chat_discovery_enabled_from_env(monkeypatch):
     monkeypatch.setenv("CI_AGENT_WECOM_BOT_DISCOVER_CHAT_ID", "true")
     assert load_settings().wecom_bot_discover_chat_id is True
+
+
+def test_wecom_notify_transport_defaults_to_webhook(monkeypatch):
+    monkeypatch.setenv("CI_AGENT_WECOM_NOTIFY_TRANSPORT", "")
+    assert load_settings().wecom_notify_transport == "webhook"
+
+
+@pytest.mark.parametrize(("raw", "expected"), [(" webhook ", "webhook"), (" BOT ", "bot")])
+def test_wecom_notify_transport_is_normalized(monkeypatch, raw, expected):
+    monkeypatch.setenv("CI_AGENT_WECOM_NOTIFY_TRANSPORT", raw)
+    assert load_settings().wecom_notify_transport == expected
+
+
+def test_invalid_wecom_notify_transport_is_explicit(monkeypatch):
+    monkeypatch.setenv("CI_AGENT_WECOM_NOTIFY_TRANSPORT", "email")
+    with pytest.raises(ValueError, match="CI_AGENT_WECOM_NOTIFY_TRANSPORT must be one of"):
+        load_settings()
+
+
+def test_wecom_webhook_url_is_trimmed_and_redacted(monkeypatch):
+    monkeypatch.setenv("CI_AGENT_WECOM_WEBHOOK_URL", " https://qyapi.weixin.qq.com/secret-key ")
+    settings = load_settings()
+    assert settings.wecom_webhook_url == "https://qyapi.weixin.qq.com/secret-key"
+    assert public_settings(settings)["wecom_webhook_url"] == "***"
+    assert public_settings(settings)["wecom_notify_transport"] == settings.wecom_notify_transport
+
+
+def test_empty_wecom_webhook_url_is_none(monkeypatch):
+    monkeypatch.setenv("CI_AGENT_WECOM_WEBHOOK_URL", "   ")
+    assert load_settings().wecom_webhook_url is None

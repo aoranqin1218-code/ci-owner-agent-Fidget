@@ -39,8 +39,8 @@ Jenkins 在线构建 / 本地 console log
   -> 生成 CiResponsibilityNotice
   -> 本地校验、补充 failure signature / path，并降级弱证据
   -> 可选保存 MongoDB 历史、测试文件失败事件和 metrics
-  -> 可选将企业微信通知写入 MongoDB Outbox
-  -> 由 serve-wecom-bot 长连接 Worker 投递通知并处理群内反馈
+  -> 按配置通过群机器人 Webhook 直发，或写入 MongoDB Outbox
+  -> Bot transport 由 serve-wecom-bot 长连接 Worker 投递；机器人在两种 transport 下都处理群内反馈
 ```
 
 ### 1.2 三种主要分析入口
@@ -273,9 +273,9 @@ npm install
 | 组件 | 何时需要 |
 | --- | --- |
 | Jenkins | 使用 `analyze` 或 Jenkins 构建号批处理时。 |
-| MongoDB | 历史继承、反馈、测试文件统计、周报、通知 Outbox 和机器人必需。 |
+| MongoDB | 历史继承、反馈、测试文件统计、周报、Bot Outbox 和长连接机器人必需；Webhook 直发本身不要求。 |
 | LangSmith | 需要 trace 或批处理 `--fetch-trace` 时。 |
-| 企业微信 API 模式机器人 | 真实投递通知和群内反馈时。 |
+| 企业微信 API 模式机器人 | 使用 Bot transport 主动通知或处理群内反馈时。 |
 
 ---
 
@@ -377,7 +377,9 @@ metrics 包含总耗时、阶段耗时、LLM calls、provider 返回的 token us
 | 配置 | 默认值 | 说明 |
 | --- | --- | --- |
 | `CI_AGENT_WECOM_NOTIFY_ENABLED` | `false` | 分析命令是否默认触发通知流程。 |
-| `CI_AGENT_WECOM_NOTIFY_DRY_RUN` | `true` | 默认仅格式化，不向 Outbox 入队。 |
+| `CI_AGENT_WECOM_NOTIFY_TRANSPORT` | `webhook` | CI 通知通道，只允许 `webhook` 或 `bot`。 |
+| `CI_AGENT_WECOM_WEBHOOK_URL` | 空 | 企业微信群机器人 Webhook；公开配置输出中脱敏。 |
+| `CI_AGENT_WECOM_NOTIFY_DRY_RUN` | `true` | 默认仅格式化，不调用 Webhook、也不向 Outbox 入队。 |
 | `CI_AGENT_WECOM_NOTIFY_ON_SUCCESS` | `false` | 是否通知成功构建。 |
 | `CI_AGENT_WECOM_NOTIFY_ON_NO_OWNER` | `true` | 无高可信责任人时是否仍通知。 |
 | `CI_AGENT_WECOM_USER_MAPPING_FILE` | 空 | Mongo 用户映射不可用时的 CSV fallback。 |
@@ -387,6 +389,25 @@ metrics 包含总耗时、阶段耗时、LLM calls、provider 返回的 token us
 | `CI_AGENT_NOTIFICATION_DEDUP_ENABLED` | `true` | 是否按通知 digest 去重。 |
 
 测试维护人不是失败责任人。no-owner 责任项仍保持 `no_high_confidence_owner / 无高可信责任人`，维护人只显示在通知的“待确认维护人”区域。
+
+CI 通知默认使用群机器人 Webhook。`userid` 映射成功时 Markdown 继续生成 `<@userid>`，Webhook 能在企业微信群中呈现蓝色真实成员 @。智能机器人与通知 transport 相互独立：即使 CI 通知使用 Webhook，机器人仍可处理文本反馈、模板卡片、AI 解析和二次确认。需要保留原有主动 Bot 通知链路时设置 `CI_AGENT_WECOM_NOTIFY_TRANSPORT=bot`。
+
+验收通过的推荐部署方式是：群机器人 Webhook 负责 CI 主动通知，长连接智能机器人负责群内反馈。Webhook 模式可以在未启用 MongoDB 时直接发送；启用 MongoDB 后会额外保存 notice 快照、反馈码、去重状态和发送尝试记录。真实群聊验收应确认 `<@userid>` 被客户端渲染为蓝色成员 @，而不是只检查原始 Markdown 文本。
+
+生产 Webhook 示例：
+
+```env
+CI_AGENT_WECOM_NOTIFY_ENABLED=true
+CI_AGENT_WECOM_NOTIFY_TRANSPORT=webhook
+CI_AGENT_WECOM_WEBHOOK_URL=https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=***
+CI_AGENT_WECOM_NOTIFY_DRY_RUN=false
+CI_AGENT_WECOM_MENTION_MODE=userid
+
+CI_AGENT_HISTORY_ENABLED=true
+CI_AGENT_WECOM_BOT_ENABLED=true
+CI_AGENT_WECOM_BOT_ID=***
+CI_AGENT_WECOM_BOT_SECRET=***
+```
 
 `config/test-maintainers.example.yml` 示例：
 
@@ -413,7 +434,7 @@ rules:
 | `CI_AGENT_WECOM_BOT_ID` | 空 | Bot ID。 |
 | `CI_AGENT_WECOM_BOT_SECRET` | 空 | Bot Secret。 |
 | `CI_AGENT_WECOM_BOT_DISCOVER_CHAT_ID` | `false` | 临时发现目标群 chatid；正常运行必须关闭。 |
-| `CI_AGENT_WECOM_BOT_NOTIFY_CHAT_ID` | 空 | 通知目标群 chatid。 |
+| `CI_AGENT_WECOM_BOT_NOTIFY_CHAT_ID` | 空 | 仅 `CI_AGENT_WECOM_NOTIFY_TRANSPORT=bot` 时使用的通知目标群 chatid。 |
 | `CI_AGENT_WECOM_BOT_NOTIFY_POLL_SECONDS` | `2` | Outbox 轮询间隔。 |
 | `CI_AGENT_WECOM_BOT_NOTIFY_LEASE_SECONDS` | `30` | 单条通知发送租约。 |
 | `CI_AGENT_WECOM_BOT_NOTIFY_MAX_ATTEMPTS` | `5` | 最大投递次数。 |
@@ -423,7 +444,17 @@ rules:
 | `CI_AGENT_WECOM_BOT_LLM_ENABLED` | `false` | 启用可选自然语言反馈解析。 |
 | `CI_AGENT_WECOM_BOT_LLM_MAX_INPUT_CHARS` | `2000` | 自然语言解析最大输入字符数。 |
 
-固定反馈命令不依赖 LLM。正式使用自然语言解析时，应配置真实模型；fake parser 只适合测试。
+固定反馈命令不依赖 LLM。正式使用自然语言解析时，应配置真实模型；fake parser 只适合测试。Bot 主动通知模式还需要常驻 Worker：
+
+```env
+CI_AGENT_WECOM_NOTIFY_ENABLED=true
+CI_AGENT_WECOM_NOTIFY_TRANSPORT=bot
+CI_AGENT_WECOM_NOTIFY_DRY_RUN=false
+CI_AGENT_WECOM_BOT_ENABLED=true
+CI_AGENT_WECOM_BOT_ID=***
+CI_AGENT_WECOM_BOT_SECRET=***
+CI_AGENT_WECOM_BOT_NOTIFY_CHAT_ID=***
+```
 
 ### 4.9 反馈服务
 
@@ -489,7 +520,7 @@ python -m ci_owner_agent analyze-local `
 | `--previous-build` / `--previous-commit` | 否 | 显式提供 focusRange 来源。 |
 | `--build-timestamp` | 否 | 带时区 ISO 8601 构建时间。无时区值会拒绝。 |
 | `--notify` | 否 | 触发通知流程。 |
-| `--notify-dry-run` | 否 | 不入队通知。 |
+| `--notify-dry-run` | 否 | 只格式化，不调用 Webhook、也不向 Outbox 入队。 |
 | `--force-notify` | 否 | 忽略通知去重。 |
 | `--output-file` | 否 | 原子写入 UTF-8 notice 文件。 |
 
@@ -527,7 +558,7 @@ python -m ci_owner_agent notify-notice `
 | 参数 | 说明 |
 | --- | --- |
 | `--notice-file` | `CiResponsibilityNotice` JSON，支持 UTF-8 和 UTF-8 BOM。 |
-| `--dry-run` | 打印 Markdown，不向 Outbox 入队。 |
+| `--dry-run` | 打印 Markdown，不调用 Webhook、也不向 Outbox 入队。 |
 | `--force` | 忽略通知去重。 |
 | `--feedback-base-url` | 覆盖反馈 URL。 |
 
@@ -639,9 +670,11 @@ python -m ci_owner_agent weekly-test-report `
 | --- | --- |
 | `--top` | 覆盖配置中的 topN。必须为正整数。 |
 | `--config-file` | 覆盖 `CI_AGENT_WEEKLY_TEST_REPORT_CONFIG_FILE`。 |
-| `--notify` | 生成后向 Outbox 入队。 |
-| `--dry-run` | 输出并模拟通知，不入队。 |
-| `--force` | 为本次投递生成新的 delivery key。 |
+| `--notify` | 按当前 transport 发送：Webhook 直发，Bot 写入 Outbox。 |
+| `--dry-run` | 输出并模拟通知，不调用 Webhook、也不向 Outbox 入队。 |
+| `--force` | 忽略当前 transport 的去重；Webhook 强制直发，Bot 生成新的 delivery key。 |
+
+Webhook 发送记录的顶层 `status` 表示“是否曾经成功发送”。成功后即使一次 `--force` 重发失败，历史 `status` 仍保持 `sent`，最近一次尝试结果记录在 `lastAttemptStatus`、`lastAttemptError` 和 `lastAttemptAt`；因此后续非 force 调用仍会正常去重。
 
 `config/weekly-test-report.yml` 使用严格 schema，支持：
 
@@ -667,7 +700,7 @@ python -m ci_owner_agent serve-wecom-bot
 - MongoDB 可连接；
 - `CI_AGENT_WECOM_BOT_ENABLED=true`；
 - 配置 Bot ID 和 Secret；
-- 如果真实通知开启，还需配置目标群 chatid。
+- 仅当 CI 通知使用 `bot` transport 时，还需配置目标群 chatid。
 
 命令行 `--bot-id` / `--secret` 优先于环境变量。
 
@@ -1044,13 +1077,23 @@ token 只累计 provider 实际返回的 usage，不估算缺失值。
 | `ci_wecom_bot_events` | 机器人消息幂等与处理租约。 |
 | `ci_wecom_notification_outbox` | 待发送、发送中、已发送或 dead 的通知。 |
 
-代码还初始化 `ci_notifications`、`ci_report_notifications` 等辅助集合；当前企业微信真实投递主路径使用 `ci_wecom_notification_outbox`。
+代码还初始化 `ci_notifications`、`ci_report_notifications` 等辅助集合；Webhook 模式用它们做可选发送记录和去重，Bot 模式使用 `ci_wecom_notification_outbox`。
 
 `buildTimestamp` 表示 Jenkins / 输入提供的真实构建时间；`analyzedAt` 表示 Agent 执行时间。没有 `buildTimestamp` 的历史仍可参与总量统计，但不能可靠归入自然周。
 
 ### 7.7 企业微信通知链路
 
-真实通知流程不是分析进程直接调用 webhook：
+真实通知有两条可选路径。默认 Webhook 路径不强制依赖 MongoDB；MongoDB 可用时仍保存通知快照、反馈码、去重和发送结果：
+
+```text
+analyze / notify-notice / weekly-test-report
+  -> 格式化同一份 Markdown（保留 <@userid>）
+  -> 可选 MongoDB 去重
+  -> 企业微信群机器人 Webhook 直发
+  -> 保存 sent / failed 结果（MongoDB 可用时）
+```
+
+Bot 路径完整保留 Outbox、租约、重试和 dead 状态：
 
 ```text
 analyze / notify-notice / weekly-test-report
@@ -1061,7 +1104,9 @@ analyze / notify-notice / weekly-test-report
   -> sent / pending retry / dead
 ```
 
-Outbox 使用稳定 `deliveryKey` 去重。`--force` / `--force-notify` 会生成新的投递键。失败重试使用指数退避，达到最大次数后进入 `dead`。
+Bot Outbox 使用稳定 `deliveryKey` 去重，`--force` / `--force-notify` 会生成新的投递键；失败重试使用指数退避，达到最大次数后进入 `dead`。
+
+Webhook 使用 `ci_notifications` / `ci_report_notifications` 做可选去重。`--force` 会绕过去重并立即重发，但本次重发失败不会抹掉历史成功状态：顶层 `status` 一旦为 `sent` 就保持 `sent`，最近一次尝试结果单独记录在 `lastAttemptStatus`、`lastAttemptError` 和 `lastAttemptAt`。
 
 ### 7.8 测试文件统计
 
@@ -1132,8 +1177,8 @@ Windows 专属进程终止分支通过平台无关 mock 单测验证；POSIX des
 3. **统一逻辑分支名**：`refs/remotes/origin/dev`、`*/dev` 等在输入边界规范化为 `dev`；Mongo 身份字段不保存原始 ref。
 4. **不要把 wrapper 当根因**：Docker、Jenkins、shell、Make 外层错误只有在没有更内层证据时才可作为结论。
 5. **fake provider 不做正式定责**：它用于验证流程和测试，结果固定保守。
-6. **history 关闭会禁用多项能力**：反馈、周报、测试文件统计、Outbox 和机器人均要求 MongoDB history store。
-7. **默认通知是 dry-run**：`.env.example` 中 `CI_AGENT_WECOM_NOTIFY_DRY_RUN=true`。真实入队前必须显式关闭并配置 chatid。
+6. **history 关闭会禁用多项能力**：反馈、周报、测试文件统计、Outbox 和机器人均要求 MongoDB history store；Webhook 直发仍可使用，但不会持久化去重和反馈上下文。
+7. **默认通知是 dry-run**：`.env.example` 中 `CI_AGENT_WECOM_NOTIFY_DRY_RUN=true`。真实通知前必须显式关闭，并按 transport 配置 Webhook URL 或 Bot chatid。
 8. **分析通知失败不会覆盖 notice**：`analyze` / `analyze-local` 将通知异常降级为 warning；独立 `notify-notice` 和 `weekly-test-report` 会以非零状态报告通知失败。
 9. **success marker 不是安全签名**：它保证失败执行和残留产物不会被误 resume，但不能防御有输出目录写权限的攻击者。
 10. **批处理默认 fail-closed**：旧 notice、marker、stdout、stderr、trace 或 metrics 无法清理时，不会启动当前子进程。
@@ -1201,13 +1246,13 @@ Windows 专属进程终止分支通过平台无关 mock 单测验证；POSIX des
      --dry-run
    ```
 
-10. **发现企业微信群 chatid**
+10. **验证 Webhook 主动通知**
 
-    短暂开启 discovery，取得正确群 chatid 后立即关闭。
+    设置 `CI_AGENT_WECOM_NOTIFY_TRANSPORT=webhook`，配置测试群 Webhook 和 userid 映射，关闭通知 dry-run；确认群内收到通知、真实成员 @ 被渲染为蓝色，并验证普通去重和 `--force`。
 
 11. **启动常驻 `serve-wecom-bot`**
 
-    先确认 MongoDB 和 Bot 认证成功，再关闭通知 dry-run，让分析或周报向 Outbox 入队。
+    Webhook transport 下 Worker 只负责群内反馈，不要求通知 chatid。需要验证旧 Bot 主动通知路径时，再发现 chatid、切换 `CI_AGENT_WECOM_NOTIFY_TRANSPORT=bot`，并确认 Outbox 最终进入 `sent`。
 
 12. **验证群内反馈确认流程**
 

@@ -7,8 +7,9 @@ This guide describes how to run `ci-owner-agent` from Jenkins so failed builds a
 - The repo cache is prepared and kept as an agent-only checkout.
 - `CI_AGENT_REPO_CACHE_DIR` points to that repo cache.
 - `TS_ANALYZER_DIR` points to the TypeScript analyzer directory.
-- MongoDB is available for history, notifications, and feedback.
-- A WeCom API-mode bot is available and `serve-wecom-bot` is running continuously.
+- MongoDB is available for history and feedback (Webhook delivery itself can continue if MongoDB is temporarily unavailable).
+- A WeCom group webhook is available for CI notifications.
+- A WeCom API-mode bot is available and `serve-wecom-bot` is running continuously for group feedback.
 - The feedback server is running and reachable from the company network.
 
 ## Recommended Environment
@@ -19,14 +20,13 @@ CI_AGENT_HISTORY_MONGO_URI=mongodb://localhost:27017
 CI_AGENT_HISTORY_MONGO_DB=ci_owner_agent
 
 CI_AGENT_WECOM_NOTIFY_ENABLED=true
+CI_AGENT_WECOM_NOTIFY_TRANSPORT=webhook
+CI_AGENT_WECOM_WEBHOOK_URL=https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=***
 CI_AGENT_WECOM_NOTIFY_DRY_RUN=false
+CI_AGENT_WECOM_MENTION_MODE=userid
 CI_AGENT_WECOM_BOT_ENABLED=true
 CI_AGENT_WECOM_BOT_ID=******
 CI_AGENT_WECOM_BOT_SECRET=******
-CI_AGENT_WECOM_BOT_NOTIFY_CHAT_ID=******
-CI_AGENT_WECOM_BOT_NOTIFY_POLL_SECONDS=2
-CI_AGENT_WECOM_BOT_NOTIFY_LEASE_SECONDS=30
-CI_AGENT_WECOM_BOT_NOTIFY_MAX_ATTEMPTS=5
 CI_AGENT_WECOM_NOTIFY_ON_SUCCESS=false
 CI_AGENT_WECOM_NOTIFY_ON_NO_OWNER=true
 CI_AGENT_NOTIFICATION_DEDUP_ENABLED=true
@@ -40,7 +40,24 @@ CI_AGENT_MODEL_NAME=doubao-seed-2-0-lite-260428
 CI_AGENT_API_KEY=******
 ```
 
-Do not print Bot secrets, API keys, chatids, or feedback tokens in Jenkins logs. The Jenkins command only queues notifications; the long-running bot worker delivers them from the shared MongoDB Outbox.
+Do not print Webhook URLs, Bot secrets, API keys, chatids, or feedback tokens in Jenkins logs. Webhook is the default CI notification transport and preserves `<@userid>` so WeCom renders the required blue member mention. The long-running bot remains responsible for text feedback, template cards, optional AI parsing, and confirmation in both transports.
+
+The original active Bot notification path remains available:
+
+```env
+CI_AGENT_WECOM_NOTIFY_ENABLED=true
+CI_AGENT_WECOM_NOTIFY_TRANSPORT=bot
+CI_AGENT_WECOM_NOTIFY_DRY_RUN=false
+CI_AGENT_WECOM_BOT_ENABLED=true
+CI_AGENT_WECOM_BOT_ID=******
+CI_AGENT_WECOM_BOT_SECRET=******
+CI_AGENT_WECOM_BOT_NOTIFY_CHAT_ID=******
+CI_AGENT_WECOM_BOT_NOTIFY_POLL_SECONDS=2
+CI_AGENT_WECOM_BOT_NOTIFY_LEASE_SECONDS=30
+CI_AGENT_WECOM_BOT_NOTIFY_MAX_ATTEMPTS=5
+```
+
+In Bot mode, the Jenkins command queues notifications and the continuously running bot Worker delivers them from the shared MongoDB Outbox. In Webhook mode, no Outbox notification polling starts and no Bot notification chatid is required.
 
 To discover a group chatid, temporarily disable notifications and set `CI_AGENT_WECOM_BOT_DISCOVER_CHAT_ID=true`. Start `serve-wecom-bot` and @mention the bot in the intended group. It logs only the first qualifying group chatid per process; copy it manually into `CI_AGENT_WECOM_BOT_NOTIFY_CHAT_ID`, then set discovery back to false. Do not leave discovery enabled or log callback frames.
 
@@ -89,8 +106,8 @@ Or use the helper script:
 - `SUCCESS` builds do not notify by default. Set `CI_AGENT_WECOM_NOTIFY_ON_SUCCESS=true` only when you explicitly want success notifications.
 - Builds with no current high-confidence owner notify by default during rollout. Set `CI_AGENT_WECOM_NOTIFY_ON_NO_OWNER=false` to suppress them.
 - Notification failures do not fail the `analyze` command; the notice JSON remains the primary command output.
-- Deduplication is based on the Outbox deliveryKey, derived from notification type, target chatid, and stable notice digest. `--force` creates a new deliveryKey.
-- To obtain the target chatid, start `serve-wecom-bot`, @mention the bot in the intended group, and inspect the development callback's `body.chatid` safely. Do not use bot ID, msgid, sender userid, or response_url as the group chatid; remove temporary debug logging afterwards.
-- Pending notifications are retained while the bot is offline. Failed delivery retries with exponential backoff (maximum five attempts by default) before becoming `dead` in MongoDB.
+- Webhook deduplication reuses `ci_notifications` / `ci_report_notifications` when MongoDB is available; `--force` sends again. Bot deduplication uses the Outbox deliveryKey, and `--force` creates a new delivery.
+- Bot transport only: to obtain the target chatid, start `serve-wecom-bot`, @mention the bot in the intended group, and inspect the development callback's `body.chatid` safely. Do not use bot ID, msgid, sender userid, or response_url as the group chatid; remove temporary debug logging afterwards.
+- Bot transport only: pending notifications are retained while the bot is offline. Failed delivery retries with exponential backoff (maximum five attempts by default) before becoming `dead` in MongoDB.
 - Local historical builds are not a substitute for formal Jenkins analysis. Formal Jenkins mode is intended for new failure chains after `lastSuccessfulBuild`.
 - `buildUrl` should come from Jenkins. `local://` links from local dry-runs are not useful in group notifications.
