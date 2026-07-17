@@ -1,0 +1,17 @@
+[Unit]
+Description=CI Owner Agent Jenkins poller
+After=network-online.target mongod.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ci-owner-agent
+Group=ci-owner-agent
+WorkingDirectory=/opt/ci-owner-agent
+EnvironmentFile=-/opt/ci-owner-agent/.env
+ExecStart=/opt/ci-owner-agent/.venv/bin/python /opt/ci-owner-agent/scripts/poll_jenkins_builds.py --repo fx-code --job services/fx-code-unittest --lookback-builds 50 --max-builds-per-run 3 --notify
+TimeoutStartSec=50min
+Nice=5
+
+[Install]
+WantedBy=multi-user.target
