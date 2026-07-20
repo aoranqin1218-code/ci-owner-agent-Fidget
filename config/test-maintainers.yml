@@ -1,0 +1,124 @@
+version: 1
+
+# 当前 fx-code/test 目录的所有维护分组，暂时统一由以下 4 人共同维护。
+# wecomUserId 必须与企业微信实际 userid 一致。
+x-default-maintainers: &default-maintainers
+  - name: "James.Long-于坤龙(.)"
+    wecomUserId: "James.Long"
+  - name: "Lizijun-李子君"
+    wecomUserId: "Lizijun"
+  - name: "vista-齐浩天(I own what my Agent does.)"
+    wecomUserId: "vista"
+  - name: "dust-黄诚杰"
+    wecomUserId: "dust"
+
+rules:
+  # 测试入口、公共测试工具、元数据、stub 和第三方包测试
+  - repo: fx-code
+    job: services/fx-code-unittest
+    paths:
+      - "test/*.ts"
+      - "test/api/**"
+      - "test/metadata/**"
+      - "test/stub/**"
+      - "test/third_party_package/**"
+    maintainers: *default-maintainers
+
+  # Open API 测试及其输入、输出样例
+  - repo: fx-code
+    job: services/fx-code-unittest
+    paths:
+      - "test/open_api/**"
+    maintainers: *default-maintainers
+
+  # 独立 package 测试，例如 fxp-ai
+  - repo: fx-code
+    job: services/fx-code-unittest
+    paths:
+      - "test/packages/**"
+    maintainers: *default-maintainers
+
+  # Server 基础类与通用能力
+  - repo: fx-code
+    job: services/fx-code-unittest
+    paths:
+      - "test/server/classes/**"
+    maintainers: *default-maintainers
+
+  # Server 业务模块
+  - repo: fx-code
+    job: services/fx-code-unittest
+    paths:
+      - "test/server/modules/**"
+    maintainers: *default-maintainers
+
+  # Server processor 处理链
+  - repo: fx-code
+    job: services/fx-code-unittest
+    paths:
+      - "test/server/processors/**"
+    maintainers: *default-maintainers
+
+  # Server repository 数据访问层
+  - repo: fx-code
+    job: services/fx-code-unittest
+    paths:
+      - "test/server/repositories/**"
+    maintainers: *default-maintainers
+
+  # Server service 业务服务层
+  - repo: fx-code
+    job: services/fx-code-unittest
+    paths:
+      - "test/server/services/**"
+    maintainers: *default-maintainers
+
+  # Server 工具类
+  - repo: fx-code
+    job: services/fx-code-unittest
+    paths:
+      - "test/server/utils/**"
+    maintainers: *default-maintainers
+
+  # Server 接入层、控制层、中间件和基础设施
+  - repo: fx-code
+    job: services/fx-code-unittest
+    paths:
+      - "test/server/connector/**"
+      - "test/server/controllers/**"
+      - "test/server/core/**"
+      - "test/server/entities/**"
+      - "test/server/lua/**"
+      - "test/server/middlewares/**"
+      - "test/server/misc/**"
+      - "test/server/security/**"
+    maintainers: *default-maintainers
+
+  # Server 插件、关系、路由、视图和工作流
+  - repo: fx-code
+    job: services/fx-code-unittest
+    paths:
+      - "test/server/package/**"
+      - "test/server/plugins/**"
+      - "test/server/relationships/**"
+      - "test/server/routes/**"
+      - "test/server/views/**"
+      - "test/server/workflow/**"
+    maintainers: *default-maintainers
+
+  # 各业务模块内部的测试目录
+  - repo: fx-code
+    job: services/fx-code-unittest
+    paths:
+      - "modules/**/tests/**"
+      - "packages/**/tests/**"
+      - "server/**/tests/**"
+    maintainers: *default-maintainers
+
+  # 安全兜底。
+  # 后续新增更具体规则时，应放在本规则之前。
+  - repo: fx-code
+    job: services/fx-code-unittest
+    paths:
+      - "test/**"
+    maintainers: *default-maintainers

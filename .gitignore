@@ -13,8 +13,4 @@ ts-analyzer/node_modules/
 .idea/
 runs/
 bugs.txt
-git_author_wecom_mapping.csv
-git_author_wecom_mapping*.csv
-git_author_wecom_mapping*.xlsx
 samples/test_logs/
-config/test-maintainers.yml
