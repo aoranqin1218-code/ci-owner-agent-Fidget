@@ -24,6 +24,13 @@ def format_wecom_markdown_notice(
     repo: str | None = None,
     feedback_code: str | None = None,
 ) -> str:
+    title = f"### {result_icon(notice.result)} CI 单测{result_label(notice.result)} | {notice.job} #{notice.buildNumber}"
+    if str(notice.result or "").upper() == "SUCCESS":
+        lines = [title]
+        if notice.buildUrl:
+            lines.extend(["", f"🏗️ [查看 Jenkins 构建]({notice.buildUrl})"])
+        return "\n".join(lines)
+
     mapper = user_mapper or WeComUserMapper([])
     owners = collect_responsible_owners(notice)
     maintainer_matches = resolve_test_maintainer_matches(
@@ -35,7 +42,7 @@ def format_wecom_markdown_notice(
     pending_maintainers = _collect_pending_maintainers(maintainer_matches)
     evidence_by_id = {item.id: item for item in notice.evidence}
     lines = [
-        f"### {result_icon(notice.result)} CI 单测{result_label(notice.result)} | {notice.job} #{notice.buildNumber}",
+        title,
         "",
         f"👤 **责任人**：{format_responsible_mentions(owners, mapper, mention_mode)}",
     ]
