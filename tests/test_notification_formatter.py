@@ -13,6 +13,7 @@ from ci_owner_agent.services.notification_formatter import (
     format_wecom_markdown_notice,
     notification_digest,
     result_icon,
+    responsibility_type_icon,
     source_build_label,
 )
 from ci_owner_agent.services.test_maintainer_mapping import TestMaintainerResolver
@@ -67,10 +68,58 @@ def test_inherited_item_owner_is_mentioned_without_top_level_conclusion():
     markdown = format_wecom_markdown_notice(notice, feedback_base_url="http://ci-agent.test/feedback")
     assert "### ❌ CI 单测失败 | services/fx-code-unittest #5099" in markdown
     assert "👤 **责任人**：@Tang.Tangerine-唐嘉伟" in markdown
-    assert "🧭 **原因**：" in markdown
-    assert "#### 🧩 责任项" in markdown
+    assert "**原因**：" in markdown
+    assert "#### 📌 责任项" in markdown
     assert "顶层结论" not in markdown
     assert "顶层结论：无高可信责任人" not in markdown
+
+
+def test_failure_notice_uses_wecom_compatible_responsibility_icons():
+    no_owner = item(
+        "无高可信责任人",
+        "no_high_confidence_owner",
+        "no_high_confidence_owner",
+        "evidence is insufficient",
+    )
+    notice = CiResponsibilityNotice.model_validate(
+        notice_payload(
+            [
+                item(),
+                item("Li", "high_confidence", "current_build_owner", "current build failure", "li@example.com"),
+                no_owner,
+            ]
+        )
+    )
+
+    markdown = format_wecom_markdown_notice(notice)
+
+    assert "🧭" not in markdown
+    assert "🧩" not in markdown
+    assert "🧷" not in markdown
+    assert "**原因**：" in markdown
+    assert "#### 📌 责任项" in markdown
+    assert "   - 来源：#5094" in markdown
+    assert "🔥 当前引入" in markdown
+    assert "♻️ 历史持续" in markdown
+    assert "❓ 待确认" in markdown
+
+
+def test_failure_notice_without_items_uses_compatible_unknown_fallback():
+    notice = CiResponsibilityNotice.model_validate(notice_payload([]))
+
+    markdown = format_wecom_markdown_notice(notice)
+
+    assert "1. ❓ unknown | 未识别到独立责任项" in markdown
+    assert "   - 来源：-" in markdown
+    assert "🧩" not in markdown
+    assert "🧷" not in markdown
+
+
+def test_responsibility_type_icon_unknown_fallback_is_compatible():
+    assert responsibility_type_icon("current_build_owner") == "🔥"
+    assert responsibility_type_icon("inherited_failure_owner") == "♻️"
+    assert responsibility_type_icon("no_high_confidence_owner") == "❓"
+    assert responsibility_type_icon("unexpected") == "❓"
 
 
 def test_source_build_label_does_not_show_untrusted_no_owner_history():
