@@ -42,6 +42,8 @@ def _restore_authoritative_build_metadata(
     base_commit: str | None,
     head_commit: str | None,
 ) -> CiResponsibilityNotice:
+    original_notice_head_commit = notice.headCommit
+    authoritative_head_commit = head_commit or build_info.commit
     authoritative_metadata = {
         "repo": repo,
         "job": build_info.job,
@@ -50,7 +52,7 @@ def _restore_authoritative_build_metadata(
         "result": build_info.result,
         "branch": build_info.branch,
         "baseCommit": base_commit,
-        "headCommit": head_commit or build_info.commit,
+        "headCommit": authoritative_head_commit,
     }
     restored_fields = [
         field_name
@@ -65,9 +67,14 @@ def _restore_authoritative_build_metadata(
     payload = notice.model_dump(mode="python")
     payload.update(authoritative_metadata)
     for item in payload.get("responsibilityItems", []):
-        if item.get("responsibilityType") == "current_build_owner":
-            item["sourceBuildNumber"] = None
-            item["sourceCommit"] = None
+        if item.get("responsibilityType") != "current_build_owner":
+            continue
+        item["sourceBuildNumber"] = build_info.buildNumber
+        item["sourceBuildUrl"] = build_info.buildUrl
+        source_commit = item.get("sourceCommit")
+        owner_commit = (item.get("owner") or {}).get("commit")
+        if not source_commit or source_commit == original_notice_head_commit:
+            item["sourceCommit"] = owner_commit or authoritative_head_commit
     return CiResponsibilityNotice.model_validate(payload)
 
 

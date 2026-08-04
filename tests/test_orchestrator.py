@@ -63,7 +63,7 @@ class RecordingGitClient:
         return {"ok": True, "files": [{"path": "packages/fxp-ai/src/index.ts", "status": "M", "additions": 1, "deletions": 0}]}
 
 
-def _agent_notice_payload(**metadata):
+def _agent_notice_payload(*, item_metadata=None, item_owner_metadata=None, **metadata):
     payload = {
         "repo": "fx-code",
         "job": "services/fx-code-unittest",
@@ -120,6 +120,8 @@ def _agent_notice_payload(**metadata):
         "hasHighConfidenceOwner": True,
     }
     payload.update(metadata)
+    payload["responsibilityItems"][0].update(item_metadata or {})
+    payload["responsibilityItems"][0]["owner"].update(item_owner_metadata or {})
     return payload
 
 
@@ -153,6 +155,8 @@ def _analyze_agent_notice(monkeypatch, payload, *, history_store=None):
 
 def test_analyze_failed_build_restores_placeholder_metadata_and_derived_sources(monkeypatch):
     payload = _agent_notice_payload(
+        item_metadata={"sourceBuildNumber": None, "sourceBuildUrl": None, "sourceCommit": None},
+        item_owner_metadata={"commit": None},
         repo=None,
         job="unknown",
         buildNumber=0,
@@ -176,6 +180,9 @@ def test_analyze_failed_build_restores_placeholder_metadata_and_derived_sources(
     assert notice.baseCommit == "base-commit"
     assert notice.headCommit == "head-commit"
     assert notice.responsibilityItems[0].sourceBuildNumber == 5221
+    assert notice.responsibilityItems[0].sourceBuildUrl == (
+        "https://jenkins.example/job/services/job/fx-code-unittest/5221/"
+    )
     assert notice.responsibilityItems[0].sourceCommit == "head-commit"
     assert notice.owner.name == "Zhang San"
     assert notice.failureReason == "four tests failed after the current change"
@@ -190,6 +197,12 @@ def test_analyze_failed_build_restores_placeholder_metadata_and_derived_sources(
 
 def test_analyze_failed_build_overwrites_plausible_but_wrong_metadata(monkeypatch):
     payload = _agent_notice_payload(
+        item_metadata={
+            "sourceBuildNumber": 9999,
+            "sourceBuildUrl": "https://wrong.example/job/9999/",
+            "sourceCommit": "wrong-head",
+        },
+        item_owner_metadata={"commit": None},
         repo="another-repo",
         job="another-job",
         buildNumber=9999,
@@ -211,12 +224,110 @@ def test_analyze_failed_build_overwrites_plausible_but_wrong_metadata(monkeypatc
     assert notice.baseCommit == "base-commit"
     assert notice.headCommit == "head-commit"
     assert notice.responsibilityItems[0].sourceBuildNumber == 5221
+    assert notice.responsibilityItems[0].sourceBuildUrl == (
+        "https://jenkins.example/job/services/job/fx-code-unittest/5221/"
+    )
     assert notice.responsibilityItems[0].sourceCommit == "head-commit"
+
+
+def test_analyze_failed_build_preserves_explicit_current_build_source_commit(monkeypatch):
+    payload = _agent_notice_payload(
+        item_metadata={"sourceCommit": "specific-culprit-commit"},
+        item_owner_metadata={"commit": None},
+        headCommit="wrong-model-head",
+    )
+
+    notice, _ = _analyze_agent_notice(monkeypatch, payload)
+
+    assert notice.headCommit == "head-commit"
+    assert notice.responsibilityItems[0].sourceCommit == "specific-culprit-commit"
+
+
+@pytest.mark.parametrize(
+    ("owner_commit", "expected_source_commit"),
+    [
+        ("specific-owner-commit", "specific-owner-commit"),
+        (None, "head-commit"),
+    ],
+)
+def test_analyze_failed_build_derives_missing_current_build_source_commit(
+    monkeypatch,
+    owner_commit,
+    expected_source_commit,
+):
+    payload = _agent_notice_payload(
+        item_metadata={"sourceCommit": None},
+        item_owner_metadata={"commit": owner_commit},
+    )
+
+    notice, _ = _analyze_agent_notice(monkeypatch, payload)
+
+    assert notice.responsibilityItems[0].sourceCommit == expected_source_commit
+
+
+@pytest.mark.parametrize(
+    ("owner_commit", "expected_source_commit"),
+    [
+        ("real-culprit-commit", "real-culprit-commit"),
+        (None, "head-commit"),
+    ],
+)
+def test_analyze_failed_build_rebuilds_source_commit_derived_from_wrong_model_head(
+    monkeypatch,
+    owner_commit,
+    expected_source_commit,
+):
+    payload = _agent_notice_payload(
+        item_metadata={"sourceCommit": "wrong-model-head"},
+        item_owner_metadata={"commit": owner_commit},
+        headCommit="wrong-model-head",
+    )
+
+    notice, _ = _analyze_agent_notice(monkeypatch, payload)
+
+    assert notice.headCommit == "head-commit"
+    assert notice.responsibilityItems[0].sourceCommit == expected_source_commit
+
+
+def test_analyze_failed_build_preserves_inherited_owner_sources(monkeypatch):
+    payload = _agent_notice_payload(
+        item_metadata={
+            "responsibilityType": "inherited_failure_owner",
+            "sourceBuildNumber": 5001,
+            "sourceBuildUrl": "https://jenkins.example/job/test/5001/",
+            "sourceCommit": "historical-culprit",
+            "matchType": "signature_exact",
+            "relationship": "same_failure",
+        },
+        item_owner_metadata={
+            "type": "inherited_failure_owner",
+            "commit": "historical-culprit",
+        },
+        headCommit="wrong-model-head",
+    )
+
+    notice, _ = _analyze_agent_notice(monkeypatch, payload)
+
+    item = notice.responsibilityItems[0]
+    assert item.responsibilityType == "inherited_failure_owner"
+    assert item.sourceBuildNumber == 5001
+    assert item.sourceBuildUrl == "https://jenkins.example/job/test/5001/"
+    assert item.sourceCommit == "historical-culprit"
 
 
 def test_analyze_failed_build_saves_restored_notice_to_history(monkeypatch):
     store = make_store()
-    payload = _agent_notice_payload(job="unknown", buildNumber=0, buildUrl="", result="UNKNOWN")
+    payload = _agent_notice_payload(
+        item_metadata={
+            "sourceBuildNumber": 9999,
+            "sourceBuildUrl": "https://wrong.example/job/9999/",
+            "sourceCommit": "specific-culprit-commit",
+        },
+        job="unknown",
+        buildNumber=0,
+        buildUrl="",
+        result="UNKNOWN",
+    )
 
     notice, _ = _analyze_agent_notice(monkeypatch, payload, history_store=store)
 
@@ -227,10 +338,23 @@ def test_analyze_failed_build_saves_restored_notice_to_history(monkeypatch):
     assert saved_notice["job"] == "services/fx-code-unittest"
     assert saved_notice["buildNumber"] == 5221
     assert saved_notice["result"] == "FAILURE"
+    saved_item = saved_notice["responsibilityItems"][0]
+    assert saved_item["sourceBuildNumber"] == 5221
+    assert saved_item["sourceBuildUrl"] == (
+        "https://jenkins.example/job/services/job/fx-code-unittest/5221/"
+    )
+    assert saved_item["sourceCommit"] == "specific-culprit-commit"
 
 
 def test_analyze_failed_build_keeps_matching_metadata_and_analysis(monkeypatch):
-    payload = _agent_notice_payload()
+    payload = _agent_notice_payload(
+        item_metadata={
+            "sourceBuildNumber": 5221,
+            "sourceBuildUrl": "https://jenkins.example/job/services/job/fx-code-unittest/5221/",
+            "sourceCommit": "specific-culprit-commit",
+        }
+    )
+    expected_signature = CiResponsibilityNotice.model_validate(payload).responsibilityItems[0].failureSignature
     recorder = AnalysisMetricsRecorder(enabled=True)
 
     with use_metrics_recorder(recorder):
@@ -248,7 +372,17 @@ def test_analyze_failed_build_keeps_matching_metadata_and_analysis(monkeypatch):
     }
     assert notice.owner.name == "Zhang San"
     assert notice.failureReason == "four tests failed after the current change"
-    assert notice.responsibilityItems[0].responsibilityType == "current_build_owner"
+    item = notice.responsibilityItems[0]
+    assert item.responsibilityType == "current_build_owner"
+    assert item.sourceBuildNumber == 5221
+    assert item.sourceBuildUrl == "https://jenkins.example/job/services/job/fx-code-unittest/5221/"
+    assert item.sourceCommit == "specific-culprit-commit"
+    assert item.owner.name == "Zhang San"
+    assert item.reason == "the changed code is directly related to the failures"
+    assert item.evidenceIds == ["E1", "E2"]
+    assert item.failureSignature == expected_signature
+    assert notice.evidence[0].summary == "4 failing"
+    assert notice.suggestions == ["fix the four failing tests"]
     assert recorder.warnings == []
 
 
