@@ -18,6 +18,7 @@ from ci_owner_agent.orchestrator import (
 from ci_owner_agent.config import load_settings
 from ci_owner_agent.schemas import BuildInfo, ChangedFile, CiResponsibilityNotice, FailureFact, FailureFactExtractionResult
 from ci_owner_agent.services.git_client import GitClient
+from ci_owner_agent.services.metrics import AnalysisMetricsRecorder, use_metrics_recorder
 from ci_owner_agent.services.notification_formatter import format_wecom_markdown_notice
 from ci_owner_agent.services.test_maintainer_mapping import TestMaintainerResolver
 from tests.test_history_store import high_confidence_payload, make_store, no_owner_item
@@ -60,6 +61,195 @@ class RecordingGitClient:
     def get_diff_files(self, repo, base_commit, head_commit):
         self.diff_ranges.append((base_commit, head_commit))
         return {"ok": True, "files": [{"path": "packages/fxp-ai/src/index.ts", "status": "M", "additions": 1, "deletions": 0}]}
+
+
+def _agent_notice_payload(**metadata):
+    payload = {
+        "repo": "fx-code",
+        "job": "services/fx-code-unittest",
+        "buildNumber": 5221,
+        "buildUrl": "https://jenkins.example/job/services/job/fx-code-unittest/5221/",
+        "result": "FAILURE",
+        "branch": "dev",
+        "baseCommit": "base-commit",
+        "headCommit": "head-commit",
+        "owner": {
+            "type": "high_confidence",
+            "name": "Zhang San",
+            "email": "zhangsan@example.com",
+            "commit": "head-commit",
+            "confidence": 0.88,
+        },
+        "failureReason": "four tests failed after the current change",
+        "evidence": [
+            {
+                "id": "E1",
+                "type": "log",
+                "summary": "4 failing",
+                "detail": "5033 passing, 142 pending, 4 failing",
+                "source": "jenkins log",
+            },
+            {
+                "id": "E2",
+                "type": "diff",
+                "summary": "related code changed",
+                "detail": "the failing code changed in this build",
+                "source": "git diff",
+            },
+        ],
+        "suggestions": ["fix the four failing tests"],
+        "responsibilityItems": [
+            {
+                "failureId": "model-generated-id",
+                "failureTitle": "four unit test failures",
+                "failureSignature": "four-unit-test-failures",
+                "failureSummary": "four tests failed",
+                "owner": {
+                    "type": "high_confidence",
+                    "name": "Zhang San",
+                    "email": "zhangsan@example.com",
+                    "commit": None,
+                    "confidence": 0.88,
+                },
+                "responsibilityType": "current_build_owner",
+                "confidence": 0.88,
+                "reason": "the changed code is directly related to the failures",
+                "evidenceIds": ["E1", "E2"],
+            }
+        ],
+        "hasHighConfidenceOwner": True,
+    }
+    payload.update(metadata)
+    return payload
+
+
+def _analyze_agent_notice(monkeypatch, payload, *, history_store=None):
+    class DummyAgent:
+        def analyze(self, agent_context):
+            return CiResponsibilityNotice.model_validate(payload)
+
+    monkeypatch.setattr("ci_owner_agent.orchestrator.create_responsibility_agent", lambda *args, **kwargs: DummyAgent())
+    build_info = BuildInfo(
+        job="services/fx-code-unittest",
+        buildNumber=5221,
+        result="FAILURE",
+        buildUrl="https://jenkins.example/job/services/job/fx-code-unittest/5221/",
+        branch="dev",
+        commit="build-info-commit",
+    )
+    settings = replace(load_settings(), history_enabled=history_store is not None, ai_failure_facts_enabled=False)
+    notice = analyze_failed_build(
+        "fx-code",
+        build_info,
+        "base-commit",
+        "head-commit",
+        NoSummaryProvider(),
+        RecordingGitClient(),
+        settings=settings,
+        history_store=history_store,
+    )
+    return notice, build_info
+
+
+def test_analyze_failed_build_restores_placeholder_metadata_and_derived_sources(monkeypatch):
+    payload = _agent_notice_payload(
+        repo=None,
+        job="unknown",
+        buildNumber=0,
+        buildUrl="",
+        result="UNKNOWN",
+        branch=None,
+        baseCommit=None,
+        headCommit=None,
+    )
+    recorder = AnalysisMetricsRecorder(enabled=True)
+
+    with use_metrics_recorder(recorder):
+        notice, _ = _analyze_agent_notice(monkeypatch, payload)
+
+    assert notice.repo == "fx-code"
+    assert notice.job == "services/fx-code-unittest"
+    assert notice.buildNumber == 5221
+    assert notice.buildUrl == "https://jenkins.example/job/services/job/fx-code-unittest/5221/"
+    assert notice.result == "FAILURE"
+    assert notice.branch == "dev"
+    assert notice.baseCommit == "base-commit"
+    assert notice.headCommit == "head-commit"
+    assert notice.responsibilityItems[0].sourceBuildNumber == 5221
+    assert notice.responsibilityItems[0].sourceCommit == "head-commit"
+    assert notice.owner.name == "Zhang San"
+    assert notice.failureReason == "four tests failed after the current change"
+    assert notice.evidence[0].summary == "4 failing"
+    assert notice.suggestions == ["fix the four failing tests"]
+    assert notice.hasHighConfidenceOwner is True
+    assert notice.responsibilityItems[0].reason == "the changed code is directly related to the failures"
+    assert recorder.warnings == [
+        "restored authoritative notice metadata: repo,job,buildNumber,buildUrl,result,branch,baseCommit,headCommit"
+    ]
+
+
+def test_analyze_failed_build_overwrites_plausible_but_wrong_metadata(monkeypatch):
+    payload = _agent_notice_payload(
+        repo="another-repo",
+        job="another-job",
+        buildNumber=9999,
+        buildUrl="https://wrong.example/9999/",
+        result="SUCCESS",
+        branch="main",
+        baseCommit="wrong-base",
+        headCommit="wrong-head",
+    )
+
+    notice, _ = _analyze_agent_notice(monkeypatch, payload)
+
+    assert notice.repo == "fx-code"
+    assert notice.job == "services/fx-code-unittest"
+    assert notice.buildNumber == 5221
+    assert notice.buildUrl == "https://jenkins.example/job/services/job/fx-code-unittest/5221/"
+    assert notice.result == "FAILURE"
+    assert notice.branch == "dev"
+    assert notice.baseCommit == "base-commit"
+    assert notice.headCommit == "head-commit"
+    assert notice.responsibilityItems[0].sourceBuildNumber == 5221
+    assert notice.responsibilityItems[0].sourceCommit == "head-commit"
+
+
+def test_analyze_failed_build_saves_restored_notice_to_history(monkeypatch):
+    store = make_store()
+    payload = _agent_notice_payload(job="unknown", buildNumber=0, buildUrl="", result="UNKNOWN")
+
+    notice, _ = _analyze_agent_notice(monkeypatch, payload, history_store=store)
+
+    assert notice.job == "services/fx-code-unittest"
+    assert notice.buildNumber == 5221
+    assert notice.result == "FAILURE"
+    saved_notice = store.notices.docs[0]["notice"]
+    assert saved_notice["job"] == "services/fx-code-unittest"
+    assert saved_notice["buildNumber"] == 5221
+    assert saved_notice["result"] == "FAILURE"
+
+
+def test_analyze_failed_build_keeps_matching_metadata_and_analysis(monkeypatch):
+    payload = _agent_notice_payload()
+    recorder = AnalysisMetricsRecorder(enabled=True)
+
+    with use_metrics_recorder(recorder):
+        notice, _ = _analyze_agent_notice(monkeypatch, payload)
+
+    assert notice.model_dump(include={"repo", "job", "buildNumber", "buildUrl", "result", "branch", "baseCommit", "headCommit"}) == {
+        "repo": "fx-code",
+        "job": "services/fx-code-unittest",
+        "buildNumber": 5221,
+        "buildUrl": "https://jenkins.example/job/services/job/fx-code-unittest/5221/",
+        "result": "FAILURE",
+        "branch": "dev",
+        "baseCommit": "base-commit",
+        "headCommit": "head-commit",
+    }
+    assert notice.owner.name == "Zhang San"
+    assert notice.failureReason == "four tests failed after the current change"
+    assert notice.responsibilityItems[0].responsibilityType == "current_build_owner"
+    assert recorder.warnings == []
 
 
 def test_analyze_failed_build_stops_before_diff_when_base_is_not_ancestor():

@@ -34,6 +34,43 @@ def _metrics_stage(name: str) -> ContextManager[None]:
     return recorder.stage(name) if recorder is not None else nullcontext()
 
 
+def _restore_authoritative_build_metadata(
+    notice: CiResponsibilityNotice,
+    *,
+    repo: str,
+    build_info: BuildInfo,
+    base_commit: str | None,
+    head_commit: str | None,
+) -> CiResponsibilityNotice:
+    authoritative_metadata = {
+        "repo": repo,
+        "job": build_info.job,
+        "buildNumber": build_info.buildNumber,
+        "buildUrl": build_info.buildUrl,
+        "result": build_info.result,
+        "branch": build_info.branch,
+        "baseCommit": base_commit,
+        "headCommit": head_commit or build_info.commit,
+    }
+    restored_fields = [
+        field_name
+        for field_name, authoritative_value in authoritative_metadata.items()
+        if getattr(notice, field_name) != authoritative_value
+    ]
+    if restored_fields:
+        recorder = current_metrics_recorder()
+        if recorder is not None:
+            recorder.warnings.append(f"restored authoritative notice metadata: {','.join(restored_fields)}")
+
+    payload = notice.model_dump(mode="python")
+    payload.update(authoritative_metadata)
+    for item in payload.get("responsibilityItems", []):
+        if item.get("responsibilityType") == "current_build_owner":
+            item["sourceBuildNumber"] = None
+            item["sourceCommit"] = None
+    return CiResponsibilityNotice.model_validate(payload)
+
+
 def success_notice(build_info: BuildInfo, base_commit: str | None = None, repo: str | None = None) -> CiResponsibilityNotice:
     return CiResponsibilityNotice(
         repo=repo,
@@ -285,6 +322,13 @@ def analyze_failed_build(
                 notice = agent.analyze(context)
     except AgentConfigurationError as exc:
         return failure_without_context(build_info, base_commit, f"LLM 配置错误：{exc}", repo=repo)
+    notice = _restore_authoritative_build_metadata(
+        notice,
+        repo=repo,
+        build_info=build_info,
+        base_commit=base_commit,
+        head_commit=head_commit,
+    )
     if sync_warning is not None:
         notice.evidence.append(sync_warning)
     notice = validate_notice(notice)
