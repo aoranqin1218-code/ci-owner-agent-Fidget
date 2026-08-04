@@ -243,6 +243,26 @@ def test_analyze_failed_build_preserves_explicit_current_build_source_commit(mon
     assert notice.responsibilityItems[0].sourceCommit == "specific-culprit-commit"
 
 
+def test_analyze_failed_build_preserves_source_commit_equal_to_correct_head(monkeypatch):
+    payload = _agent_notice_payload(
+        item_metadata={
+            "sourceBuildNumber": 5221,
+            "sourceBuildUrl": "https://jenkins.example/job/services/job/fx-code-unittest/5221/",
+            "sourceCommit": "head-commit",
+        },
+        item_owner_metadata={"commit": "another-commit"},
+        headCommit="head-commit",
+    )
+
+    notice, _ = _analyze_agent_notice(monkeypatch, payload)
+
+    item = notice.responsibilityItems[0]
+    assert notice.headCommit == "head-commit"
+    assert item.sourceCommit == "head-commit"
+    assert item.sourceBuildNumber == 5221
+    assert item.sourceBuildUrl == "https://jenkins.example/job/services/job/fx-code-unittest/5221/"
+
+
 @pytest.mark.parametrize(
     ("owner_commit", "expected_source_commit"),
     [

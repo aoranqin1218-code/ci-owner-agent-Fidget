@@ -73,7 +73,11 @@ def _restore_authoritative_build_metadata(
         item["sourceBuildUrl"] = build_info.buildUrl
         source_commit = item.get("sourceCommit")
         owner_commit = (item.get("owner") or {}).get("commit")
-        if not source_commit or source_commit == original_notice_head_commit:
+        source_commit_was_derived_from_wrong_head = (
+            original_notice_head_commit != authoritative_head_commit
+            and source_commit == original_notice_head_commit
+        )
+        if not source_commit or source_commit_was_derived_from_wrong_head:
             item["sourceCommit"] = owner_commit or authoritative_head_commit
     return CiResponsibilityNotice.model_validate(payload)
 
