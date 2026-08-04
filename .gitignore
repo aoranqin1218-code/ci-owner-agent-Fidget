@@ -14,3 +14,8 @@ ts-analyzer/node_modules/
 runs/
 bugs.txt
 samples/test_logs/
+.gitconfig
+Prompt.md
+evaluation/
+python_test_out.txt
+run-codex-silver-batch.ps1
