@@ -50,10 +50,10 @@ def format_wecom_markdown_notice(
         lines.append(f"📣 **待确认维护人**：{format_test_maintainer_mentions(pending_maintainers, mention_mode) or '未配置'}")
     lines.extend(
         [
-            f"🧭 **原因**：{public_single_line(notice.failureReason, max_reason_chars)}",
+            f"**原因**：{public_single_line(notice.failureReason, max_reason_chars)}",
             responsibility_item_stats(notice.responsibilityItems),
             "",
-            "#### 🧩 责任项",
+            "#### 📌 责任项",
             "",
         ]
     )
@@ -64,7 +64,7 @@ def format_wecom_markdown_notice(
             item_lines = [
                 f"{idx}. {responsibility_type_icon(item_type)} {responsibility_type_label(item_type)} | {public_single_line(item.failureTitle, 120)}",
                 f"   - 👤 责任人：{owner_name}",
-                f"   - 🧷 来源：{source_build_label(item, notice)}",
+                f"   - 来源：{source_build_label(item, notice)}",
                 f"   - 🔎 证据：{format_item_evidence(item, evidence_by_id, max_evidence_chars)}",
             ]
             match = maintainer_matches[idx - 1]
@@ -80,7 +80,7 @@ def format_wecom_markdown_notice(
             item_lines.append("")
             lines.extend(item_lines)
     else:
-        lines.extend(["1. 🧩 unknown | 未识别到独立责任项", f"   - 👤 责任人：{NO_OWNER_NAME}", "   - 🧷 来源：-", "   - 🔎 证据：证据不足，详见分析结果 JSON。", ""])
+        lines.extend(["1. ❓ unknown | 未识别到独立责任项", f"   - 👤 责任人：{NO_OWNER_NAME}", "   - 来源：-", "   - 🔎 证据：证据不足，详见分析结果 JSON。", ""])
 
     suggestions = format_suggestions(notice.suggestions)
     if suggestions:
@@ -311,7 +311,7 @@ def responsibility_type_icon(value: str) -> str:
         "current_build_owner": "🔥",
         "inherited_failure_owner": "♻️",
         "no_high_confidence_owner": "❓",
-    }.get(str(value or ""), "🧩")
+    }.get(str(value or ""), "❓")
 
 
 def responsibility_type_label(value: str) -> str:
