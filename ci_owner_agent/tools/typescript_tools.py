@@ -273,46 +273,6 @@ def check_node_dependencies_for_analysis(
     }
 
 
-def ts_analyze_changed_functions(
-    repo: str | None = None,
-    baseCommit: str | None = None,
-    headCommit: str | None = None,
-    files: list[str] | None = None,
-    tsconfig: str = "tsconfig.json",
-    repo_cache_dir: str | Path | None = None,
-    analyzer_dir: str | Path | None = None,
-    max_output_chars: int = 20000,
-) -> dict:
-    if not repo or not baseCommit or not headCommit:
-        return {"ok": False, "error": "repo, baseCommit and headCommit are required", "changedFunctions": []}
-    commit_error = validate_commit_ref(baseCommit) or validate_commit_ref(headCommit)
-    if commit_error:
-        return {"ok": False, "error": commit_error, "changedFunctions": []}
-    ts_files = [path for path in (files or []) if path.endswith((".ts", ".tsx"))]
-    path_error = _validate_paths(ts_files + [tsconfig])
-    if path_error:
-        return {"ok": False, "error": path_error, "changedFunctions": []}
-    if not ts_files:
-        return {"ok": True, "changedFunctions": []}
-    repo_cache, ts_dir = _settings_paths(repo_cache_dir, analyzer_dir)
-    repo_path, repo_error = _repo_path(repo, repo_cache)
-    if repo_error or repo_path is None:
-        return {"ok": False, "error": repo_error, "changedFunctions": []}
-    return _call_node(
-        "analyze_changed_functions.js",
-        {
-            "repoPath": str(repo_path),
-            "baseCommit": baseCommit,
-            "headCommit": headCommit,
-            "files": ts_files,
-            "tsconfig": tsconfig,
-        },
-        "changedFunctions",
-        ts_dir,
-        max_output_chars=max_output_chars,
-    )
-
-
 def ts_find_definitions(
     repo: str | None = None,
     commit: str | None = None,

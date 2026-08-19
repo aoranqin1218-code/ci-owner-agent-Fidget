@@ -199,8 +199,8 @@ def test_notify_notice_webhook_success_prints_transport_safe_summary(tmp_path, m
     settings = replace(load_settings(), wecom_notify_dry_run=False, wecom_notify_transport="webhook",
                        wecom_webhook_url="https://example.test/secret-key", history_enabled=False)
     monkeypatch.setattr("ci_owner_agent.main.load_settings", lambda: settings)
-    monkeypatch.setattr("ci_owner_agent.main.get_history_store", lambda _: None)
-    monkeypatch.setattr("ci_owner_agent.main.send_wecom_markdown",
+    monkeypatch.setattr("ci_owner_agent.services.wecom_notice_service.get_history_store", lambda _: None)
+    monkeypatch.setattr("ci_owner_agent.services.wecom_notice_service.send_wecom_markdown",
                         lambda *args: {"ok": True, "statusCode": 200, "response": "ok", "error": None})
     assert main(["notify-notice", "--notice-file", str(notice_file)]) == 0
     captured = capsys.readouterr()
@@ -220,7 +220,7 @@ def test_notify_notice_bot_queue_prints_transport_safe_summary(tmp_path, monkeyp
     settings = replace(load_settings(), wecom_notify_dry_run=False, wecom_notify_transport="bot",
                        wecom_bot_notify_chat_id="chat", history_enabled=True)
     monkeypatch.setattr("ci_owner_agent.main.load_settings", lambda: settings)
-    monkeypatch.setattr("ci_owner_agent.main.get_history_store", lambda _: make_store())
+    monkeypatch.setattr("ci_owner_agent.services.wecom_notice_service.get_history_store", lambda _: make_store())
     assert main(["notify-notice", "--notice-file", str(notice_file)]) == 0
     summary = json.loads(capsys.readouterr().out)
     assert summary["status"] == "pending" and summary["transport"] == "bot"
@@ -254,8 +254,8 @@ def test_analyze_local_output_file_writes_utf8_without_bom(tmp_path, monkeypatch
 
     output_file = tmp_path / "subdir" / "notice_local.json"
     notice = CiResponsibilityNotice.model_validate(notice_payload([item("\u5f20\u4e09")]))
-    monkeypatch.setattr("ci_owner_agent.main.analyze_local", lambda **kwargs: notice)
-    monkeypatch.setattr("ci_owner_agent.main.get_history_store", lambda settings: None)
+    monkeypatch.setattr("ci_owner_agent.cli.commands.analyze_local", lambda **kwargs: notice)
+    monkeypatch.setattr("ci_owner_agent.cli.commands.get_history_store", lambda settings: None)
 
     exit_code = main([
         "analyze-local",
@@ -356,7 +356,7 @@ print(f"Validation correctly rejected: {error}")
 def test_build_wecom_ai_parser_fake_never_builds_real_model(monkeypatch):
     """_build_wecom_feedback_ai_parser with provider=fake must not construct real model."""
     from ci_owner_agent.config import load_settings
-    from ci_owner_agent.main import _build_wecom_feedback_ai_parser
+    from ci_owner_agent.cli.commands import _build_wecom_feedback_ai_parser
 
     # Patch at the actual location where build_chat_model is used
     import ci_owner_agent.services.wecom_feedback_ai_parser as ai_parser_module
@@ -387,7 +387,7 @@ def test_build_wecom_ai_parser_fake_never_builds_real_model(monkeypatch):
 def test_build_wecom_ai_parser_invalid_config_returns_none(monkeypatch):
     """Invalid model config should return None without constructing model."""
     from ci_owner_agent.config import load_settings
-    from ci_owner_agent.main import _build_wecom_feedback_ai_parser
+    from ci_owner_agent.cli.commands import _build_wecom_feedback_ai_parser
 
     # Patch at the actual location where build_chat_model is used
     import ci_owner_agent.services.wecom_feedback_ai_parser as ai_parser_module
@@ -419,7 +419,7 @@ def test_build_wecom_ai_parser_invalid_config_returns_none(monkeypatch):
 def test_build_wecom_ai_parser_disabled_returns_none(monkeypatch):
     """LLM disabled should return None."""
     from ci_owner_agent.config import load_settings
-    from ci_owner_agent.main import _build_wecom_feedback_ai_parser
+    from ci_owner_agent.cli.commands import _build_wecom_feedback_ai_parser
 
     monkeypatch.setenv("CI_AGENT_WECOM_BOT_LLM_ENABLED", "false")
     settings = load_settings()
@@ -438,7 +438,7 @@ def test_serve_wecom_bot_webhook_transport_disables_outbox_polling(monkeypatch):
         return sentinel_parser
 
     monkeypatch.setattr(
-        "ci_owner_agent.main._build_wecom_feedback_ai_parser",
+        "ci_owner_agent.cli.commands._build_wecom_feedback_ai_parser",
         fake_build,
     )
 
@@ -449,7 +449,7 @@ def test_serve_wecom_bot_webhook_transport_disables_outbox_polling(monkeypatch):
         return FakeStore()
 
     monkeypatch.setattr(
-        "ci_owner_agent.main.get_history_store",
+        "ci_owner_agent.cli.commands.get_history_store",
         fake_get_history_store,
     )
 
@@ -522,7 +522,7 @@ def _stub_wecom_bot_runtime(monkeypatch):
         def run(self):
             pass
 
-    monkeypatch.setattr("ci_owner_agent.main.get_history_store", lambda _: FakeStore())
+    monkeypatch.setattr("ci_owner_agent.cli.commands.get_history_store", lambda _: FakeStore())
     monkeypatch.setattr("ci_owner_agent.services.wecom_bot_adapter.WeComSdkAdapter", FakeAdapter)
     monkeypatch.setattr("ci_owner_agent.services.wecom_bot_worker.WeComBotWorker", FakeWorker)
     return captured
@@ -607,10 +607,10 @@ def test_weekly_notify_outbox_exception_returns_2_without_traceback(monkeypatch,
             raise RuntimeError("mongodb://user:password@secret-host")
 
     monkeypatch.setattr("ci_owner_agent.main.load_settings", lambda: settings)
-    monkeypatch.setattr("ci_owner_agent.main.get_history_store", lambda _: object())
-    monkeypatch.setattr("ci_owner_agent.main.load_weekly_test_report_config", lambda _: config)
-    monkeypatch.setattr("ci_owner_agent.main.resolve_period", lambda **_: (None, None))
-    monkeypatch.setattr("ci_owner_agent.main.WeeklyTestReportService", FakeService)
+    monkeypatch.setattr("ci_owner_agent.cli.commands.get_history_store", lambda _: object())
+    monkeypatch.setattr("ci_owner_agent.cli.commands.load_weekly_test_report_config", lambda _: config)
+    monkeypatch.setattr("ci_owner_agent.cli.commands.resolve_period", lambda **_: (None, None))
+    monkeypatch.setattr("ci_owner_agent.cli.commands.WeeklyTestReportService", FakeService)
     assert main(["weekly-test-report", "--repo", "r", "--notify"]) == 2
     captured = capsys.readouterr()
     assert "weekly report notification failed unexpectedly" in captured.err
@@ -642,10 +642,10 @@ def test_weekly_webhook_cli_does_not_print_raw_response(monkeypatch, capsys):
                     "response": "secret-key internal-gateway-debug private-response", "error": None}
 
     monkeypatch.setattr("ci_owner_agent.main.load_settings", lambda: settings)
-    monkeypatch.setattr("ci_owner_agent.main.get_history_store", lambda _: object())
-    monkeypatch.setattr("ci_owner_agent.main.load_weekly_test_report_config", lambda _: config)
-    monkeypatch.setattr("ci_owner_agent.main.resolve_period", lambda **_: (None, None))
-    monkeypatch.setattr("ci_owner_agent.main.WeeklyTestReportService", FakeService)
+    monkeypatch.setattr("ci_owner_agent.cli.commands.get_history_store", lambda _: object())
+    monkeypatch.setattr("ci_owner_agent.cli.commands.load_weekly_test_report_config", lambda _: config)
+    monkeypatch.setattr("ci_owner_agent.cli.commands.resolve_period", lambda **_: (None, None))
+    monkeypatch.setattr("ci_owner_agent.cli.commands.WeeklyTestReportService", FakeService)
 
     assert main(["weekly-test-report", "--repo", "r", "--notify"]) == 0
     captured = capsys.readouterr()
@@ -681,10 +681,10 @@ def test_weekly_webhook_cli_failure_does_not_print_raw_response(monkeypatch, cap
                     "error": "safe webhook failure"}
 
     monkeypatch.setattr("ci_owner_agent.main.load_settings", lambda: settings)
-    monkeypatch.setattr("ci_owner_agent.main.get_history_store", lambda _: object())
-    monkeypatch.setattr("ci_owner_agent.main.load_weekly_test_report_config", lambda _: config)
-    monkeypatch.setattr("ci_owner_agent.main.resolve_period", lambda **_: (None, None))
-    monkeypatch.setattr("ci_owner_agent.main.WeeklyTestReportService", FakeService)
+    monkeypatch.setattr("ci_owner_agent.cli.commands.get_history_store", lambda _: object())
+    monkeypatch.setattr("ci_owner_agent.cli.commands.load_weekly_test_report_config", lambda _: config)
+    monkeypatch.setattr("ci_owner_agent.cli.commands.resolve_period", lambda **_: (None, None))
+    monkeypatch.setattr("ci_owner_agent.cli.commands.WeeklyTestReportService", FakeService)
 
     assert main(["weekly-test-report", "--repo", "r", "--notify"]) == 2
     captured = capsys.readouterr()

@@ -14,7 +14,6 @@ from ci_owner_agent.services.failure_identity import build_failure_summary_signa
 from ci_owner_agent.services.history_inheritance import (
     active_feedback_docs as _active_feedback_docs,
     find_feedback_override as _find_feedback_override,
-    find_feedback_override_for_failure_signature,
 )
 from ci_owner_agent.services.responsibility_signature_enricher import enrich_responsibility_item_signatures
 from ci_owner_agent.services.branch_normalization import normalize_branch_name

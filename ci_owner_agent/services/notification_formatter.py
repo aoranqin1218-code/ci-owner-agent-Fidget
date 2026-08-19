@@ -1,13 +1,18 @@
 from __future__ import annotations
 
-import hashlib
-import json
 import re
 from urllib.parse import urlencode
 
 from ci_owner_agent.constants import NO_OWNER_NAME
 from ci_owner_agent.schemas import CiResponsibilityNotice, EvidenceItem, Owner, ResponsibilityItem
-from ci_owner_agent.services.test_maintainer_mapping import TestMaintainer, TestMaintainerMatch, TestMaintainerResolver
+from ci_owner_agent.services.test_maintainer_mapping import TestMaintainer, TestMaintainerResolver
+from ci_owner_agent.services.wecom_notification_routing import (
+    collect_pending_maintainers as _collect_pending_maintainers,
+    collect_responsible_display_names,
+    collect_responsible_owners,
+    notification_digest,
+    resolve_test_maintainer_matches,
+)
 from ci_owner_agent.services.wecom_user_mapping import WeComUserMapper
 
 
@@ -107,83 +112,6 @@ def format_wecom_markdown_notice(
     return "\n".join(lines)
 
 
-def resolve_test_maintainer_matches(
-    notice: CiResponsibilityNotice,
-    *,
-    maintainer_resolver: TestMaintainerResolver | None,
-    repo: str | None,
-    fallback_userids: tuple[str, ...],
-) -> list[TestMaintainerMatch | None]:
-    resolver = maintainer_resolver or TestMaintainerResolver()
-    matches: list[TestMaintainerMatch | None] = []
-    if (
-        str(notice.result or "").upper() in {"FAILURE", "UNSTABLE", "UNKNOWN"}
-        and not notice.responsibilityItems
-        and notice.owner.type == "no_high_confidence_owner"
-    ):
-        return [
-            resolver.resolve(
-                repo=repo or notice.repo,
-                job=notice.job,
-                test_file_path=None,
-                fallback_userids=fallback_userids,
-            )
-        ]
-    for item in notice.responsibilityItems:
-        if item.responsibilityType != "no_high_confidence_owner":
-            matches.append(None)
-            continue
-        matches.append(
-            resolver.resolve(
-                repo=repo or notice.repo,
-                job=notice.job,
-                test_file_path=item.testFilePath,
-                fallback_userids=fallback_userids,
-            )
-        )
-    return matches
-
-
-def notification_digest(
-    notice: CiResponsibilityNotice,
-    *,
-    maintainer_resolver: TestMaintainerResolver | None = None,
-    repo: str | None = None,
-    fallback_userids: tuple[str, ...] = (),
-    mention_mode: str = "userid",
-) -> str:
-    matches = resolve_test_maintainer_matches(
-        notice,
-        maintainer_resolver=maintainer_resolver,
-        repo=repo,
-        fallback_userids=fallback_userids,
-    )
-    routes = []
-    for index, match in enumerate(matches):
-        if match is None:
-            continue
-        routes.append(
-            {
-                "itemIndex": index,
-                "testFilePath": match.test_file_path,
-                "matchedPattern": match.matched_pattern,
-                "maintainerUserids": [item.wecom_userid for item in match.maintainers],
-                "maintainerNames": [item.name for item in match.maintainers],
-                "usedFallback": match.used_fallback,
-                "reason": match.reason,
-            }
-        )
-    payload = {
-        "notice": notice.model_dump(mode="json"),
-        "mentionMode": mention_mode,
-        "testMaintainerRoutes": routes,
-    }
-    from ci_owner_agent.services.failure_identity import canonicalize_failure_message
-
-    raw = canonicalize_failure_message(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
-
-
 def format_test_maintainer_mentions(maintainers: tuple[TestMaintainer, ...] | list[TestMaintainer], mention_mode: str) -> str:
     result: list[str] = []
     seen: set[str] = set()
@@ -197,39 +125,6 @@ def format_test_maintainer_mentions(maintainers: tuple[TestMaintainer, ...] | li
         else:
             result.append(f"<@{userid}>")
     return "、".join(result)
-
-
-def _collect_pending_maintainers(matches: list[TestMaintainerMatch | None]) -> tuple[TestMaintainer, ...]:
-    result: list[TestMaintainer] = []
-    seen: set[str] = set()
-    for match in matches:
-        if match is None:
-            continue
-        for maintainer in match.maintainers:
-            if maintainer.wecom_userid in seen:
-                continue
-            seen.add(maintainer.wecom_userid)
-            result.append(maintainer)
-    return tuple(result)
-
-
-def collect_responsible_owners(notice: CiResponsibilityNotice) -> list[Owner]:
-    owners: list[Owner] = []
-    seen: set[str] = set()
-    for item in notice.responsibilityItems:
-        owner = item.owner
-        if owner.type == "no_high_confidence_owner" or not owner.name or owner.name == NO_OWNER_NAME:
-            continue
-        key = owner.email.lower().strip() if owner.email else owner.name
-        if key in seen:
-            continue
-        seen.add(key)
-        owners.append(owner)
-    return owners
-
-
-def collect_responsible_display_names(notice: CiResponsibilityNotice) -> list[str]:
-    return [owner.name for owner in collect_responsible_owners(notice)]
 
 
 def format_fallback_userid_mentions(userids: tuple[str, ...] | list[str] | None) -> str:

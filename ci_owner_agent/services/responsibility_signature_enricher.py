@@ -7,7 +7,6 @@ from ci_owner_agent.services.failure_identity import (
     build_failure_fact_signature,
     build_failure_summary_signature,
     build_responsibility_signature,
-    canonicalize_failure_message,
     canonicalize_failure_signature,
     sanitize_failure_message,
 )

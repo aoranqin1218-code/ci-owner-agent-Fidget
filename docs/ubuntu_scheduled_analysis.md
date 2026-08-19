@@ -127,3 +127,11 @@ journalctl -u ci-owner-agent-weekly-report.service -n 200 --no-pager
 脚本使用本机文件锁防止同一 job 的轮询任务并发执行。默认每次扫描最近 50 个已完成构建，最多分析 3 个遗漏构建；可通过 `--lookback-builds` 和 `--max-builds-per-run` 调整。
 
 周报沿用项目已有的 `ci_report_notifications` 去重逻辑。默认不使用 `--force`，同一统计周期不会重复发送；systemd timer 的 `Persistent=true` 会在服务器错过周一 10 点后，于下次启动时补执行。
+
+## 5. 待处理：fx-code SSH 访问去个人化
+
+当前生产 repo cache 的 Git 同步依赖个人账号 `matureleek` 的 SSH 身份。若该账号的代码仓库权限被回收，`git fetch` 将失败，正式 Jenkins 分析会停止，不能将该情况误报为“无责任人”。
+
+后续需将该依赖迁移为非个人服务身份：在 `FX/fx-code` 配置仓库级只读 SSH Access Key；由服务器专用 `ci-owner-agent` 系统账号保存对应私钥并运行相关 systemd 服务；使用该账号完成 `git fetch origin --prune --no-tags` 验证并观察多个定时轮询周期后，再回收个人账号的旧密钥或仓库权限。
+
+该迁移不影响本地源码改动、pytest 或 compileall 开发验证；在迁移完成前，生产环境仍需保留现有可用凭据。

@@ -9,7 +9,11 @@ import requests
 from ci_owner_agent.schemas import BuildInfo, LogTail, SuccessfulBuildInfo
 from ci_owner_agent.services.branch_normalization import normalize_branch_name
 from ci_owner_agent.services.command_runner import truncate_tail_text, truncate_text
-from ci_owner_agent.services.log_provider import log_detect_final_status, resolve_checkout_revision_from_console_log, CheckoutCommitResolution
+from ci_owner_agent.services.log_parsing import (
+    CheckoutCommitResolution,
+    log_detect_final_status,
+    resolve_checkout_revision_from_console_log,
+)
 
 
 class JenkinsClient:

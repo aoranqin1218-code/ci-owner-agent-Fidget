@@ -45,20 +45,20 @@ Jenkins 在线构建 / 本地 console log
 
 ### 1.2 三种主要分析入口
 
-| 入口 | 数据来源 | 适用场景 |
-| --- | --- | --- |
-| `analyze` | Jenkins API + 本地 Git cache | Jenkins 可访问时分析指定构建。 |
-| `analyze-local` | 本地 console log + 本地 Git cache | 离线回放、调试、批量分析。 |
-| `scripts/*.py` | 本地日志目录、构建号或重复运行参数 | 批量验证、回归测试、稳定性测试。 |
+| 入口              | 数据来源                           | 适用场景                         |
+| ----------------- | ---------------------------------- | -------------------------------- |
+| `analyze`       | Jenkins API + 本地 Git cache       | Jenkins 可访问时分析指定构建。   |
+| `analyze-local` | 本地 console log + 本地 Git cache  | 离线回放、调试、批量分析。       |
+| `scripts/*.py`  | 本地日志目录、构建号或重复运行参数 | 批量验证、回归测试、稳定性测试。 |
 
 ### 1.3 构建状态门控
 
-| 构建结果 | 行为 |
-| --- | --- |
-| `SUCCESS` | 直接生成成功 notice，不进入 Agent 定责。 |
-| `ABORTED` | 生成无责任人 notice，提示优先检查 Pipeline、节点、环境或人工中止。 |
-| `FAILURE` / `UNSTABLE` / `UNKNOWN` | 进入失败分析。 |
-| `NOT_BUILT` | 主 CLI 不接受该本地覆盖值；批处理和 rerun 脚本会将其作为不可分析状态处理。 |
+| 构建结果                                 | 行为                                                                       |
+| ---------------------------------------- | -------------------------------------------------------------------------- |
+| `SUCCESS`                              | 直接生成成功 notice，不进入 Agent 定责。                                   |
+| `ABORTED`                              | 生成无责任人 notice，提示优先检查 Pipeline、节点、环境或人工中止。         |
+| `FAILURE` / `UNSTABLE` / `UNKNOWN` | 进入失败分析。                                                             |
+| `NOT_BUILT`                            | 主 CLI 不接受该本地覆盖值；批处理和 rerun 脚本会将其作为不可分析状态处理。 |
 
 ### 1.4 Git 调查范围
 
@@ -92,12 +92,12 @@ Agent 应先调查 `focusRange`。只有证据不足或窄范围读取失败时�
 
 `responsibilityItems` 中每个失败项可以使用以下类型：
 
-| 类型 | 含义 |
-| --- | --- |
-| `current_build_owner` | 当前构建引入的新失败，具有当前 diff、日志等证据。 |
-| `inherited_failure_owner` | 当前仍失败，但可信根因来自更早的历史构建。 |
-| `no_high_confidence_owner` | 证据不足、环境问题、偶发问题或无法可靠归责。 |
-| `unknown` | 模型未稳定判断，通常会在本地校验中降级。 |
+| 类型                         | 含义                                              |
+| ---------------------------- | ------------------------------------------------- |
+| `current_build_owner`      | 当前构建引入的新失败，具有当前 diff、日志等证据。 |
+| `inherited_failure_owner`  | 当前仍失败，但可信根因来自更早的历史构建。        |
+| `no_high_confidence_owner` | 证据不足、环境问题、偶发问题或无法可靠归责。      |
+| `unknown`                  | 模型未稳定判断，通常会在本地校验中降级。          |
 
 顶层 `owner` 是构建级摘要。多失败构建可能包含多个不同责任项，此时顶层 owner 可以保持 `无高可信责任人`，应优先查看 `responsibilityItems`。
 
@@ -119,10 +119,11 @@ Agent 应先调查 `focusRange`。只有证据不足或窄范围读取失败时�
 ```text
 ci_owner_agent/
   agents/                         # Agent 上下文、工厂、LangChain Agent、提示词
-  services/                       # Jenkins、Git、Mongo、历史、通知、反馈、metrics 等服务
+    services/                       # Jenkins、Git、日志来源/纯解析、Mongo、历史、企微渲染/路由、反馈、metrics 等服务
   tools/                          # Agent 可调用的日志、Git、TypeScript、历史工具
   __main__.py                     # python -m ci_owner_agent 入口
-  main.py                         # CLI 参数与命令分发
+  cli/                            # 子命令执行与 CLI 输出边界
+  main.py                         # CLI 参数与稳定入口
   config.py                       # 环境变量读取与 Settings
   orchestrator.py                 # analyze / analyze-local 核心编排
   schemas.py                      # Pydantic 输入输出模型
@@ -130,6 +131,8 @@ ci_owner_agent/
 
 scripts/
   _runtime.py                     # 脚本共享路径、进程超时和 resume marker 逻辑
+  _batch_common.py                # 批处理与重复运行共用的环境、产物和序列化工具
+  _langsmith_trace.py             # 批处理与重复运行共用的 LangSmith 查询、trace 落盘与统计
   batch_analyze_company_logs.py   # 批量分析本地 Jenkins 日志
   batch_analyze_jenkins_builds.py # 批量分析 Jenkins 构建号
   rerun_analyze_local.py          # 同一日志重复运行并汇总稳定性
@@ -150,16 +153,23 @@ pyproject.toml                    # Python 依赖和可选 extras
 
 ### 2.1 核心模块职责
 
-| 模块 | 职责 |
-| --- | --- |
-| `main.py` | 定义全部 CLI 命令、输出 JSON、通知、反馈、周报和服务启动。 |
-| `orchestrator.py` | 状态门控、Git 范围、失败摘要、历史预检、Agent 调用和历史保存。 |
-| `schemas.py` | `BuildInfo`、`CiResponsibilityNotice`、`ResponsibilityItem` 等严格模型。 |
-| `services/history_store.py` | MongoDB 集合、索引、构建历史、notice、失败事实和测试文件事件。 |
-| `services/wecom_notification_outbox.py` | 通知入队、去重、租约、重试和 dead 状态。 |
-| `services/wecom_bot_worker.py` | 企业微信长连接、Outbox 消费和反馈消息处理。 |
-| `services/weekly_test_report_*` | 周期计算、阈值配置、统计和周报通知。 |
-| `scripts/_runtime.py` | 任意 cwd 路径解析、有界进程终止、严格 success marker 校验。 |
+| 模块                                      | 职责                                                                           |
+| ----------------------------------------- | ------------------------------------------------------------------------------ |
+| `main.py`                               | CLI 参数解析与稳定入口。                                                        |
+| `cli/commands.py`                       | 子命令执行、输出边界、CLI 错误码与服务启动。                                   |
+| `orchestrator.py`                       | 状态门控、Git 范围、失败摘要、历史预检、Agent 调用和历史保存。                 |
+| `schemas.py`                            | `BuildInfo`、`CiResponsibilityNotice`、`ResponsibilityItem` 等严格模型。 |
+| `services/history_store.py`             | MongoDB 集合、索引、构建历史、notice、失败事实和测试文件事件。                 |
+| `services/history_search.py`            | 基于稳定失败摘要的确定性历史查询与责任继承决策。                               |
+| `services/ai_history_search.py`         | 基于 AI failure facts 的保守历史语义比对与继承预检。                           |
+| `services/history_no_owner.py`          | 历史无责任人结论的选择、信任校验、强证据回退与严格 notice 构造。              |
+| `services/wecom_notice_service.py`      | CI notice 的格式化、去重、投递与通知失败隔离。                                 |
+| `services/wecom_feedback_service.py`    | 企业微信反馈的权限、确认状态机、幂等和反馈落库。                               |
+| `services/wecom_feedback_cards.py`      | 企业微信确认/状态卡片的纯渲染、字段限制和状态文案。                             |
+| `services/wecom_notification_outbox.py` | 通知入队、去重、租约、重试和 dead 状态。                                       |
+| `services/wecom_bot_worker.py`          | 企业微信长连接、Outbox 消费和反馈消息处理。                                    |
+| `services/weekly_test_report_*`         | 周期计算、阈值配置、统计和周报通知。                                           |
+| `scripts/_runtime.py`                   | 任意 cwd 路径解析、有界进程终止、严格 success marker 校验。                    |
 
 ---
 
@@ -270,12 +280,12 @@ npm install
 
 ### 3.6 可选基础设施
 
-| 组件 | 何时需要 |
-| --- | --- |
-| Jenkins | 使用 `analyze` 或 Jenkins 构建号批处理时。 |
-| MongoDB | 历史继承、反馈、测试文件统计、周报、Bot Outbox 和长连接机器人必需；Webhook 直发本身不要求。 |
-| LangSmith | 需要 trace 或批处理 `--fetch-trace` 时。 |
-| 企业微信 API 模式机器人 | 使用 Bot transport 主动通知或处理群内反馈时。 |
+| 组件                    | 何时需要                                                                                    |
+| ----------------------- | ------------------------------------------------------------------------------------------- |
+| Jenkins                 | 使用`analyze` 或 Jenkins 构建号批处理时。                                                 |
+| MongoDB                 | 历史继承、反馈、测试文件统计、周报、Bot Outbox 和长连接机器人必需；Webhook 直发本身不要求。 |
+| LangSmith               | 需要 trace 或批处理`--fetch-trace` 时。                                                   |
+| 企业微信 API 模式机器人 | 使用 Bot transport 主动通知或处理群内反馈时。                                               |
 
 ---
 
@@ -283,29 +293,29 @@ npm install
 
 ### 4.1 Jenkins、仓库和 Agent 限制
 
-| 配置 | 默认值 | 说明 |
-| --- | --- | --- |
-| `JENKINS_URL` | 空 | Jenkins 地址。为空时 `analyze` 返回结构化 no-owner notice，不会访问 Jenkins。 |
-| `JENKINS_USER` | 空 | Jenkins 用户名。 |
-| `JENKINS_TOKEN` | 空 | Jenkins API token 或密码。 |
-| `CI_AGENT_REPO_CACHE_DIR` | `repos` | 专用 Git repo cache。 |
-| `CI_AGENT_DEFAULT_LOG_TAIL_LINES` | `500` | 默认日志尾部行数。 |
-| `CI_AGENT_JENKINS_SUCCESSFUL_BUILD_SCAN_LIMIT` | `100` | 在线模式向前扫描同分支成功构建的上限。代码支持该变量，未配置时使用 100。 |
-| `CI_AGENT_MAX_TOOL_STEPS` | `12` | Agent 工具调用预算参考值。 |
-| `CI_AGENT_MAX_TOOL_OUTPUT_CHARS` | `20000` | 单次工具输出字符上限。 |
-| `CI_AGENT_RECURSION_LIMIT` | `max(MAX_TOOL_STEPS × 4, 40)` | LangGraph recursion limit；默认步骤数下为 48。 |
+| 配置                                             | 默认值                           | 说明                                                                           |
+| ------------------------------------------------ | -------------------------------- | ------------------------------------------------------------------------------ |
+| `JENKINS_URL`                                  | 空                               | Jenkins 地址。为空时`analyze` 返回结构化 no-owner notice，不会访问 Jenkins。 |
+| `JENKINS_USER`                                 | 空                               | Jenkins 用户名。                                                               |
+| `JENKINS_TOKEN`                                | 空                               | Jenkins API token 或密码。                                                     |
+| `CI_AGENT_REPO_CACHE_DIR`                      | `repos`                        | 专用 Git repo cache。                                                          |
+| `CI_AGENT_DEFAULT_LOG_TAIL_LINES`              | `500`                          | 默认日志尾部行数。                                                             |
+| `CI_AGENT_JENKINS_SUCCESSFUL_BUILD_SCAN_LIMIT` | `100`                          | 在线模式向前扫描同分支成功构建的上限。代码支持该变量，未配置时使用 100。       |
+| `CI_AGENT_MAX_TOOL_STEPS`                      | `12`                           | Agent 工具调用预算参考值。                                                     |
+| `CI_AGENT_MAX_TOOL_OUTPUT_CHARS`               | `20000`                        | 单次工具输出字符上限。                                                         |
+| `CI_AGENT_RECURSION_LIMIT`                     | `max(MAX_TOOL_STEPS × 4, 40)` | LangGraph recursion limit；默认步骤数下为 48。                                 |
 
 ### 4.2 LLM 配置
 
-| 配置 | 默认值 | 说明 |
-| --- | --- | --- |
-| `CI_AGENT_MODEL_PROVIDER` | `fake` | `fake`、`openai`、`deepseek`、`doubao`、`openai-compatible`。 |
-| `CI_AGENT_MODEL_BASE_URL` | 空 | DeepSeek、豆包和 OpenAI-compatible provider 必填。 |
-| `CI_AGENT_MODEL_NAME` | 空 | 非 fake provider 必填。 |
-| `CI_AGENT_API_KEY` | 空 | 非 fake provider 必填。 |
-| `CI_AGENT_MODEL_TIMEOUT_SECONDS` | `90` | 单次模型请求超时。 |
-| `CI_AGENT_MODEL_MAX_RETRIES` | `1` | 模型请求重试次数。非法值会回退默认值。 |
-| `CI_AGENT_RESPONSE_FORMAT` | `tool` | `tool` 或 `json_text`；非法值回退 `tool`。 |
+| 配置                               | 默认值   | 说明                                                                    |
+| ---------------------------------- | -------- | ----------------------------------------------------------------------- |
+| `CI_AGENT_MODEL_PROVIDER`        | `fake` | `fake`、`openai`、`deepseek`、`doubao`、`openai-compatible`。 |
+| `CI_AGENT_MODEL_BASE_URL`        | 空       | DeepSeek、豆包和 OpenAI-compatible provider 必填。                      |
+| `CI_AGENT_MODEL_NAME`            | 空       | 非 fake provider 必填。                                                 |
+| `CI_AGENT_API_KEY`               | 空       | 非 fake provider 必填。                                                 |
+| `CI_AGENT_MODEL_TIMEOUT_SECONDS` | `90`   | 单次模型请求超时。                                                      |
+| `CI_AGENT_MODEL_MAX_RETRIES`     | `1`    | 模型请求重试次数。非法值会回退默认值。                                  |
+| `CI_AGENT_RESPONSE_FORMAT`       | `tool` | `tool` 或 `json_text`；非法值回退 `tool`。                        |
 
 `fake` provider 用于离线测试，只返回固定 no-owner 结果，不用于正式责任判断。
 
@@ -329,64 +339,64 @@ CI_AGENT_API_KEY=your-api-key
 
 ### 4.3 TypeScript Analyzer 与 LangSmith
 
-| 配置 | 默认值 | 说明 |
-| --- | --- | --- |
-| `TS_ANALYZER_DIR` | `./ts-analyzer` | TypeScript Analyzer 目录。 |
-| `LANGSMITH_TRACING` | `false` | 是否启用 LangSmith tracing。 |
-| `LANGSMITH_API_KEY` | 空 | LangSmith API key。 |
-| `LANGSMITH_PROJECT` | `ci-owner-agent-dev` | 默认项目名。 |
-| `LANGSMITH_ENDPOINT` | `https://api.smith.langchain.com` | LangSmith endpoint。 |
+| 配置                   | 默认值                              | 说明                         |
+| ---------------------- | ----------------------------------- | ---------------------------- |
+| `TS_ANALYZER_DIR`    | `./ts-analyzer`                   | TypeScript Analyzer 目录。   |
+| `LANGSMITH_TRACING`  | `false`                           | 是否启用 LangSmith tracing。 |
+| `LANGSMITH_API_KEY`  | 空                                  | LangSmith API key。          |
+| `LANGSMITH_PROJECT`  | `ci-owner-agent-dev`              | 默认项目名。                 |
+| `LANGSMITH_ENDPOINT` | `https://api.smith.langchain.com` | LangSmith endpoint。         |
 
 实际 tracing 还要求存在有效 API key。批处理脚本可以通过 `--langsmith-project` 覆盖项目名。
 
 ### 4.4 MongoDB 历史与测试周报
 
-| 配置 | 默认值 | 说明 |
-| --- | --- | --- |
-| `CI_AGENT_HISTORY_ENABLED` | `false` | 启用 MongoDB 历史、反馈、统计和 Outbox。 |
-| `CI_AGENT_HISTORY_MONGO_URI` | `mongodb://localhost:27017` | MongoDB URI。 |
-| `CI_AGENT_HISTORY_MONGO_DB` | `ci_owner_agent` | 数据库名。 |
-| `CI_AGENT_WEEKLY_TEST_REPORT_CONFIG_FILE` | `config/weekly-test-report.yml` | 周报阈值配置。 |
-| `CI_AGENT_HISTORY_MAX_CANDIDATES` | `5` | 历史相似失败候选上限。 |
-| `CI_AGENT_HISTORY_INHERIT_NO_OWNER_ENABLED` | `true` | 是否允许可信历史 no-owner 短路。 |
-| `CI_AGENT_FAILURE_CHUNK_TAIL_LINES` | `500` | 提取 failure summary 的日志尾部行数；低于 50 会回退默认值。 |
+| 配置                                          | 默认值                            | 说明                                                        |
+| --------------------------------------------- | --------------------------------- | ----------------------------------------------------------- |
+| `CI_AGENT_HISTORY_ENABLED`                  | `false`                         | 启用 MongoDB 历史、反馈、统计和 Outbox。                    |
+| `CI_AGENT_HISTORY_MONGO_URI`                | `mongodb://localhost:27017`     | MongoDB URI。                                               |
+| `CI_AGENT_HISTORY_MONGO_DB`                 | `ci_owner_agent`                | 数据库名。                                                  |
+| `CI_AGENT_WEEKLY_TEST_REPORT_CONFIG_FILE`   | `config/weekly-test-report.yml` | 周报阈值配置。                                              |
+| `CI_AGENT_HISTORY_MAX_CANDIDATES`           | `5`                             | 历史相似失败候选上限。                                      |
+| `CI_AGENT_HISTORY_INHERIT_NO_OWNER_ENABLED` | `true`                          | 是否允许可信历史 no-owner 短路。                            |
+| `CI_AGENT_FAILURE_CHUNK_TAIL_LINES`         | `500`                           | 提取 failure summary 的日志尾部行数；低于 50 会回退默认值。 |
 
 ### 4.5 AI failure facts 与 AI history comparison
 
-| 配置 | 默认值 | 说明 |
-| --- | --- | --- |
-| `CI_AGENT_AI_FAILURE_FACTS_ENABLED` | `false` | 确定性失败摘要不足时启用 AI failure facts。 |
-| `CI_AGENT_AI_FAILURE_FACT_MIN_CONFIDENCE` | `0.70` | AI fact 最低置信度，限制在 0～1。 |
-| `CI_AGENT_AI_FAILURE_FACT_MAX_LOG_CHARS` | `12000` | 送入 fact extractor 的最大日志字符数。 |
-| `CI_AGENT_AI_HISTORY_COMPARE_ENABLED` | `false` | 对 AI facts 启用历史 semantic comparison。 |
-| `CI_AGENT_AI_HISTORY_COMPARE_THRESHOLD` | `0.90` | AI 历史匹配阈值，限制在 0～1。 |
-| `CI_AGENT_AI_HISTORY_MAX_FACT_CANDIDATES` | `20` | 历史 fact 候选上限。 |
-| `CI_AGENT_AI_HISTORY_MAX_COMPARE_CALLS` | `20` | 单次分析允许的 AI 比较调用上限。 |
+| 配置                                        | 默认值    | 说明                                        |
+| ------------------------------------------- | --------- | ------------------------------------------- |
+| `CI_AGENT_AI_FAILURE_FACTS_ENABLED`       | `false` | 确定性失败摘要不足时启用 AI failure facts。 |
+| `CI_AGENT_AI_FAILURE_FACT_MIN_CONFIDENCE` | `0.70`  | AI fact 最低置信度，限制在 0～1。           |
+| `CI_AGENT_AI_FAILURE_FACT_MAX_LOG_CHARS`  | `12000` | 送入 fact extractor 的最大日志字符数。      |
+| `CI_AGENT_AI_HISTORY_COMPARE_ENABLED`     | `false` | 对 AI facts 启用历史 semantic comparison。  |
+| `CI_AGENT_AI_HISTORY_COMPARE_THRESHOLD`   | `0.90`  | AI 历史匹配阈值，限制在 0～1。              |
+| `CI_AGENT_AI_HISTORY_MAX_FACT_CANDIDATES` | `20`    | 历史 fact 候选上限。                        |
+| `CI_AGENT_AI_HISTORY_MAX_COMPARE_CALLS`   | `20`    | 单次分析允许的 AI 比较调用上限。            |
 
 ### 4.6 Metrics
 
-| 配置 | 默认值 | 说明 |
-| --- | --- | --- |
-| `CI_AGENT_METRICS_ENABLED` | `false` | 是否记录分析 metrics。 |
-| `CI_AGENT_METRICS_FILE` | `./runs/metrics/ci_analysis_metrics.jsonl` | JSONL 输出路径。 |
+| 配置                         | 默认值                                       | 说明                   |
+| ---------------------------- | -------------------------------------------- | ---------------------- |
+| `CI_AGENT_METRICS_ENABLED` | `false`                                    | 是否记录分析 metrics。 |
+| `CI_AGENT_METRICS_FILE`    | `./runs/metrics/ci_analysis_metrics.jsonl` | JSONL 输出路径。       |
 
 metrics 包含总耗时、阶段耗时、LLM calls、provider 返回的 token usage、责任项数量、warning 和 error。metrics 写入失败只输出 warning，不改变分析 notice。
 
 ### 4.7 企业微信通知与维护人路由
 
-| 配置 | 默认值 | 说明 |
-| --- | --- | --- |
-| `CI_AGENT_WECOM_NOTIFY_ENABLED` | `false` | 分析命令是否默认触发通知流程。 |
-| `CI_AGENT_WECOM_NOTIFY_TRANSPORT` | `webhook` | CI 通知通道，只允许 `webhook` 或 `bot`。 |
-| `CI_AGENT_WECOM_WEBHOOK_URL` | 空 | 企业微信群机器人 Webhook；公开配置输出中脱敏。 |
-| `CI_AGENT_WECOM_NOTIFY_DRY_RUN` | `true` | 默认仅格式化，不调用 Webhook、也不向 Outbox 入队。 |
-| `CI_AGENT_WECOM_NOTIFY_ON_SUCCESS` | `false` | 是否通知成功构建。 |
-| `CI_AGENT_WECOM_NOTIFY_ON_NO_OWNER` | `true` | 无高可信责任人时是否仍通知。 |
-| `CI_AGENT_WECOM_USER_MAPPING_FILE` | 空 | Mongo 用户映射不可用时的 CSV fallback。 |
-| `CI_AGENT_TEST_MAINTAINER_MAPPING_FILE` | 空 | 测试文件维护人 YAML；仅用于通知路由，不参与定责。 |
-| `CI_AGENT_WECOM_MENTION_MODE` | `userid` | `userid` 或 `name`。 |
-| `CI_AGENT_WECOM_FALLBACK_USERIDS` | 空 | 逗号分隔的兜底 userid。 |
-| `CI_AGENT_NOTIFICATION_DEDUP_ENABLED` | `true` | 是否按通知 digest 去重。 |
+| 配置                                      | 默认值      | 说明                                               |
+| ----------------------------------------- | ----------- | -------------------------------------------------- |
+| `CI_AGENT_WECOM_NOTIFY_ENABLED`         | `false`   | 分析命令是否默认触发通知流程。                     |
+| `CI_AGENT_WECOM_NOTIFY_TRANSPORT`       | `webhook` | CI 通知通道，只允许`webhook` 或 `bot`。        |
+| `CI_AGENT_WECOM_WEBHOOK_URL`            | 空          | 企业微信群机器人 Webhook；公开配置输出中脱敏。     |
+| `CI_AGENT_WECOM_NOTIFY_DRY_RUN`         | `true`    | 默认仅格式化，不调用 Webhook、也不向 Outbox 入队。 |
+| `CI_AGENT_WECOM_NOTIFY_ON_SUCCESS`      | `false`   | 是否通知成功构建。                                 |
+| `CI_AGENT_WECOM_NOTIFY_ON_NO_OWNER`     | `true`    | 无高可信责任人时是否仍通知。                       |
+| `CI_AGENT_WECOM_USER_MAPPING_FILE`      | 空          | Mongo 用户映射不可用时的 CSV fallback。            |
+| `CI_AGENT_TEST_MAINTAINER_MAPPING_FILE` | 空          | 测试文件维护人 YAML；仅用于通知路由，不参与定责。  |
+| `CI_AGENT_WECOM_MENTION_MODE`           | `userid`  | `userid` 或 `name`。                           |
+| `CI_AGENT_WECOM_FALLBACK_USERIDS`       | 空          | 逗号分隔的兜底 userid。                            |
+| `CI_AGENT_NOTIFICATION_DEDUP_ENABLED`   | `true`    | 是否按通知 digest 去重。                           |
 
 测试维护人不是失败责任人。no-owner 责任项仍保持 `no_high_confidence_owner / 无高可信责任人`，维护人只显示在通知的“待确认维护人”区域。
 
@@ -428,21 +438,21 @@ rules:
 
 ### 4.8 企业微信长连接机器人
 
-| 配置 | 默认值 | 说明 |
-| --- | --- | --- |
-| `CI_AGENT_WECOM_BOT_ENABLED` | `false` | 启用 API 模式机器人 Worker。 |
-| `CI_AGENT_WECOM_BOT_ID` | 空 | Bot ID。 |
-| `CI_AGENT_WECOM_BOT_SECRET` | 空 | Bot Secret。 |
-| `CI_AGENT_WECOM_BOT_DISCOVER_CHAT_ID` | `false` | 临时发现目标群 chatid；正常运行必须关闭。 |
-| `CI_AGENT_WECOM_BOT_NOTIFY_CHAT_ID` | 空 | 仅 `CI_AGENT_WECOM_NOTIFY_TRANSPORT=bot` 时使用的通知目标群 chatid。 |
-| `CI_AGENT_WECOM_BOT_NOTIFY_POLL_SECONDS` | `2` | Outbox 轮询间隔。 |
-| `CI_AGENT_WECOM_BOT_NOTIFY_LEASE_SECONDS` | `30` | 单条通知发送租约。 |
-| `CI_AGENT_WECOM_BOT_NOTIFY_MAX_ATTEMPTS` | `5` | 最大投递次数。 |
-| `CI_AGENT_WECOM_BOT_CONFIRM_TTL_SECONDS` | `300` | 群内反馈确认有效期。 |
-| `CI_AGENT_WECOM_FEEDBACK_CODE_TTL_DAYS` | `30` | 构建反馈码 TTL。 |
-| `CI_AGENT_WECOM_BOT_EVENT_TTL_DAYS` | `7` | 机器人事件幂等记录 TTL。 |
-| `CI_AGENT_WECOM_BOT_LLM_ENABLED` | `false` | 启用可选自然语言反馈解析。 |
-| `CI_AGENT_WECOM_BOT_LLM_MAX_INPUT_CHARS` | `2000` | 自然语言解析最大输入字符数。 |
+| 配置                                        | 默认值    | 说明                                                                  |
+| ------------------------------------------- | --------- | --------------------------------------------------------------------- |
+| `CI_AGENT_WECOM_BOT_ENABLED`              | `false` | 启用 API 模式机器人 Worker。                                          |
+| `CI_AGENT_WECOM_BOT_ID`                   | 空        | Bot ID。                                                              |
+| `CI_AGENT_WECOM_BOT_SECRET`               | 空        | Bot Secret。                                                          |
+| `CI_AGENT_WECOM_BOT_DISCOVER_CHAT_ID`     | `false` | 临时发现目标群 chatid；正常运行必须关闭。                             |
+| `CI_AGENT_WECOM_BOT_NOTIFY_CHAT_ID`       | 空        | 仅`CI_AGENT_WECOM_NOTIFY_TRANSPORT=bot` 时使用的通知目标群 chatid。 |
+| `CI_AGENT_WECOM_BOT_NOTIFY_POLL_SECONDS`  | `2`     | Outbox 轮询间隔。                                                     |
+| `CI_AGENT_WECOM_BOT_NOTIFY_LEASE_SECONDS` | `30`    | 单条通知发送租约。                                                    |
+| `CI_AGENT_WECOM_BOT_NOTIFY_MAX_ATTEMPTS`  | `5`     | 最大投递次数。                                                        |
+| `CI_AGENT_WECOM_BOT_CONFIRM_TTL_SECONDS`  | `300`   | 群内反馈确认有效期。                                                  |
+| `CI_AGENT_WECOM_FEEDBACK_CODE_TTL_DAYS`   | `30`    | 构建反馈码 TTL。                                                      |
+| `CI_AGENT_WECOM_BOT_EVENT_TTL_DAYS`       | `7`     | 机器人事件幂等记录 TTL。                                              |
+| `CI_AGENT_WECOM_BOT_LLM_ENABLED`          | `false` | 启用可选自然语言反馈解析。                                            |
+| `CI_AGENT_WECOM_BOT_LLM_MAX_INPUT_CHARS`  | `2000`  | 自然语言解析最大输入字符数。                                          |
 
 固定反馈命令不依赖 LLM。正式使用自然语言解析时，应配置真实模型；fake parser 只适合测试。Bot 主动通知模式还需要常驻 Worker：
 
@@ -458,12 +468,12 @@ CI_AGENT_WECOM_BOT_NOTIFY_CHAT_ID=***
 
 ### 4.9 反馈服务
 
-| 配置 | 默认值 | 说明 |
-| --- | --- | --- |
-| `CI_AGENT_FEEDBACK_BASE_URL` | 空 | 通知中反馈链接的基础 URL，也作为机器人卡片跳转地址。 |
-| `CI_AGENT_FEEDBACK_SERVER_HOST` | `127.0.0.1` | FastAPI 监听地址。 |
-| `CI_AGENT_FEEDBACK_SERVER_PORT` | `8765` | FastAPI 端口。 |
-| `CI_AGENT_FEEDBACK_SHARED_TOKEN` | 空 | 可选共享 token；用于反馈页和用户搜索接口的简单访问保护。 |
+| 配置                               | 默认值        | 说明                                                     |
+| ---------------------------------- | ------------- | -------------------------------------------------------- |
+| `CI_AGENT_FEEDBACK_BASE_URL`     | 空            | 通知中反馈链接的基础 URL，也作为机器人卡片跳转地址。     |
+| `CI_AGENT_FEEDBACK_SERVER_HOST`  | `127.0.0.1` | FastAPI 监听地址。                                       |
+| `CI_AGENT_FEEDBACK_SERVER_PORT`  | `8765`      | FastAPI 端口。                                           |
+| `CI_AGENT_FEEDBACK_SHARED_TOKEN` | 空            | 可选共享 token；用于反馈页和用户搜索接口的简单访问保护。 |
 
 不要提交真实 API key、Bot Secret、Jenkins token、chatid 或共享 token。
 
@@ -473,16 +483,16 @@ CI_AGENT_WECOM_BOT_NOTIFY_CHAT_ID=***
 
 ### 5.1 命令总览
 
-| 命令 | 作用 |
-| --- | --- |
-| `analyze-local` | 分析本地 console log。 |
-| `analyze` | 在线读取并分析 Jenkins 构建。 |
-| `notify-notice` | 发送或预览已有 notice。 |
-| `feedback apply/list` | 提交或查看人工反馈。 |
-| `serve-feedback` | 启动反馈 Web 服务。 |
-| `test-failure-stats` | 查询测试文件失败统计。 |
-| `weekly-test-report` | 生成或发送测试失败周报。 |
-| `serve-wecom-bot` | 启动企业微信长连接 Worker。 |
+| 命令                    | 作用                          |
+| ----------------------- | ----------------------------- |
+| `analyze-local`       | 分析本地 console log。        |
+| `analyze`             | 在线读取并分析 Jenkins 构建。 |
+| `notify-notice`       | 发送或预览已有 notice。       |
+| `feedback apply/list` | 提交或查看人工反馈。          |
+| `serve-feedback`      | 启动反馈 Web 服务。           |
+| `test-failure-stats`  | 查询测试文件失败统计。        |
+| `weekly-test-report`  | 生成或发送测试失败周报。      |
+| `serve-wecom-bot`     | 启动企业微信长连接 Worker。   |
 
 ### 5.2 本地日志分析：`analyze-local`
 
@@ -503,26 +513,26 @@ python -m ci_owner_agent analyze-local `
   --output-file .\runs\5064.notice.json
 ```
 
-| 参数 | 必填 | 说明 |
-| --- | --- | --- |
-| `--repo` | 是 | repo cache 中的仓库名。 |
-| `--job` | 是 | Jenkins job 名。 |
-| `--build` | 是 | 构建号。 |
-| `--base-commit` | 是 | 完整责任窗口起点。 |
-| `--head-commit` | 是 | 当前构建可信 checkout commit。 |
-| `--console-file` | 是 | 本地 console log。 |
-| `--build-url` | 是 | 展示用 URL，可使用 `local://...`。 |
-| `--branch` | 否 | 逻辑分支名。 |
-| `--result` | 否 | `SUCCESS`、`FAILURE`、`UNSTABLE`、`ABORTED`、`UNKNOWN`。 |
-| `--log-tail-lines` | 否 | 覆盖默认日志尾部行数。 |
-| `--ignore-checkout-commit-mismatch` | 否 | 忽略日志 checkout SHA 与 `--head-commit` 不一致保护。仅限明确知道风险时使用。 |
-| `--last-success-build` | 否 | 上次成功构建号。 |
-| `--previous-build` / `--previous-commit` | 否 | 显式提供 focusRange 来源。 |
-| `--build-timestamp` | 否 | 带时区 ISO 8601 构建时间。无时区值会拒绝。 |
-| `--notify` | 否 | 触发通知流程。 |
-| `--notify-dry-run` | 否 | 只格式化，不调用 Webhook、也不向 Outbox 入队。 |
-| `--force-notify` | 否 | 忽略通知去重。 |
-| `--output-file` | 否 | 原子写入 UTF-8 notice 文件。 |
+| 参数                                         | 必填 | 说明                                                                           |
+| -------------------------------------------- | ---- | ------------------------------------------------------------------------------ |
+| `--repo`                                   | 是   | repo cache 中的仓库名。                                                        |
+| `--job`                                    | 是   | Jenkins job 名。                                                               |
+| `--build`                                  | 是   | 构建号。                                                                       |
+| `--base-commit`                            | 是   | 完整责任窗口起点。                                                             |
+| `--head-commit`                            | 是   | 当前构建可信 checkout commit。                                                 |
+| `--console-file`                           | 是   | 本地 console log。                                                             |
+| `--build-url`                              | 是   | 展示用 URL，可使用`local://...`。                                            |
+| `--branch`                                 | 否   | 逻辑分支名。                                                                   |
+| `--result`                                 | 否   | `SUCCESS`、`FAILURE`、`UNSTABLE`、`ABORTED`、`UNKNOWN`。             |
+| `--log-tail-lines`                         | 否   | 覆盖默认日志尾部行数。                                                         |
+| `--ignore-checkout-commit-mismatch`        | 否   | 忽略日志 checkout SHA 与`--head-commit` 不一致保护。仅限明确知道风险时使用。 |
+| `--last-success-build`                     | 否   | 上次成功构建号。                                                               |
+| `--previous-build` / `--previous-commit` | 否   | 显式提供 focusRange 来源。                                                     |
+| `--build-timestamp`                        | 否   | 带时区 ISO 8601 构建时间。无时区值会拒绝。                                     |
+| `--notify`                                 | 否   | 触发通知流程。                                                                 |
+| `--notify-dry-run`                         | 否   | 只格式化，不调用 Webhook、也不向 Outbox 入队。                                 |
+| `--force-notify`                           | 否   | 忽略通知去重。                                                                 |
+| `--output-file`                            | 否   | 原子写入 UTF-8 notice 文件。                                                   |
 
 `analyze-local` 会从日志中解析可信 checkout 行，并校验其 SHA 与 `--head-commit`。不一致时默认返回输入错误，防止对错误 commit 定责。
 
@@ -555,12 +565,12 @@ python -m ci_owner_agent notify-notice `
   --dry-run
 ```
 
-| 参数 | 说明 |
-| --- | --- |
-| `--notice-file` | `CiResponsibilityNotice` JSON，支持 UTF-8 和 UTF-8 BOM。 |
-| `--dry-run` | 打印 Markdown，不调用 Webhook、也不向 Outbox 入队。 |
-| `--force` | 忽略通知去重。 |
-| `--feedback-base-url` | 覆盖反馈 URL。 |
+| 参数                    | 说明                                                       |
+| ----------------------- | ---------------------------------------------------------- |
+| `--notice-file`       | `CiResponsibilityNotice` JSON，支持 UTF-8 和 UTF-8 BOM。 |
+| `--dry-run`           | 打印 Markdown，不调用 Webhook、也不向 Outbox 入队。        |
+| `--force`             | 忽略通知去重。                                             |
+| `--feedback-base-url` | 覆盖反馈 URL。                                             |
 
 `CI_AGENT_WECOM_NOTIFY_DRY_RUN=true` 也会使该命令进入 dry-run。
 
@@ -616,12 +626,12 @@ python -m ci_owner_agent serve-feedback --host 0.0.0.0 --port 8765
 
 需要安装 `dev` 或 `server` extra，并启用 MongoDB history。
 
-| 路径 | 说明 |
-| --- | --- |
-| `GET /health` | 健康检查。 |
-| `GET /feedback?repo=...&job=...&branch=...&build=...&token=...` | 构建反馈页。 |
-| `POST /feedback` | 提交反馈。 |
-| `GET /api/wecom-users/search?q=...&limit=...&token=...` | 搜索企业微信用户。 |
+| 路径                                                              | 说明               |
+| ----------------------------------------------------------------- | ------------------ |
+| `GET /health`                                                   | 健康检查。         |
+| `GET /feedback?repo=...&job=...&branch=...&build=...&token=...` | 构建反馈页。       |
+| `POST /feedback`                                                | 提交反馈。         |
+| `GET /api/wecom-users/search?q=...&limit=...&token=...`         | 搜索企业微信用户。 |
 
 配置 `CI_AGENT_FEEDBACK_SHARED_TOKEN` 后，上述反馈页和搜索接口必须携带相同 token。它是共享访问门槛，不是完整用户认证系统。
 
@@ -666,13 +676,13 @@ python -m ci_owner_agent weekly-test-report `
   --notify
 ```
 
-| 参数 | 说明 |
-| --- | --- |
-| `--top` | 覆盖配置中的 topN。必须为正整数。 |
-| `--config-file` | 覆盖 `CI_AGENT_WEEKLY_TEST_REPORT_CONFIG_FILE`。 |
-| `--notify` | 按当前 transport 发送：Webhook 直发，Bot 写入 Outbox。 |
-| `--dry-run` | 输出并模拟通知，不调用 Webhook、也不向 Outbox 入队。 |
-| `--force` | 忽略当前 transport 的去重；Webhook 强制直发，Bot 生成新的 delivery key。 |
+| 参数              | 说明                                                                     |
+| ----------------- | ------------------------------------------------------------------------ |
+| `--top`         | 覆盖配置中的 topN。必须为正整数。                                        |
+| `--config-file` | 覆盖`CI_AGENT_WEEKLY_TEST_REPORT_CONFIG_FILE`。                        |
+| `--notify`      | 按当前 transport 发送：Webhook 直发，Bot 写入 Outbox。                   |
+| `--dry-run`     | 输出并模拟通知，不调用 Webhook、也不向 Outbox 入队。                     |
+| `--force`       | 忽略当前 transport 的去重；Webhook 强制直发，Bot 生成新的 delivery key。 |
 
 Webhook 发送记录的顶层 `status` 表示“是否曾经成功发送”。成功后即使一次 `--force` 重发失败，历史 `status` 仍保持 `sent`，最近一次尝试结果记录在 `lastAttemptStatus`、`lastAttemptError` 和 `lastAttemptAt`；因此后续非 force 调用仍会正常去重。
 
@@ -761,23 +771,23 @@ python .\scripts\batch_analyze_company_logs.py `
 
 常用参数：
 
-| 参数 | 说明 |
-| --- | --- |
-| `--log-dir` | 必填，本地日志目录。 |
-| `--log-glob` | 默认 `*.log`。 |
-| `--repo` | 默认 `fx-code`。 |
-| `--job` | 默认 `services/fx-code-unittest`。 |
-| `--branch` | 默认 `dev`，必须是逻辑分支。 |
-| `--python` | 子进程 Python，默认当前解释器。 |
-| `--build-url-prefix` | 本地 build URL 前缀。 |
-| `--initial-base-commit` | 已知成功基线。 |
-| `--manifest-file` | 可选 JSON 构建历史补充。 |
-| `--build-from` / `--build-to` | 构建范围。 |
-| `--limit` | 最多执行的 runnable build 数量；0 表示不限。 |
-| `--timeout-seconds` | 单构建超时，默认 900。 |
-| `--resume` | 仅复用 notice + 严格 success marker 均可信的历史结果。 |
-| `--dry-run` | 只写命令和记录，不启动分析函数。 |
-| `--fetch-trace` | 拉取 LangSmith trace。 |
+| 参数                              | 说明                                                   |
+| --------------------------------- | ------------------------------------------------------ |
+| `--log-dir`                     | 必填，本地日志目录。                                   |
+| `--log-glob`                    | 默认`*.log`。                                        |
+| `--repo`                        | 默认`fx-code`。                                      |
+| `--job`                         | 默认`services/fx-code-unittest`。                    |
+| `--branch`                      | 默认`dev`，必须是逻辑分支。                          |
+| `--python`                      | 子进程 Python，默认当前解释器。                        |
+| `--build-url-prefix`            | 本地 build URL 前缀。                                  |
+| `--initial-base-commit`         | 已知成功基线。                                         |
+| `--manifest-file`               | 可选 JSON 构建历史补充。                               |
+| `--build-from` / `--build-to` | 构建范围。                                             |
+| `--limit`                       | 最多执行的 runnable build 数量；0 表示不限。           |
+| `--timeout-seconds`             | 单构建超时，默认 900。                                 |
+| `--resume`                      | 仅复用 notice + 严格 success marker 均可信的历史结果。 |
+| `--dry-run`                     | 只写命令和记录，不启动分析函数。                       |
+| `--fetch-trace`                 | 拉取 LangSmith trace。                                 |
 
 输出结构：
 
@@ -994,12 +1004,12 @@ hasHighConfidenceOwner
 
 ### 7.3 CLI 与脚本退出状态
 
-| 情况 | 常见退出状态 |
-| --- | --- |
-| 主 CLI 正常生成 notice | `0` |
-| 参数、输入、配置、反馈或服务启动错误 | `2` |
-| batch / rerun 存在失败 row | `1` |
-| batch / rerun 全部成功或正常跳过 | `0` |
+| 情况                                 | 常见退出状态 |
+| ------------------------------------ | ------------ |
+| 主 CLI 正常生成 notice               | `0`        |
+| 参数、输入、配置、反馈或服务启动错误 | `2`        |
+| batch / rerun 存在失败 row           | `1`        |
+| batch / rerun 全部成功或正常跳过     | `0`        |
 
 不要仅依赖 `analyze` 的退出码判断是否得到有效责任人。某些上下文不足场景会正常输出 no-owner notice。
 
@@ -1063,19 +1073,19 @@ token 只累计 provider 实际返回的 usage，不估算缺失值。
 
 启用 history 后，当前代码初始化并使用以下主要集合：
 
-| 集合 | 用途 |
-| --- | --- |
-| `ci_builds` | 构建状态、commit、`buildTimestamp`、`analyzedAt`。 |
-| `ci_notices` | notice 快照和构建级责任摘要。 |
-| `ci_failure_chunks` | 结构化 failure summaries。 |
-| `ci_failure_facts` | AI failure facts。 |
-| `ci_test_file_failures` | 每构建、每测试文件的失败事件。 |
-| `ci_feedback` | 人工反馈和操作审计。 |
-| `ci_wecom_users` | 企业微信 userid、邮箱和显示名映射。 |
-| `ci_feedback_contexts` | 构建反馈码及责任项上下文，带 TTL。 |
-| `ci_wecom_pending_feedback` | 等待确认的群内反馈，带 TTL 和租约。 |
-| `ci_wecom_bot_events` | 机器人消息幂等与处理租约。 |
-| `ci_wecom_notification_outbox` | 待发送、发送中、已发送或 dead 的通知。 |
+| 集合                             | 用途                                                   |
+| -------------------------------- | ------------------------------------------------------ |
+| `ci_builds`                    | 构建状态、commit、`buildTimestamp`、`analyzedAt`。 |
+| `ci_notices`                   | notice 快照和构建级责任摘要。                          |
+| `ci_failure_chunks`            | 结构化 failure summaries。                             |
+| `ci_failure_facts`             | AI failure facts。                                     |
+| `ci_test_file_failures`        | 每构建、每测试文件的失败事件。                         |
+| `ci_feedback`                  | 人工反馈和操作审计。                                   |
+| `ci_wecom_users`               | 企业微信 userid、邮箱和显示名映射。                    |
+| `ci_feedback_contexts`         | 构建反馈码及责任项上下文，带 TTL。                     |
+| `ci_wecom_pending_feedback`    | 等待确认的群内反馈，带 TTL 和租约。                    |
+| `ci_wecom_bot_events`          | 机器人消息幂等与处理租约。                             |
+| `ci_wecom_notification_outbox` | 待发送、发送中、已发送或 dead 的通知。                 |
 
 代码还初始化 `ci_notifications`、`ci_report_notifications` 等辅助集合；Webhook 模式用它们做可选发送记录和去重，Bot 模式使用 `ci_wecom_notification_outbox`。
 
@@ -1203,11 +1213,9 @@ Windows 专属进程终止分支通过平台无关 mock 单测验证；POSIX des
    python -m pip install -e ".[dev]"
    python -m pytest -q
    ```
-
 2. **准备专用 repo cache**
 
    确认目标仓库可 fetch，并且 `baseCommit`、`headCommit` 均存在。
-
 3. **使用 fake provider 跑单个 `analyze-local`**
 
    ```env
@@ -1215,29 +1223,22 @@ Windows 专属进程终止分支通过平台无关 mock 单测验证；POSIX des
    CI_AGENT_HISTORY_ENABLED=false
    CI_AGENT_WECOM_NOTIFY_ENABLED=false
    ```
-
    验证 checkout SHA、Git ancestry、JSON 输出和路径配置。
-
 4. **启用真实模型分析单个失败构建**
 
    配置 provider、model、API key 和必要的 base URL，先不要开启通知。
-
 5. **启用 MongoDB history**
 
    连续分析多个同分支构建，检查 `ci_builds`、`ci_notices`、failure chunks / facts 和历史继承。
-
 6. **启用 metrics 与可选 LangSmith**
 
    观察阶段耗时、LLM calls、token usage 和 trace metadata。
-
 7. **验证本地批处理和 rerun**
 
    先使用 `--dry-run`，再执行少量构建；检查 `index.jsonl`、`summary.csv`、notice、marker 和 timeout 诊断。
-
 8. **启动反馈 Web 服务**
 
    配置 feedback URL 和可选 shared token，验证页面、用户搜索和反馈写入。
-
 9. **验证通知格式**
 
    ```powershell
@@ -1245,19 +1246,15 @@ Windows 专属进程终止分支通过平台无关 mock 单测验证；POSIX des
      --notice-file .\runs\example.notice.json `
      --dry-run
    ```
-
 10. **验证 Webhook 主动通知**
 
     设置 `CI_AGENT_WECOM_NOTIFY_TRANSPORT=webhook`，配置测试群 Webhook 和 userid 映射，关闭通知 dry-run；确认群内收到通知、真实成员 @ 被渲染为蓝色，并验证普通去重和 `--force`。
-
 11. **启动常驻 `serve-wecom-bot`**
 
     Webhook transport 下 Worker 只负责群内反馈，不要求通知 chatid。需要验证旧 Bot 主动通知路径时，再发现 chatid、切换 `CI_AGENT_WECOM_NOTIFY_TRANSPORT=bot`，并确认 Outbox 最终进入 `sent`。
-
 12. **验证群内反馈确认流程**
 
     测试固定命令、确认卡片、TTL、重复消息幂等和反馈审计。
-
 13. **验证测试文件统计与周报**
 
     ```powershell
@@ -1267,7 +1264,6 @@ Windows 专属进程终止分支通过平台无关 mock 单测验证；POSIX des
     python -m ci_owner_agent weekly-test-report `
       --repo fx-code --period previous-week --dry-run
     ```
-
 14. **最后接入 Jenkins 在线分析或定时任务**
 
     Jenkins 可在构建结束后调用 `analyze`，并由外部调度器每周运行 `weekly-test-report`。Python 进程本身不负责常驻周调度。

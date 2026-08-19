@@ -1,6 +1,7 @@
 """Runtime conventions shared by command-line helper scripts."""
 from __future__ import annotations
 
+import ctypes
 import os
 import hashlib
 import json
@@ -56,6 +57,35 @@ def sha256_file(path: Path) -> str:
         for chunk in iter(lambda: file.read(65536), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def read_last_jsonl(path: Path) -> dict | None:
+    if not path.exists():
+        return None
+    lines = [
+        line.strip()
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines()
+        if line.strip()
+    ]
+    if not lines:
+        return None
+    try:
+        value = json.loads(lines[-1])
+    except Exception:
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def get_langsmith_run_metadata(run: object) -> dict:
+    direct = getattr(run, "metadata", None)
+    if isinstance(direct, dict):
+        return direct
+    extra = getattr(run, "extra", None)
+    if isinstance(extra, dict):
+        metadata = extra.get("metadata")
+        if isinstance(metadata, dict):
+            return metadata
+    return {}
 
 
 def write_success_marker_atomic(marker_path: Path, payload: dict) -> None:
@@ -166,6 +196,94 @@ def _text(value: str | bytes | None) -> str:
     return value.decode("utf-8", errors="replace") if isinstance(value, bytes) else value
 
 
+class _WindowsKillOnCloseJob:
+    """A Windows Job Object that terminates every assigned child on close."""
+
+    _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
+    _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
+
+    def __init__(self, process: subprocess.Popen):
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateJobObjectW.argtypes = (ctypes.c_void_p, ctypes.c_wchar_p)
+        kernel32.CreateJobObjectW.restype = ctypes.c_void_p
+        kernel32.SetInformationJobObject.argtypes = (ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_ulong)
+        kernel32.SetInformationJobObject.restype = ctypes.c_int
+        kernel32.AssignProcessToJobObject.argtypes = (ctypes.c_void_p, ctypes.c_void_p)
+        kernel32.AssignProcessToJobObject.restype = ctypes.c_int
+        kernel32.TerminateJobObject.argtypes = (ctypes.c_void_p, ctypes.c_uint)
+        kernel32.TerminateJobObject.restype = ctypes.c_int
+        kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
+        kernel32.CloseHandle.restype = ctypes.c_int
+        handle = kernel32.CreateJobObjectW(None, None)
+        if not handle:
+            raise ctypes.WinError(ctypes.get_last_error())
+        self._kernel32 = kernel32
+        self._handle = handle
+        try:
+            info = self._extended_limit_information()
+            info.BasicLimitInformation.LimitFlags = self._JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+            if not kernel32.SetInformationJobObject(
+                handle,
+                self._JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
+                ctypes.byref(info),
+                ctypes.sizeof(info),
+            ):
+                raise ctypes.WinError(ctypes.get_last_error())
+            process_handle = getattr(process, "_handle", None)
+            if process_handle is None or not kernel32.AssignProcessToJobObject(handle, ctypes.c_void_p(int(process_handle))):
+                raise ctypes.WinError(ctypes.get_last_error())
+        except Exception:
+            kernel32.CloseHandle(handle)
+            self._handle = None
+            raise
+
+    @staticmethod
+    def _extended_limit_information():
+        class IoCounters(ctypes.Structure):
+            _fields_ = [
+                ("ReadOperationCount", ctypes.c_ulonglong),
+                ("WriteOperationCount", ctypes.c_ulonglong),
+                ("OtherOperationCount", ctypes.c_ulonglong),
+                ("ReadTransferCount", ctypes.c_ulonglong),
+                ("WriteTransferCount", ctypes.c_ulonglong),
+                ("OtherTransferCount", ctypes.c_ulonglong),
+            ]
+
+        class BasicLimitInformation(ctypes.Structure):
+            _fields_ = [
+                ("PerProcessUserTimeLimit", ctypes.c_longlong),
+                ("PerJobUserTimeLimit", ctypes.c_longlong),
+                ("LimitFlags", ctypes.c_ulong),
+                ("MinimumWorkingSetSize", ctypes.c_size_t),
+                ("MaximumWorkingSetSize", ctypes.c_size_t),
+                ("ActiveProcessLimit", ctypes.c_ulong),
+                ("Affinity", ctypes.c_size_t),
+                ("PriorityClass", ctypes.c_ulong),
+                ("SchedulingClass", ctypes.c_ulong),
+            ]
+
+        class ExtendedLimitInformation(ctypes.Structure):
+            _fields_ = [
+                ("BasicLimitInformation", BasicLimitInformation),
+                ("IoInfo", IoCounters),
+                ("ProcessMemoryLimit", ctypes.c_size_t),
+                ("JobMemoryLimit", ctypes.c_size_t),
+                ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                ("PeakJobMemoryUsed", ctypes.c_size_t),
+            ]
+
+        return ExtendedLimitInformation()
+
+    def terminate(self) -> None:
+        if self._handle is not None and not self._kernel32.TerminateJobObject(self._handle, 1):
+            raise ctypes.WinError(ctypes.get_last_error())
+
+    def close(self) -> None:
+        if self._handle is not None:
+            self._kernel32.CloseHandle(self._handle)
+            self._handle = None
+
+
 def run_process_bounded(command: list[str], *, cwd: Path, env: dict[str, str], timeout_seconds: float, grace_seconds: float = 5) -> subprocess.CompletedProcess[str]:
     windows = platform.system().lower().startswith("win")
     creationflags = int(getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)) if windows else 0
@@ -173,12 +291,26 @@ def run_process_bounded(command: list[str], *, cwd: Path, env: dict[str, str], t
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                creationflags=creationflags,
                                start_new_session=not windows)
+    job: _WindowsKillOnCloseJob | None = None
+    job_warning: str | None = None
+    if windows:
+        try:
+            job = _WindowsKillOnCloseJob(process)
+        except Exception as exc:
+            job_warning = f"job assignment failed: {type(exc).__name__}: {exc}"
     try:
         stdout, stderr = process.communicate(timeout=timeout_seconds)
         return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
     except subprocess.TimeoutExpired as initial:
         warnings: list[str] = []
-        if windows:
+        if job_warning:
+            warnings.append(job_warning)
+        if job is not None:
+            try:
+                job.terminate()
+            except Exception as exc:
+                warnings.append(f"job termination failed: {type(exc).__name__}: {exc}")
+        elif windows:
             try:
                 killed = subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"], capture_output=True, text=True,
                                         encoding="utf-8", errors="replace", timeout=grace_seconds, check=False)
@@ -222,3 +354,6 @@ def run_process_bounded(command: list[str], *, cwd: Path, env: dict[str, str], t
                 warnings.append(f"final reap failed: {type(exc).__name__}: {exc}")
         raise BoundedProcessTimeout(command, timeout_seconds, output=stdout, stderr=stderr,
                                     termination=ProcessTerminationResult(reaped, "; ".join(warnings) or None)) from initial
+    finally:
+        if job is not None:
+            job.close()

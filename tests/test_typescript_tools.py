@@ -10,7 +10,6 @@ from ci_owner_agent.services.command_runner import CommandResult
 from ci_owner_agent.services.git_client import GitClient
 from ci_owner_agent.tools.typescript_tools import (
     check_node_dependencies_for_analysis,
-    ts_analyze_changed_functions,
     ts_find_callers,
     ts_find_definitions,
 )
@@ -21,12 +20,6 @@ ANALYZER_DIR = Path(__file__).resolve().parents[1] / "ts-analyzer"
 
 def has_typescript_dependency() -> bool:
     return (ANALYZER_DIR / "node_modules" / "typescript").exists()
-
-
-def test_typescript_tool_failure_is_structured():
-    result = ts_analyze_changed_functions()
-    assert result["ok"] is False
-    assert result["changedFunctions"] == []
 
 
 def test_typescript_tool_missing_tsconfig_is_structured(repo_cache: Path, sample_repo):
@@ -153,20 +146,6 @@ def test_check_node_dependencies_hash_change_warns(repo_cache: Path, sample_repo
     assert second["ok"] is True
     assert second["dependenciesCurrent"] is False
     assert any("dependency definition files changed" in warning for warning in second["warnings"])
-
-
-@pytest.mark.skipif(not has_typescript_dependency(), reason="typescript npm dependency is not installed")
-def test_ts_analyze_changed_functions(repo_cache: Path, sample_repo):
-    result = ts_analyze_changed_functions(
-        repo=sample_repo["repo"],
-        baseCommit=sample_repo["base"],
-        headCommit=sample_repo["head"],
-        files=["packages/fxp-ai/errors/classify.ts", "README.md"],
-        repo_cache_dir=repo_cache,
-        analyzer_dir=ANALYZER_DIR,
-    )
-    assert result["ok"] is True
-    assert any(item["name"] == "classifyError" for item in result["changedFunctions"])
 
 
 @pytest.mark.skipif(not has_typescript_dependency(), reason="typescript npm dependency is not installed")

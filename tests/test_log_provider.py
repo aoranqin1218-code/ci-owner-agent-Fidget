@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from ci_owner_agent.services.log_provider import LocalFileLogProvider, resolve_final_status_from_console_log
+from ci_owner_agent.services.log_parsing import resolve_final_status_from_console_log
+from ci_owner_agent.services.log_provider import LocalFileLogProvider
 
 
 @pytest.mark.parametrize(

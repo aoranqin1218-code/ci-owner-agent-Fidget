@@ -1,13 +1,11 @@
 from __future__ import annotations
 
-import json
 import pytest
 from pydantic import ValidationError
 
 from ci_owner_agent.services.wecom_bot_models import WeComInboundMessage
 from ci_owner_agent.services.wecom_feedback_ai_parser import (
     FakeWeComFeedbackAiParser,
-    _validate_decision,
     _convert_decision,
     _sanitize_ai_error,
     WeComFeedbackAiDecision,
@@ -64,49 +62,6 @@ def test_fake_parser_returns_unknown():
     intent = parser.parse(_message("CI-7K3M9Q 第一条判断没问题"))
     assert intent.intent_type == "unknown"
     assert "自然语言解析暂不可用" in (intent.error or "")
-
-
-# ---- _validate_decision ----
-
-def test_validate_valid_json():
-    raw = json.dumps(_decision_data(
-        intent_type="create_feedback",
-        action="confirm_owner",
-        feedback_code="CI-7K3M9Q",
-        item_index=1,
-    ))
-    decision = _validate_decision(raw)
-    assert decision.intent_type == "create_feedback"
-    assert decision.action == "confirm_owner"
-    assert decision.feedback_code == "CI-7K3M9Q"
-
-
-def test_validate_strips_markdown_code_block():
-    raw = "```json\n" + json.dumps(_decision_data(intent_type="help")) + "\n```"
-    decision = _validate_decision(raw)
-    assert decision.intent_type == "help"
-
-
-def test_validate_invalid_json_returns_unknown():
-    decision = _validate_decision("not json")
-    assert decision.intent_type == "unknown"
-    assert decision.error is not None
-
-
-def test_validate_extra_fields_rejected():
-    data = _decision_data(
-        intent_type="create_feedback",
-        action="confirm_owner",
-        feedback_code="CI-7K3M9Q",
-        item_index=1,
-    )
-    data["target_userid"] = "hacker"
-    data["confirmation_code"] = "ABCD"
-    data["operation_id"] = "evil"
-    raw = json.dumps(data)
-    decision = _validate_decision(raw)
-    # With extra="forbid", extra fields cause validation failure
-    assert decision.intent_type == "unknown"
 
 
 # ---- _convert_decision ----
@@ -299,20 +254,6 @@ def test_ai_decision_rejects_boolean_item_index():
             "feedback_code": "CI-7K3M9Q",
             "item_index": True,
         })
-
-
-def test_validate_decision_returns_unknown_for_string_item_index():
-    """_validate_decision must return unknown for string item_index."""
-    data = _decision_data(intent_type='create_feedback', action='confirm_owner', feedback_code='CI-7K3M9Q', item_index='1')
-    decision = _validate_decision(json.dumps(data))
-    assert decision.intent_type == "unknown"
-
-
-def test_validate_decision_returns_unknown_for_float_item_index():
-    """_validate_decision must return unknown for float item_index."""
-    data = _decision_data(intent_type='create_feedback', action='confirm_owner', feedback_code='CI-7K3M9Q', item_index=1.0)
-    decision = _validate_decision(json.dumps(data))
-    assert decision.intent_type == "unknown"
 
 
 # ---- Structured output tests ----

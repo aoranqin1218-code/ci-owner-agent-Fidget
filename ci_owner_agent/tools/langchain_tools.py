@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from ci_owner_agent.agents.context import AgentRuntimeContext
-from ci_owner_agent.tools.history_tools import history_search_similar_failures as search_similar_failures
+from ci_owner_agent.services.history_search import history_search_similar_failures as search_similar_failures
 from ci_owner_agent.tools.keyword_tools import repo_keyword_search as keyword_search
 from ci_owner_agent.tools.path_tools import repo_find_paths as find_paths
 from ci_owner_agent.tools.typescript_tools import (

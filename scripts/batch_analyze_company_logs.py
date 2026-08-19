@@ -16,12 +16,14 @@ from typing import Any, Literal
 _SCRIPT_REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_SCRIPT_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_REPO_ROOT))
-from scripts._runtime import REPO_ROOT, build_subprocess_env, ensure_repo_on_sys_path, resolve_repo_default_path, resolve_user_path, run_process_bounded, sha256_file, success_marker_path, validate_success_marker, write_success_marker_atomic
+from scripts._runtime import REPO_ROOT, build_subprocess_env, ensure_repo_on_sys_path, read_last_jsonl, resolve_repo_default_path, resolve_user_path, run_process_bounded, sha256_file, success_marker_path, validate_success_marker, write_success_marker_atomic
+from scripts._batch_common import cleanup_previous_outputs, extract_responsibility_stats_from_notice, load_env_file, slug
+from scripts._langsmith_trace import find_matching_root_run, write_trace_artifact
 
 ensure_repo_on_sys_path()
 from ci_owner_agent.schemas import CiResponsibilityNotice
 from ci_owner_agent.services.branch_normalization import normalize_branch_name
-from ci_owner_agent.services.log_provider import log_detect_final_status, resolve_checkout_revision_from_console_log, resolve_final_status_from_console_log
+from ci_owner_agent.services.log_parsing import resolve_checkout_revision_from_console_log, resolve_final_status_from_console_log
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -63,43 +65,6 @@ class BuildLog:
     error_kind: str | None = None
 
 
-def load_env_file(env_file: Path, override: bool = False) -> None:
-    if not env_file.exists():
-        print(f"env file not found, skip: {env_file}")
-        return
-
-    try:
-        from dotenv import load_dotenv
-
-        load_dotenv(env_file, override=override)
-        print(f"loaded env file: {env_file}")
-        return
-    except Exception as exc:
-        print(f"python-dotenv unavailable, using simple .env parser: {exc}")
-
-    for raw_line in env_file.read_text(encoding="utf-8", errors="replace").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-
-        key, value = line.split("=", 1)
-        key = key.strip()
-        value = value.strip()
-
-        if value.startswith(("'", '"')) and value.endswith(("'", '"')) and len(value) >= 2:
-            value = value[1:-1]
-
-        if override or key not in os.environ:
-            os.environ[key] = value
-
-    print(f"loaded env file with fallback parser: {env_file}")
-
-
-def slug(value: str) -> str:
-    value = value.replace("/", "_").replace("\\", "_")
-    return re.sub(r"[^A-Za-z0-9_.-]+", "_", value).strip("_")
-
-
 def short(commit: str | None, n: int = 12) -> str:
     return commit[:n] if commit else "none"
 
@@ -107,14 +72,6 @@ def short(commit: str | None, n: int = 12) -> str:
 def extract_build_number(path: Path) -> int | None:
     match = BUILD_NO_RE.search(path.name)
     return int(match.group(1)) if match else None
-
-
-def parse_status(text: str) -> str:
-    return log_detect_final_status(text)
-
-
-def parse_head_commit(text: str) -> str | None:
-    return resolve_checkout_revision_from_console_log(text).commit
 
 
 def parse_build_log(path: Path) -> BuildLog | None:
@@ -279,19 +236,6 @@ def filter_logs_by_build_range(logs: list[BuildLog], build_from: int | None, bui
     return [item for item in logs if in_build_range(item, build_from, build_to)]
 
 
-def cleanup_previous_outputs(paths: list[Path]) -> list[str]:
-    warnings: list[str] = []
-    for path in paths:
-        try:
-            if path.exists():
-                path.unlink()
-            if path.exists():
-                warnings.append(f"failed to remove {path}: path still exists")
-        except Exception as exc:
-            warnings.append(f"failed to remove {path}: {exc}")
-    return warnings
-
-
 def validate_resume_notice(path: Path, *, marker_path: Path, item: BuildLog, repo: str, job: str, branch: str) -> tuple[bool, str | None]:
     expected = {
         "repo": repo, "job": job, "buildNumber": item.build, "branch": branch,
@@ -307,20 +251,6 @@ def validate_resume_notice(path: Path, *, marker_path: Path, item: BuildLog, rep
         if getattr(notice, field) != value:
             return False, f"resume metadata mismatch: {field}"
     return validate_success_marker(marker_path, path, {"workflow": "company", **expected})
-
-
-def extract_first_json_object(text: str) -> dict[str, Any] | None:
-    decoder = json.JSONDecoder()
-    for idx, ch in enumerate(text):
-        if ch != "{":
-            continue
-        try:
-            obj, _end = decoder.raw_decode(text[idx:])
-        except json.JSONDecodeError:
-            continue
-        if isinstance(obj, dict):
-            return obj
-    return None
 
 
 def extract_history_stats_from_notice(notice: dict[str, Any]) -> dict[str, Any]:
@@ -351,51 +281,6 @@ def extract_history_stats_from_notice(notice: dict[str, Any]) -> dict[str, Any]:
         if parsed is not None:
             return {**empty, **parsed}
     return empty
-
-
-def extract_responsibility_stats_from_notice(notice: dict[str, Any]) -> dict[str, Any]:
-    items = notice.get("responsibilityItems")
-    if not isinstance(items, list):
-        items = []
-    responsible_owners: list[str] = []
-    inherited_owners: list[str] = []
-    current_build_owners: list[str] = []
-    unresolved = 0
-
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        owner = item.get("owner") if isinstance(item.get("owner"), dict) else {}
-        owner_name = str(owner.get("name") or "")
-        owner_type = str(owner.get("type") or "")
-        responsibility_type = str(item.get("responsibilityType") or "")
-        is_unresolved = (
-            responsibility_type in {"no_high_confidence_owner", "unknown"}
-            or owner_type == "no_high_confidence_owner"
-            or not owner_name
-            or owner_name == "无高可信责任人"
-        )
-        if is_unresolved:
-            unresolved += 1
-            continue
-        if responsibility_type == "inherited_failure_owner":
-            inherited_owners.append(owner_name)
-            source_build = item.get("sourceBuildNumber")
-            suffix = f"inherited from #{source_build}" if source_build is not None else "inherited"
-            responsible_owners.append(f"{owner_name}({suffix})")
-        elif responsibility_type == "current_build_owner":
-            current_build_owners.append(owner_name)
-            responsible_owners.append(f"{owner_name}({owner_type})")
-        else:
-            responsible_owners.append(f"{owner_name}({owner_type or responsibility_type})")
-
-    return {
-        "responsibilityItemCount": len(items),
-        "responsibleOwners": "; ".join(_unique_in_order(responsible_owners)),
-        "inheritedOwners": "; ".join(_unique_in_order(inherited_owners)),
-        "currentBuildOwners": "; ".join(_unique_in_order(current_build_owners)),
-        "unresolvedFailureCount": unresolved,
-    }
 
 
 def _history_stats_from_result(result: dict[str, Any], empty: dict[str, Any]) -> dict[str, Any]:
@@ -438,48 +323,6 @@ def _history_stats_from_text(text: str) -> dict[str, Any] | None:
     if relationship:
         result["topHistoricalRelationship"] = relationship.group(1)
     return result or None
-
-
-def _unique_in_order(values: list[str]) -> list[str]:
-    seen: set[str] = set()
-    result: list[str] = []
-    for value in values:
-        if value in seen:
-            continue
-        seen.add(value)
-        result.append(value)
-    return result
-
-
-def to_jsonable(obj: Any) -> Any:
-    if obj is None or isinstance(obj, (str, int, float, bool)):
-        return obj
-
-    if isinstance(obj, (dt.datetime, dt.date)):
-        return obj.isoformat()
-
-    if isinstance(obj, dict):
-        return {str(k): to_jsonable(v) for k, v in obj.items()}
-
-    if isinstance(obj, (list, tuple, set)):
-        return [to_jsonable(v) for v in obj]
-
-    if hasattr(obj, "model_dump"):
-        try:
-            return obj.model_dump(mode="json")
-        except Exception:
-            try:
-                return obj.model_dump()
-            except Exception:
-                pass
-
-    if hasattr(obj, "dict"):
-        try:
-            return obj.dict()
-        except Exception:
-            pass
-
-    return str(obj)
 
 
 def build_analyze_command(
@@ -559,20 +402,6 @@ def run_analyze_local(
     return run_process_bounded(cmd, cwd=cwd, env=env, timeout_seconds=timeout_seconds)
 
 
-def get_run_metadata(run: Any) -> dict[str, Any]:
-    direct = getattr(run, "metadata", None)
-    if isinstance(direct, dict):
-        return direct
-
-    extra = getattr(run, "extra", None)
-    if isinstance(extra, dict):
-        metadata = extra.get("metadata")
-        if isinstance(metadata, dict):
-            return metadata
-
-    return {}
-
-
 def metadata_matches(md: dict[str, Any], *, item: BuildLog, repo: str, job: str) -> bool:
     return (
         str(md.get("job")) == job
@@ -593,89 +422,22 @@ def fetch_langsmith_trace(
     trace_path: Path,
     wait_seconds: int,
 ) -> dict[str, Any]:
-    try:
-        from langsmith import Client
-    except Exception as exc:
-        return {"ok": False, "error": f"langsmith import failed: {exc}"}
-
-    client = Client()
-    deadline = time.time() + wait_seconds
-    last_error: str | None = None
-
-    while time.time() < deadline:
-        try:
-            runs = list(
-                client.list_runs(
-                    project_name=project_name,
-                    is_root=True,
-                    start_time=started_at - dt.timedelta(minutes=2),
-                    limit=100,
-                )
-            )
-
-            runs.sort(
-                key=lambda r: getattr(
-                    r,
-                    "start_time",
-                    dt.datetime.min.replace(tzinfo=dt.timezone.utc),
-                ),
-                reverse=True,
-            )
-
-            for run in runs:
-                full = client.read_run(getattr(run, "id"), load_child_runs=True)
-                md = get_run_metadata(full)
-
-                if not metadata_matches(md, item=item, repo=repo, job=job):
-                    continue
-
-                payload = to_jsonable(full)
-
-                try:
-                    payload["_langsmith_url"] = client.get_run_url(
-                        run=full,
-                        project_name=project_name,
-                    )
-                except Exception:
-                    pass
-
-                trace_path.write_text(
-                    json.dumps(payload, ensure_ascii=False, indent=2, default=str),
-                    encoding="utf-8",
-                )
-
-                return {
-                    "ok": True,
-                    "traceFile": str(trace_path),
-                    "runId": str(getattr(full, "id", "")),
-                    "url": payload.get("_langsmith_url"),
-                }
-
-        except Exception as exc:
-            last_error = str(exc)
-
-        time.sleep(2)
-
+    result = find_matching_root_run(
+        project_name=project_name,
+        started_at=started_at,
+        wait_seconds=wait_seconds,
+        metadata_matches=lambda metadata: metadata_matches(metadata, item=item, repo=repo, job=job),
+    )
+    if not result["ok"]:
+        return result
+    full = result["run"]
+    write_trace_artifact(trace_path, full, result["url"])
     return {
-        "ok": False,
-        "error": last_error or "trace not found before timeout",
+        "ok": True,
+        "traceFile": str(trace_path),
+        "runId": str(getattr(full, "id", "")),
+        "url": result["url"],
     }
-
-
-def read_last_jsonl(path: Path) -> dict[str, Any] | None:
-    if not path.exists():
-        return None
-    lines = [
-        line.strip()
-        for line in path.read_text(encoding="utf-8", errors="replace").splitlines()
-        if line.strip()
-    ]
-    if not lines:
-        return None
-    try:
-        return json.loads(lines[-1])
-    except Exception:
-        return None
 
 
 def main() -> int:

@@ -18,14 +18,14 @@ from scripts._runtime import REPO_ROOT, build_subprocess_env, ensure_repo_on_sys
 ensure_repo_on_sys_path()
 from ci_owner_agent.schemas import CiResponsibilityNotice
 
-from scripts.batch_analyze_company_logs import (
+from scripts._batch_common import (
     cleanup_previous_outputs,
     extract_first_json_object,
     extract_responsibility_stats_from_notice,
     load_env_file,
     slug,
-    to_jsonable,
 )
+from scripts._langsmith_trace import find_matching_root_run, write_trace_artifact
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -145,18 +145,6 @@ def build_analyze_command(
     return command
 
 
-def get_run_metadata(run: Any) -> dict[str, Any]:
-    direct = getattr(run, "metadata", None)
-    if isinstance(direct, dict):
-        return direct
-    extra = getattr(run, "extra", None)
-    if isinstance(extra, dict):
-        metadata = extra.get("metadata")
-        if isinstance(metadata, dict):
-            return metadata
-    return {}
-
-
 def metadata_matches_jenkins(md: dict[str, Any], *, build: int, repo: str, job: str) -> bool:
     return str(md.get("job")) == job and str(md.get("repo")) == repo and str(md.get("buildNumber")) == str(build)
 
@@ -171,49 +159,22 @@ def fetch_langsmith_trace(
     trace_path: Path,
     wait_seconds: int,
 ) -> dict[str, Any]:
-    try:
-        from langsmith import Client
-    except Exception as exc:
-        return {"ok": False, "error": f"langsmith import failed: {exc}"}
-
-    client = Client()
-    deadline = time.time() + wait_seconds
-    last_error: str | None = None
-
-    while time.time() < deadline:
-        try:
-            runs = list(
-                client.list_runs(
-                    project_name=project_name,
-                    is_root=True,
-                    start_time=started_at - dt.timedelta(minutes=2),
-                    limit=100,
-                )
-            )
-            runs.sort(
-                key=lambda run: getattr(run, "start_time", dt.datetime.min.replace(tzinfo=dt.timezone.utc)),
-                reverse=True,
-            )
-            for run in runs:
-                full = client.read_run(getattr(run, "id"), load_child_runs=True)
-                if not metadata_matches_jenkins(get_run_metadata(full), build=build, repo=repo, job=job):
-                    continue
-                payload = to_jsonable(full)
-                try:
-                    payload["_langsmith_url"] = client.get_run_url(run=full, project_name=project_name)
-                except Exception:
-                    pass
-                trace_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
-                return {
-                    "ok": True,
-                    "traceFile": str(trace_path),
-                    "runId": str(getattr(full, "id", "")),
-                    "url": payload.get("_langsmith_url"),
-                }
-        except Exception as exc:
-            last_error = str(exc)
-        time.sleep(2)
-    return {"ok": False, "error": last_error or "trace not found before timeout"}
+    result = find_matching_root_run(
+        project_name=project_name,
+        started_at=started_at,
+        wait_seconds=wait_seconds,
+        metadata_matches=lambda metadata: metadata_matches_jenkins(metadata, build=build, repo=repo, job=job),
+    )
+    if not result["ok"]:
+        return result
+    full = result["run"]
+    write_trace_artifact(trace_path, full, result["url"])
+    return {
+        "ok": True,
+        "traceFile": str(trace_path),
+        "runId": str(getattr(full, "id", "")),
+        "url": result["url"],
+    }
 
 
 def find_key_recursive(obj: Any, key: str) -> Any | None:

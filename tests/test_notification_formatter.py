@@ -7,15 +7,19 @@ import pytest
 
 from ci_owner_agent.schemas import CiResponsibilityNotice
 from ci_owner_agent.config import load_settings
-from ci_owner_agent.main import _maybe_notify_notice, _notify_notice, main
+from ci_owner_agent.main import main
 from ci_owner_agent.services.notification_formatter import (
-    collect_responsible_display_names,
     format_wecom_markdown_notice,
-    notification_digest,
     result_icon,
     responsibility_type_icon,
     source_build_label,
 )
+from ci_owner_agent.services.wecom_notification_routing import (
+    collect_responsible_display_names,
+    notification_digest,
+)
+from ci_owner_agent.services.wecom_notice_service import maybe_notify_notice as _maybe_notify_notice
+from ci_owner_agent.services.wecom_notice_service import notify_notice as _notify_notice
 from ci_owner_agent.services.test_maintainer_mapping import TestMaintainerResolver
 from ci_owner_agent.services.wecom_user_mapping import WeComUserMapper
 from tests.test_history_store import make_store
@@ -353,7 +357,7 @@ def test_notify_notice_prefers_mongo_wecom_userid(monkeypatch):
     )
     notice = CiResponsibilityNotice.model_validate(notice_payload([item("Tang")]))
     settings = replace(load_settings(), notification_dedup_enabled=False, wecom_user_mapping_file=None)
-    monkeypatch.setattr("ci_owner_agent.main.get_history_store", lambda settings: store)
+    monkeypatch.setattr("ci_owner_agent.services.wecom_notice_service.get_history_store", lambda settings: store)
 
     result = _notify_notice(notice, settings, dry_run=True, force=False, feedback_base_url=None)
 
@@ -370,7 +374,7 @@ def test_notify_notice_falls_back_to_csv_when_mongo_missing(tmp_path, monkeypatc
     )
     notice = CiResponsibilityNotice.model_validate(notice_payload([item("Tang")]))
     settings = replace(load_settings(), notification_dedup_enabled=False, wecom_user_mapping_file=mapping_file)
-    monkeypatch.setattr("ci_owner_agent.main.get_history_store", lambda settings: store)
+    monkeypatch.setattr("ci_owner_agent.services.wecom_notice_service.get_history_store", lambda settings: store)
 
     result = _notify_notice(notice, settings, dry_run=True, force=False, feedback_base_url=None)
 
@@ -386,7 +390,7 @@ def test_notify_notice_falls_back_to_csv_when_history_store_unavailable(tmp_path
     )
     notice = CiResponsibilityNotice.model_validate(notice_payload([item("Tang")]))
     settings = replace(load_settings(), notification_dedup_enabled=False, wecom_user_mapping_file=mapping_file)
-    monkeypatch.setattr("ci_owner_agent.main.get_history_store", lambda settings: None)
+    monkeypatch.setattr("ci_owner_agent.services.wecom_notice_service.get_history_store", lambda settings: None)
 
     result = _notify_notice(notice, settings, dry_run=True, force=False, feedback_base_url=None)
 
@@ -397,7 +401,7 @@ def test_notify_notice_falls_back_to_name_when_no_mapping(monkeypatch):
     store = make_store()
     notice = CiResponsibilityNotice.model_validate(notice_payload([item("Tang")]))
     settings = replace(load_settings(), notification_dedup_enabled=False, wecom_user_mapping_file=None)
-    monkeypatch.setattr("ci_owner_agent.main.get_history_store", lambda settings: store)
+    monkeypatch.setattr("ci_owner_agent.services.wecom_notice_service.get_history_store", lambda settings: store)
 
     result = _notify_notice(notice, settings, dry_run=True, force=False, feedback_base_url=None)
 
@@ -413,7 +417,7 @@ def test_notify_notice_mention_mode_name_ignores_mongo_userid(monkeypatch):
     )
     notice = CiResponsibilityNotice.model_validate(notice_payload([item("Tang")]))
     settings = replace(load_settings(), notification_dedup_enabled=False, wecom_user_mapping_file=None, wecom_mention_mode="name")
-    monkeypatch.setattr("ci_owner_agent.main.get_history_store", lambda settings: store)
+    monkeypatch.setattr("ci_owner_agent.services.wecom_notice_service.get_history_store", lambda settings: store)
 
     result = _notify_notice(notice, settings, dry_run=True, force=False, feedback_base_url=None)
 
@@ -442,7 +446,7 @@ def test_notify_notice_unexpected_error_returns_2_without_traceback(tmp_path, ca
     def raise_notify(*args, **kwargs):
         raise RuntimeError("mongodb://user:password@secret-host/db")
 
-    monkeypatch.setattr("ci_owner_agent.main._notify_notice", raise_notify)
+    monkeypatch.setattr("ci_owner_agent.services.wecom_notice_service.notify_notice", raise_notify)
 
     rc = main(["notify-notice", "--notice-file", str(notice_file), "--dry-run"])
     captured = capsys.readouterr()
@@ -457,7 +461,7 @@ def test_notify_notice_unexpected_error_returns_2_without_traceback(tmp_path, ca
 def test_analyze_notify_dry_run_stdout_stays_json(monkeypatch, capsys):
     notice = CiResponsibilityNotice.model_validate(notice_payload([item()]))
     monkeypatch.setenv("CI_AGENT_MODEL_PROVIDER", "fake")
-    monkeypatch.setattr("ci_owner_agent.main.analyze_local", lambda **kwargs: notice)
+    monkeypatch.setattr("ci_owner_agent.cli.commands.analyze_local", lambda **kwargs: notice)
     rc = main(
         [
             "analyze-local",
@@ -491,7 +495,7 @@ def test_maybe_notify_filters_no_owner_by_responsibility_items(monkeypatch):
     no_owner = item("无高可信责任人", "no_high_confidence_owner", "no_high_confidence_owner", "证据不足。")
     notice = CiResponsibilityNotice.model_validate(notice_payload([no_owner]))
     settings = replace(load_settings(), wecom_notify_on_no_owner=False)
-    monkeypatch.setattr("ci_owner_agent.main._notify_notice", lambda *args, **kwargs: calls.append(kwargs) or {"ok": True})
+    monkeypatch.setattr("ci_owner_agent.services.wecom_notice_service.notify_notice", lambda *args, **kwargs: calls.append(kwargs) or {"ok": True})
 
     _maybe_notify_notice(notice, settings, cli_notify=True, cli_dry_run=True, force=False)
 
@@ -502,7 +506,7 @@ def test_maybe_notify_allows_item_owner_when_no_owner_notify_disabled(monkeypatc
     calls = []
     notice = CiResponsibilityNotice.model_validate(notice_payload([item()]))
     settings = replace(load_settings(), wecom_notify_on_no_owner=False)
-    monkeypatch.setattr("ci_owner_agent.main._notify_notice", lambda *args, **kwargs: calls.append(kwargs) or {"ok": True})
+    monkeypatch.setattr("ci_owner_agent.services.wecom_notice_service.notify_notice", lambda *args, **kwargs: calls.append(kwargs) or {"ok": True})
 
     _maybe_notify_notice(notice, settings, cli_notify=True, cli_dry_run=True, force=False)
 
@@ -517,7 +521,7 @@ def test_env_enabled_notify_skips_success_by_default(monkeypatch):
     monkeypatch.setenv("CI_AGENT_WECOM_NOTIFY_ENABLED", "true")
     monkeypatch.setenv("CI_AGENT_WECOM_NOTIFY_ON_SUCCESS", "false")
     settings = load_settings()
-    monkeypatch.setattr("ci_owner_agent.main._notify_notice", lambda *args, **kwargs: calls.append(kwargs) or {"ok": True})
+    monkeypatch.setattr("ci_owner_agent.services.wecom_notice_service.notify_notice", lambda *args, **kwargs: calls.append(kwargs) or {"ok": True})
 
     _maybe_notify_notice(notice, settings, cli_notify=False, cli_dry_run=False, force=False)
 
@@ -528,7 +532,7 @@ def test_notify_dry_run_does_not_enqueue(monkeypatch):
     store = make_store()
     notice = CiResponsibilityNotice.model_validate(notice_payload([item()]))
     settings = replace(load_settings(), notification_dedup_enabled=True)
-    monkeypatch.setattr("ci_owner_agent.main.get_history_store", lambda settings: store)
+    monkeypatch.setattr("ci_owner_agent.services.wecom_notice_service.get_history_store", lambda settings: store)
 
     result = _notify_notice(notice, settings, dry_run=True, force=False, feedback_base_url=None)
 
@@ -550,8 +554,8 @@ def test_notify_webhook_without_mongo_sends_directly(tmp_path, monkeypatch):
                        wecom_user_mapping_file=mapping_file, test_maintainer_mapping_file=None,
                        wecom_fallback_userids=(), wecom_mention_mode="userid")
     calls = []
-    monkeypatch.setattr("ci_owner_agent.main.get_history_store", lambda _: None)
-    monkeypatch.setattr("ci_owner_agent.main.send_wecom_markdown",
+    monkeypatch.setattr("ci_owner_agent.services.wecom_notice_service.get_history_store", lambda _: None)
+    monkeypatch.setattr("ci_owner_agent.services.wecom_notice_service.send_wecom_markdown",
                         lambda url, markdown: calls.append((url, markdown)) or
                         {"ok": True, "statusCode": 200, "response": "ok", "error": None})
     result = _notify_notice(notice, settings, dry_run=False, force=False, feedback_base_url=None)
@@ -567,8 +571,8 @@ def test_notify_webhook_without_mapping_falls_back_to_name(tmp_path, monkeypatch
                        test_maintainer_mapping_file=None, wecom_fallback_userids=(),
                        wecom_mention_mode="userid")
     calls = []
-    monkeypatch.setattr("ci_owner_agent.main.get_history_store", lambda _: None)
-    monkeypatch.setattr("ci_owner_agent.main.send_wecom_markdown",
+    monkeypatch.setattr("ci_owner_agent.services.wecom_notice_service.get_history_store", lambda _: None)
+    monkeypatch.setattr("ci_owner_agent.services.wecom_notice_service.send_wecom_markdown",
                         lambda url, markdown: calls.append((url, markdown)) or
                         {"ok": True, "statusCode": 200, "response": "ok", "error": None})
 
@@ -586,14 +590,14 @@ def test_webhook_force_failure_does_not_erase_prior_success(monkeypatch):
                        wecom_webhook_url="https://example.test/secret", notification_dedup_enabled=True)
     outcomes = [True, False]
     calls = []
-    monkeypatch.setattr("ci_owner_agent.main.get_history_store", lambda _: store)
+    monkeypatch.setattr("ci_owner_agent.services.wecom_notice_service.get_history_store", lambda _: store)
     def send(*args):
         calls.append(args)
         ok = outcomes.pop(0)
         return {"ok": ok, "statusCode": 200, "response": "safe",
                 "error": None if ok else "safe failure"}
 
-    monkeypatch.setattr("ci_owner_agent.main.send_wecom_markdown", send)
+    monkeypatch.setattr("ci_owner_agent.services.wecom_notice_service.send_wecom_markdown", send)
     first = _notify_notice(notice, settings, dry_run=False, force=False, feedback_base_url=None)
     forced = _notify_notice(notice, settings, dry_run=False, force=True, feedback_base_url=None)
     skipped = _notify_notice(notice, settings, dry_run=False, force=False, feedback_base_url=None)
@@ -611,7 +615,7 @@ def test_webhook_initial_failure_can_retry_and_upgrade_to_sent(monkeypatch):
                        wecom_webhook_url="https://example.test/secret", notification_dedup_enabled=True)
     outcomes = [False, True]
     calls = []
-    monkeypatch.setattr("ci_owner_agent.main.get_history_store", lambda _: store)
+    monkeypatch.setattr("ci_owner_agent.services.wecom_notice_service.get_history_store", lambda _: store)
 
     def send(*args):
         calls.append(args)
@@ -619,7 +623,7 @@ def test_webhook_initial_failure_can_retry_and_upgrade_to_sent(monkeypatch):
         return {"ok": ok, "statusCode": 200, "response": "safe",
                 "error": None if ok else "safe failure"}
 
-    monkeypatch.setattr("ci_owner_agent.main.send_wecom_markdown", send)
+    monkeypatch.setattr("ci_owner_agent.services.wecom_notice_service.send_wecom_markdown", send)
     failed = _notify_notice(notice, settings, dry_run=False, force=False, feedback_base_url=None)
     sent = _notify_notice(notice, settings, dry_run=False, force=False, feedback_base_url=None)
     skipped = _notify_notice(notice, settings, dry_run=False, force=False, feedback_base_url=None)
@@ -632,8 +636,8 @@ def test_webhook_initial_failure_can_retry_and_upgrade_to_sent(monkeypatch):
 def test_notify_dry_run_never_calls_webhook_or_outbox(monkeypatch):
     notice = CiResponsibilityNotice.model_validate(notice_payload([item()]))
     store = make_store()
-    monkeypatch.setattr("ci_owner_agent.main.get_history_store", lambda _: store)
-    monkeypatch.setattr("ci_owner_agent.main.send_wecom_markdown",
+    monkeypatch.setattr("ci_owner_agent.services.wecom_notice_service.get_history_store", lambda _: store)
+    monkeypatch.setattr("ci_owner_agent.services.wecom_notice_service.send_wecom_markdown",
                         lambda *args: (_ for _ in ()).throw(AssertionError("must not send")))
     for transport in ("webhook", "bot"):
         settings = replace(load_settings(), wecom_notify_transport=transport,
@@ -648,7 +652,7 @@ def test_notify_force_bypasses_dedup(monkeypatch):
     notice = CiResponsibilityNotice.model_validate(notice_payload([item()]))
     settings = replace(load_settings(), notification_dedup_enabled=True, wecom_notify_transport="bot",
                        wecom_bot_notify_chat_id="chat")
-    monkeypatch.setattr("ci_owner_agent.main.get_history_store", lambda settings: store)
+    monkeypatch.setattr("ci_owner_agent.services.wecom_notice_service.get_history_store", lambda settings: store)
 
     result = _notify_notice(notice, settings, dry_run=False, force=True, feedback_base_url=None)
 
@@ -661,7 +665,7 @@ def test_notify_notice_existing_dead_returns_error_and_force_creates_new_deliver
     store = make_store()
     notice = CiResponsibilityNotice.model_validate(notice_payload([item()]))
     settings = replace(load_settings(), wecom_notify_transport="bot", wecom_bot_notify_chat_id="chat")
-    monkeypatch.setattr("ci_owner_agent.main.get_history_store", lambda _: store)
+    monkeypatch.setattr("ci_owner_agent.services.wecom_notice_service.get_history_store", lambda _: store)
     first = _notify_notice(notice, settings, dry_run=False, force=False, feedback_base_url=None)
     store.wecom_notification_outbox.docs[0]["status"] = "dead"
     repeat = _notify_notice(notice, settings, dry_run=False, force=False, feedback_base_url=None)
@@ -675,7 +679,7 @@ def test_notify_notice_handles_outbox_exception_safely(monkeypatch, caplog):
     store = make_store()
     notice = CiResponsibilityNotice.model_validate(notice_payload([item()]))
     settings = replace(load_settings(), wecom_notify_transport="bot", wecom_bot_notify_chat_id="chat")
-    monkeypatch.setattr("ci_owner_agent.main.get_history_store", lambda _: store)
+    monkeypatch.setattr("ci_owner_agent.services.wecom_notice_service.get_history_store", lambda _: store)
     monkeypatch.setattr(
         "ci_owner_agent.services.wecom_notification_outbox.WeComNotificationOutbox.enqueue_markdown",
         lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("mongodb://user:password@secret-host/ci_owner_agent")),
@@ -690,12 +694,12 @@ def test_notify_notice_handles_outbox_exception_safely(monkeypatch, caplog):
 def test_analyze_notify_exception_stays_json(monkeypatch, capsys):
     notice = CiResponsibilityNotice.model_validate(notice_payload([item()]))
     monkeypatch.setenv("CI_AGENT_MODEL_PROVIDER", "fake")
-    monkeypatch.setattr("ci_owner_agent.main.analyze_local", lambda **kwargs: notice)
+    monkeypatch.setattr("ci_owner_agent.cli.commands.analyze_local", lambda **kwargs: notice)
 
     def raise_notify(*args, **kwargs):
         raise RuntimeError("mongodb://user:password@secret-host/db")
 
-    monkeypatch.setattr("ci_owner_agent.main._notify_notice", raise_notify)
+    monkeypatch.setattr("ci_owner_agent.services.wecom_notice_service.notify_notice", raise_notify)
     rc = main(
         [
             "analyze-local",
@@ -821,7 +825,7 @@ def test_single_fallback_userid():
 
 
 def test_notify_notice_passes_fallback_from_settings(monkeypatch):
-    from ci_owner_agent.main import _notify_notice
+    from ci_owner_agent.services.wecom_notice_service import notify_notice as _notify_notice
     from ci_owner_agent.config import Settings, load_settings
     from dataclasses import replace
 
@@ -831,8 +835,8 @@ def test_notify_notice_passes_fallback_from_settings(monkeypatch):
                        wecom_notify_transport="bot", wecom_bot_notify_chat_id="chat")
 
     store = make_store()
-    monkeypatch.setattr("ci_owner_agent.main.get_history_store", lambda s: store)
-    monkeypatch.setattr("ci_owner_agent.main.build_wecom_notice_mapper", lambda s, store: None)
+    monkeypatch.setattr("ci_owner_agent.services.wecom_notice_service.get_history_store", lambda s: store)
+    monkeypatch.setattr("ci_owner_agent.services.wecom_notice_service.build_wecom_notice_mapper", lambda s, store: None)
 
     _notify_notice(notice, settings, dry_run=False, force=False, feedback_base_url=None)
 
@@ -840,7 +844,7 @@ def test_notify_notice_passes_fallback_from_settings(monkeypatch):
 
 
 def test_notify_notice_dry_run_with_fallback(monkeypatch):
-    from ci_owner_agent.main import _notify_notice
+    from ci_owner_agent.services.wecom_notice_service import notify_notice as _notify_notice
     from ci_owner_agent.config import load_settings
     from dataclasses import replace
 
@@ -853,8 +857,8 @@ def test_notify_notice_dry_run_with_fallback(monkeypatch):
         wecom_fallback_userids=("ci.owner",),
     )
 
-    monkeypatch.setattr("ci_owner_agent.main.get_history_store", lambda s: make_store())
-    monkeypatch.setattr("ci_owner_agent.main.build_wecom_notice_mapper", lambda s, store: None)
+    monkeypatch.setattr("ci_owner_agent.services.wecom_notice_service.get_history_store", lambda s: make_store())
+    monkeypatch.setattr("ci_owner_agent.services.wecom_notice_service.build_wecom_notice_mapper", lambda s, store: None)
 
     result = _notify_notice(notice, settings, dry_run=True, force=False, feedback_base_url=None)
 
@@ -895,7 +899,7 @@ def test_fallback_userids_are_cleaned_by_formatter():
 
 
 def test_notify_notice_passes_fallback_userids_from_settings(monkeypatch):
-    from ci_owner_agent.main import _notify_notice
+    from ci_owner_agent.services.wecom_notice_service import notify_notice as _notify_notice
     from ci_owner_agent.config import load_settings
     from dataclasses import replace
 
@@ -908,7 +912,7 @@ def test_notify_notice_passes_fallback_userids_from_settings(monkeypatch):
         wecom_user_mapping_file=None,
         wecom_fallback_userids=("ci.owner",),
     )
-    monkeypatch.setattr("ci_owner_agent.main.get_history_store", lambda settings: store)
+    monkeypatch.setattr("ci_owner_agent.services.wecom_notice_service.get_history_store", lambda settings: store)
 
     result = _notify_notice(notice, settings, dry_run=True, force=False, feedback_base_url=None)
 
@@ -1099,7 +1103,7 @@ def test_notify_notice_loads_maintainer_mapping_from_settings(tmp_path, monkeypa
         test_maintainer_mapping_file=mapping_file,
         wecom_fallback_userids=("fallback",),
     )
-    monkeypatch.setattr("ci_owner_agent.main.get_history_store", lambda settings: None)
+    monkeypatch.setattr("ci_owner_agent.services.wecom_notice_service.get_history_store", lambda settings: None)
 
     result = _notify_notice(notice, settings, dry_run=True, force=False, feedback_base_url=None)
 
@@ -1119,7 +1123,7 @@ def test_notify_notice_invalid_mapping_warns_and_uses_fallback(tmp_path, monkeyp
         test_maintainer_mapping_file=mapping_file,
         wecom_fallback_userids=("fallback",),
     )
-    monkeypatch.setattr("ci_owner_agent.main.get_history_store", lambda settings: None)
+    monkeypatch.setattr("ci_owner_agent.services.wecom_notice_service.get_history_store", lambda settings: None)
 
     result = _notify_notice(notice, settings, dry_run=True, force=False, feedback_base_url=None)
     captured = capsys.readouterr()

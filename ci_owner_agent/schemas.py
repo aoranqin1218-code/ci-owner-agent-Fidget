@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import re
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -309,15 +308,6 @@ def stable_failure_fact_id(fact: FailureFact) -> str:
 
     normalized = canonicalize_failure_signature(fact.signatureKey)
     return "fact-" + hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:12]
-
-
-def _fallback_failure_signature(item: ResponsibilityItem) -> str:
-    basis = _normalize_identifier_basis(f"{item.failureTitle}\n{item.failureSummary or ''}")
-    return "manual:" + hashlib.sha256(basis.encode("utf-8")).hexdigest()[:16]
-
-
-def _normalize_identifier_basis(value: str) -> str:
-    return re.sub(r"\s+", " ", value or "").strip().lower()
 
 
 def _normalize_responsibility_item(item: ResponsibilityItem, notice: CiResponsibilityNotice) -> None:

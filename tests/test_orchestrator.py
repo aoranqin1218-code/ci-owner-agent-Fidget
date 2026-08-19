@@ -5,15 +5,17 @@ from dataclasses import replace
 import pytest
 
 from ci_owner_agent.orchestrator import (
-    _build_no_owner_notice_from_history_decision,
-    _has_new_strong_evidence,
     _save_history,
-    _select_build_level_no_owner_decision,
-    _validate_trusted_history_no_owner_decisions,
     _with_precomputed_failure_context,
-    apply_history_no_owner_sources,
     analyze_failed_build,
     analyze_local,
+)
+from ci_owner_agent.services.history_no_owner import (
+    apply_history_no_owner_sources,
+    build_no_owner_notice_from_history_decision,
+    has_new_strong_evidence,
+    select_build_level_no_owner_decision,
+    validate_trusted_history_no_owner_decisions,
 )
 from ci_owner_agent.config import load_settings
 from ci_owner_agent.schemas import BuildInfo, ChangedFile, CiResponsibilityNotice, FailureFact, FailureFactExtractionResult
@@ -874,7 +876,7 @@ def test_no_owner_decision_short_circuits_agent(monkeypatch, repo_cache, sample_
 
 
 def test_inherited_owner_has_priority_over_no_owner_decision():
-    decision = _select_build_level_no_owner_decision(
+    decision = select_build_level_no_owner_decision(
         {
             "currentChunks": [
                 {
@@ -890,7 +892,7 @@ def test_inherited_owner_has_priority_over_no_owner_decision():
 
 
 def test_single_no_owner_decision_does_not_short_circuit_multi_failure_build():
-    decision = _select_build_level_no_owner_decision(
+    decision = select_build_level_no_owner_decision(
         {
             "currentChunks": [
                 {"inheritedOwner": {"found": False}, "noOwnerDecision": {"found": True, "sourceBuildNumber": 5088}},
@@ -999,7 +1001,7 @@ def test_multi_failure_no_owner_short_circuit_routes_each_test_maintainer(monkey
 
 
 def test_ai_no_owner_decisions_build_one_item_per_current_fact():
-    decision = _select_build_level_no_owner_decision(
+    decision = select_build_level_no_owner_decision(
         None,
         {
             "currentFacts": [
@@ -1023,7 +1025,7 @@ def test_ai_no_owner_decisions_build_one_item_per_current_fact():
         },
     )
     build_info = BuildInfo(job="job", buildNumber=9, result="FAILURE", buildUrl="local://9", branch="dev", commit="head")
-    notice = _build_no_owner_notice_from_history_decision(
+    notice = build_no_owner_notice_from_history_decision(
         build_info=build_info,
         base_commit="base",
         head_commit="head",
@@ -1178,7 +1180,7 @@ def test_trusted_history_no_owner_rejects_current_or_future_source_and_unknown_m
         "relationship": "very_likely_same_failure",
         "reason": "same failure",
     }
-    notice = _build_no_owner_notice_from_history_decision(
+    notice = build_no_owner_notice_from_history_decision(
         build_info=build_info,
         base_commit="base",
         head_commit="head",
@@ -1214,7 +1216,7 @@ def test_trusted_history_no_owner_allows_missing_source_url_without_none_evidenc
         "relationship": "very_likely_same_failure",
         "reason": "same failure",
     }
-    notice = _build_no_owner_notice_from_history_decision(
+    notice = build_no_owner_notice_from_history_decision(
         build_info=BuildInfo(job="job", buildNumber=9, result="FAILURE", buildUrl="local://9", branch="dev"),
         base_commit="base",
         head_commit="head",
@@ -1253,7 +1255,7 @@ def test_invalid_history_no_owner_decision_is_rejected_before_notice(overrides):
         **overrides,
     }
 
-    assert _validate_trusted_history_no_owner_decisions(decision, current_build_number=9) is None
+    assert validate_trusted_history_no_owner_decisions(decision, current_build_number=9) is None
 
 
 def test_multi_failure_with_one_invalid_history_decision_is_fully_rejected():
@@ -1277,7 +1279,7 @@ def test_multi_failure_with_one_invalid_history_decision_is_fully_rejected():
         ],
     }
 
-    assert _validate_trusted_history_no_owner_decisions(decision, current_build_number=9) is None
+    assert validate_trusted_history_no_owner_decisions(decision, current_build_number=9) is None
 
 
 def test_no_owner_decision_disabled_falls_back_to_agent(monkeypatch, repo_cache, sample_repo, logs):
@@ -1312,7 +1314,7 @@ def test_no_owner_decision_disabled_falls_back_to_agent(monkeypatch, repo_cache,
 
 
 def test_no_owner_decision_reanalyzes_when_new_strong_evidence():
-    assert _has_new_strong_evidence(
+    assert has_new_strong_evidence(
         decision={"signature": {"signatureKey": "sig-timeout", "errorType": "Timeout", "errorMessage": "run awaitfunc timeout"}},
         failure_summaries={
             "chunks": [
@@ -1334,7 +1336,7 @@ def test_no_owner_decision_reanalyzes_when_new_strong_evidence():
 
 
 def test_no_owner_decision_no_new_strong_evidence_for_same_timeout():
-    assert not _has_new_strong_evidence(
+    assert not has_new_strong_evidence(
         decision={"signature": {"signatureKey": "sig-timeout", "errorType": "Timeout", "errorMessage": "run awaitfunc timeout"}},
         failure_summaries={
             "chunks": [
@@ -1355,7 +1357,7 @@ def test_no_owner_decision_no_new_strong_evidence_for_same_timeout():
 
 
 def test_no_owner_decision_detects_changed_path_in_second_summary():
-    assert _has_new_strong_evidence(
+    assert has_new_strong_evidence(
         decision={
             "allFailuresNoOwnerDecision": True,
             "coveredSignatures": ["sig-a", "sig-b"],
@@ -1391,7 +1393,7 @@ def test_no_owner_decision_detects_changed_path_in_second_summary():
 
 
 def test_no_owner_decision_no_new_strong_evidence_checks_all_summaries():
-    assert not _has_new_strong_evidence(
+    assert not has_new_strong_evidence(
         decision={
             "allFailuresNoOwnerDecision": True,
             "coveredSignatures": ["sig-a", "sig-b"],
@@ -1445,7 +1447,7 @@ def test_no_owner_decision_aligns_heterogeneous_failures_without_false_positive(
         ]
     }
 
-    assert not _has_new_strong_evidence(
+    assert not has_new_strong_evidence(
         decision=decision,
         failure_summaries=summaries,
         failure_facts=None,
@@ -1468,13 +1470,13 @@ def test_no_owner_decision_detects_changed_error_code_in_aligned_second_failure(
         ]
     }
 
-    assert _has_new_strong_evidence(
+    assert has_new_strong_evidence(
         decision=decision, failure_summaries=summaries, failure_facts=None, changed_files=[]
     )
 
 
 def test_no_owner_decision_unaligned_failures_reanalyze_conservatively():
-    assert _has_new_strong_evidence(
+    assert has_new_strong_evidence(
         decision={
             "allFailuresNoOwnerDecision": True,
             "decisions": [
@@ -1504,7 +1506,7 @@ def test_no_owner_decision_unaligned_failures_reanalyze_conservatively():
 )
 def test_ai_no_owner_same_structured_marker_is_not_new_evidence(error_code, error_type):
     signature = f"fact-{error_code or error_type}"
-    assert not _has_new_strong_evidence(
+    assert not has_new_strong_evidence(
         decision={
             "failureSignature": signature,
             "signature": {
@@ -1530,7 +1532,7 @@ def test_ai_no_owner_same_structured_marker_is_not_new_evidence(error_code, erro
 
 
 def test_ai_no_owner_different_structured_marker_is_new_evidence():
-    assert _has_new_strong_evidence(
+    assert has_new_strong_evidence(
         decision={
             "failureSignature": "fact-dependency",
             "signature": {
@@ -1565,7 +1567,7 @@ def test_ai_no_owner_different_structured_marker_is_new_evidence():
 )
 def test_no_owner_failure_paths_use_repository_normalization(failure_path):
     changed_path = "server/service/a.ts" if "server/" in failure_path else "test/A.test.ts"
-    assert _has_new_strong_evidence(
+    assert has_new_strong_evidence(
         decision={
             "failureSignature": "sig-a",
             "signature": {"signatureKey": "sig-a", "errorType": "Timeout"},
@@ -1588,7 +1590,7 @@ def test_no_owner_failure_paths_use_repository_normalization(failure_path):
 
 
 def test_no_owner_unsupported_windows_absolute_path_does_not_match_changed_file():
-    assert not _has_new_strong_evidence(
+    assert not has_new_strong_evidence(
         decision={
             "failureSignature": "sig-a",
             "signature": {"signatureKey": "sig-a", "errorType": "Timeout"},
@@ -1611,7 +1613,7 @@ def test_no_owner_unsupported_windows_absolute_path_does_not_match_changed_file(
 
 
 def test_no_owner_parent_traversal_path_does_not_match_changed_file():
-    assert not _has_new_strong_evidence(
+    assert not has_new_strong_evidence(
         decision={
             "failureSignature": "sig-a",
             "signature": {"signatureKey": "sig-a", "errorType": "Timeout"},
@@ -1694,7 +1696,7 @@ def test_all_chunks_no_owner_but_second_path_changed_falls_back_to_agent(monkeyp
 
 
 def test_no_owner_decision_detects_new_strong_error_code():
-    assert _has_new_strong_evidence(
+    assert has_new_strong_evidence(
         decision={"signature": {"signatureKey": "sig-timeout", "errorType": "Timeout", "errorMessage": "run awaitfunc timeout"}},
         failure_summaries={
             "chunks": [

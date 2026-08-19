@@ -4,7 +4,7 @@ from dataclasses import replace
 
 from ci_owner_agent.schemas import BuildInfo, CiResponsibilityNotice, FailureFact, FailureFactComparison
 from ci_owner_agent.services.feedback_store import FeedbackStore
-from ci_owner_agent.tools.ai_history_tools import history_search_similar_failure_facts
+from ci_owner_agent.services.ai_history_search import history_search_similar_failure_facts
 from tests.test_failure_fact_compare_ai import make_fact
 from tests.test_history_store import current_owner_item, high_confidence_payload, make_store
 from tests.test_langchain_agent import make_lc_context
@@ -150,7 +150,7 @@ def test_ai_history_diagnostics_when_historical_facts_missing(repo_cache, sample
 
 def test_ai_history_filters_current_generic_fact(monkeypatch, repo_cache, sample_repo, logs):
     calls = []
-    monkeypatch.setattr("ci_owner_agent.tools.ai_history_tools.compare_failure_facts_with_ai", lambda **kwargs: calls.append(kwargs))
+    monkeypatch.setattr("ci_owner_agent.services.ai_history_search.compare_failure_facts_with_ai", lambda **kwargs: calls.append(kwargs))
     context = make_lc_context(repo_cache, sample_repo, logs)
     generic = make_fact(historyEligible=False, isGenericWrapper=True)
     result = history_search_similar_failure_facts(_context(context, facts=[generic]), store=make_store())
@@ -164,7 +164,7 @@ def test_unknown_failure_does_not_enter_ai_history(monkeypatch, repo_cache, samp
     def unexpected_compare(**kwargs):
         raise AssertionError("unknown_failure must not invoke AI comparison")
 
-    monkeypatch.setattr("ci_owner_agent.tools.ai_history_tools.compare_failure_facts_with_ai", unexpected_compare)
+    monkeypatch.setattr("ci_owner_agent.services.ai_history_search.compare_failure_facts_with_ai", unexpected_compare)
     context = make_lc_context(repo_cache, sample_repo, logs)
     store = make_store()
     _save_fact(store, context, build=7, fact=make_fact())
@@ -195,7 +195,7 @@ def test_buildkit_wrapper_does_not_enter_ai_history(monkeypatch, repo_cache, sam
     def unexpected_compare(**kwargs):
         raise AssertionError("generic BuildKit wrapper must not invoke AI comparison")
 
-    monkeypatch.setattr("ci_owner_agent.tools.ai_history_tools.compare_failure_facts_with_ai", unexpected_compare)
+    monkeypatch.setattr("ci_owner_agent.services.ai_history_search.compare_failure_facts_with_ai", unexpected_compare)
     context = make_lc_context(repo_cache, sample_repo, logs)
     wrapper = FailureFact(
         signatureKey="model-wrapper",
@@ -220,7 +220,7 @@ def test_buildkit_wrapper_does_not_enter_ai_history(monkeypatch, repo_cache, sam
 
 
 def test_ai_history_compares_relative_and_var_app_paths(monkeypatch, repo_cache, sample_repo, logs):
-    monkeypatch.setattr("ci_owner_agent.tools.ai_history_tools.compare_failure_facts_with_ai", lambda **kwargs: _same())
+    monkeypatch.setattr("ci_owner_agent.services.ai_history_search.compare_failure_facts_with_ai", lambda **kwargs: _same())
     context = make_lc_context(repo_cache, sample_repo, logs)
     store = make_store()
     historical = make_fact(filePath="/var/app/server/workflow/service.ts")
@@ -235,7 +235,7 @@ def test_ai_history_compares_relative_and_var_app_paths(monkeypatch, repo_cache,
     assert result["diagnostics"]["comparedPairsCount"] > 0
     assert result["candidates"]
 def test_ai_history_ts2305_vs_etarget_not_inherited(monkeypatch, repo_cache, sample_repo, logs):
-    monkeypatch.setattr("ci_owner_agent.tools.ai_history_tools.compare_failure_facts_with_ai", lambda **kwargs: _different())
+    monkeypatch.setattr("ci_owner_agent.services.ai_history_search.compare_failure_facts_with_ai", lambda **kwargs: _different())
     context = make_lc_context(repo_cache, sample_repo, logs)
     store = make_store()
     _save_fact(store, context, build=7, fact=make_fact())
@@ -258,7 +258,7 @@ def test_ai_history_ts2305_vs_etarget_not_inherited(monkeypatch, repo_cache, sam
 
 
 def test_ai_history_same_ts2305_compare_false_has_diagnostics(monkeypatch, repo_cache, sample_repo, logs):
-    monkeypatch.setattr("ci_owner_agent.tools.ai_history_tools.compare_failure_facts_with_ai", lambda **kwargs: _different())
+    monkeypatch.setattr("ci_owner_agent.services.ai_history_search.compare_failure_facts_with_ai", lambda **kwargs: _different())
     context = make_lc_context(repo_cache, sample_repo, logs)
     store = make_store()
     fact = make_fact()
@@ -275,7 +275,7 @@ def test_ai_history_same_ts2305_compare_false_has_diagnostics(monkeypatch, repo_
 
 
 def test_ai_history_same_ts2305_inherits_owner(monkeypatch, repo_cache, sample_repo, logs):
-    monkeypatch.setattr("ci_owner_agent.tools.ai_history_tools.compare_failure_facts_with_ai", lambda **kwargs: _same())
+    monkeypatch.setattr("ci_owner_agent.services.ai_history_search.compare_failure_facts_with_ai", lambda **kwargs: _same())
     context = make_lc_context(repo_cache, sample_repo, logs)
     store = make_store()
     fact = make_fact()
@@ -292,7 +292,7 @@ def test_ai_history_same_ts2305_inherits_owner(monkeypatch, repo_cache, sample_r
 
 
 def test_ai_history_compare_below_threshold_not_inherited(monkeypatch, repo_cache, sample_repo, logs):
-    monkeypatch.setattr("ci_owner_agent.tools.ai_history_tools.compare_failure_facts_with_ai", lambda **kwargs: _same(0.7))
+    monkeypatch.setattr("ci_owner_agent.services.ai_history_search.compare_failure_facts_with_ai", lambda **kwargs: _same(0.7))
     context = make_lc_context(repo_cache, sample_repo, logs)
     store = make_store()
     fact = make_fact()
@@ -303,7 +303,7 @@ def test_ai_history_compare_below_threshold_not_inherited(monkeypatch, repo_cach
 
 
 def test_ai_history_historical_fact_without_owner_not_inherited(monkeypatch, repo_cache, sample_repo, logs):
-    monkeypatch.setattr("ci_owner_agent.tools.ai_history_tools.compare_failure_facts_with_ai", lambda **kwargs: _same())
+    monkeypatch.setattr("ci_owner_agent.services.ai_history_search.compare_failure_facts_with_ai", lambda **kwargs: _same())
     context = make_lc_context(repo_cache, sample_repo, logs)
     store = make_store()
     fact = make_fact()
@@ -319,7 +319,7 @@ def test_ai_history_historical_fact_without_owner_not_inherited(monkeypatch, rep
 
 
 def test_ai_history_feedback_mark_flaky_blocks_inheritance(monkeypatch, repo_cache, sample_repo, logs):
-    monkeypatch.setattr("ci_owner_agent.tools.ai_history_tools.compare_failure_facts_with_ai", lambda **kwargs: _same())
+    monkeypatch.setattr("ci_owner_agent.services.ai_history_search.compare_failure_facts_with_ai", lambda **kwargs: _same())
     context = make_lc_context(repo_cache, sample_repo, logs)
     store = make_store()
     fact = make_fact()
@@ -334,7 +334,7 @@ def test_ai_history_feedback_mark_flaky_blocks_inheritance(monkeypatch, repo_cac
 
 
 def test_ai_history_feedback_mark_no_owner_blocks_inheritance(monkeypatch, repo_cache, sample_repo, logs):
-    monkeypatch.setattr("ci_owner_agent.tools.ai_history_tools.compare_failure_facts_with_ai", lambda **kwargs: _same())
+    monkeypatch.setattr("ci_owner_agent.services.ai_history_search.compare_failure_facts_with_ai", lambda **kwargs: _same())
     context = make_lc_context(repo_cache, sample_repo, logs)
     store = make_store()
     fact = make_fact()
@@ -346,7 +346,7 @@ def test_ai_history_feedback_mark_no_owner_blocks_inheritance(monkeypatch, repo_
 
 
 def test_ai_history_feedback_correct_owner_overrides_owner(monkeypatch, repo_cache, sample_repo, logs):
-    monkeypatch.setattr("ci_owner_agent.tools.ai_history_tools.compare_failure_facts_with_ai", lambda **kwargs: _same())
+    monkeypatch.setattr("ci_owner_agent.services.ai_history_search.compare_failure_facts_with_ai", lambda **kwargs: _same())
     context = make_lc_context(repo_cache, sample_repo, logs)
     store = make_store()
     fact = make_fact()
@@ -370,7 +370,7 @@ def test_ai_history_feedback_correct_owner_overrides_owner(monkeypatch, repo_cac
 
 
 def test_ai_history_feedback_correct_owner_medium_confidence_can_inherit(monkeypatch, repo_cache, sample_repo, logs):
-    monkeypatch.setattr("ci_owner_agent.tools.ai_history_tools.compare_failure_facts_with_ai", lambda **kwargs: _same())
+    monkeypatch.setattr("ci_owner_agent.services.ai_history_search.compare_failure_facts_with_ai", lambda **kwargs: _same())
     context = make_lc_context(repo_cache, sample_repo, logs)
     store = make_store()
     fact = make_fact()
@@ -397,7 +397,7 @@ def test_ai_history_feedback_correct_owner_medium_confidence_can_inherit(monkeyp
 
 
 def test_ai_history_feedback_confirm_owner_marks_verified(monkeypatch, repo_cache, sample_repo, logs):
-    monkeypatch.setattr("ci_owner_agent.tools.ai_history_tools.compare_failure_facts_with_ai", lambda **kwargs: _same())
+    monkeypatch.setattr("ci_owner_agent.services.ai_history_search.compare_failure_facts_with_ai", lambda **kwargs: _same())
     context = make_lc_context(repo_cache, sample_repo, logs)
     store = make_store()
     fact = make_fact()
@@ -416,7 +416,7 @@ def test_ai_history_limits_compare_calls(monkeypatch, repo_cache, sample_repo, l
         calls.append(kwargs)
         return _different()
 
-    monkeypatch.setattr("ci_owner_agent.tools.ai_history_tools.compare_failure_facts_with_ai", fake_compare)
+    monkeypatch.setattr("ci_owner_agent.services.ai_history_search.compare_failure_facts_with_ai", fake_compare)
     context = make_lc_context(repo_cache, sample_repo, logs)
     context = _context(context, build=10, facts=[make_fact()], settings=_settings(context, ai_history_max_compare_calls=2))
     store = make_store()
@@ -434,7 +434,7 @@ def test_ai_history_candidate_sort_prefers_signature_and_error_code(monkeypatch,
         compared.append(kwargs["historical_fact"].signatureKey)
         return _different()
 
-    monkeypatch.setattr("ci_owner_agent.tools.ai_history_tools.compare_failure_facts_with_ai", fake_compare)
+    monkeypatch.setattr("ci_owner_agent.services.ai_history_search.compare_failure_facts_with_ai", fake_compare)
     context = make_lc_context(repo_cache, sample_repo, logs)
     current = make_fact(signatureKey="same-signature")
     store = make_store()
@@ -448,7 +448,7 @@ def test_ai_history_compare_exception_does_not_fail(monkeypatch, repo_cache, sam
     def explode(**kwargs):
         raise RuntimeError("compare exploded")
 
-    monkeypatch.setattr("ci_owner_agent.tools.ai_history_tools.compare_failure_facts_with_ai", explode)
+    monkeypatch.setattr("ci_owner_agent.services.ai_history_search.compare_failure_facts_with_ai", explode)
     context = make_lc_context(repo_cache, sample_repo, logs)
     store = make_store()
     fact = make_fact()

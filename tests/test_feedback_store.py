@@ -8,7 +8,7 @@ from threading import Barrier
 from ci_owner_agent.schemas import BuildInfo, CiResponsibilityNotice
 from ci_owner_agent.main import main
 from ci_owner_agent.services.feedback_store import FeedbackStore
-from ci_owner_agent.tools.history_tools import history_search_similar_failures
+from ci_owner_agent.services.history_search import history_search_similar_failures
 from tests.test_history_store import focused_chunk, make_store
 from tests.test_langchain_agent import high_confidence_payload, make_lc_context
 
@@ -280,7 +280,7 @@ def test_feedback_apply_cli_requires_branch(monkeypatch, capsys):
     store = make_store()
     monkeypatch.setenv("CI_AGENT_MODEL_PROVIDER", "fake")
     monkeypatch.setenv("CI_AGENT_HISTORY_ENABLED", "true")
-    monkeypatch.setattr("ci_owner_agent.main.get_history_store", lambda settings: store)
+    monkeypatch.setattr("ci_owner_agent.cli.commands.get_history_store", lambda settings: store)
     rc = main(
         [
             "feedback",
@@ -334,7 +334,7 @@ def test_feedback_apply_cli_rejects_bad_owner_type(monkeypatch, capsys):
 def test_feedback_list_cli_handles_blank_repo_without_traceback(monkeypatch, capsys):
     store = make_store()
     monkeypatch.setenv("CI_AGENT_MODEL_PROVIDER", "fake")
-    monkeypatch.setattr("ci_owner_agent.main.get_history_store", lambda settings: store)
+    monkeypatch.setattr("ci_owner_agent.cli.commands.get_history_store", lambda settings: store)
     rc = main(["feedback", "list", "--repo", " ", "--job", "job-x", "--branch", "dev", "--build", "100"])
     captured = capsys.readouterr()
     assert rc == 2
@@ -345,7 +345,7 @@ def test_feedback_list_cli_handles_blank_repo_without_traceback(monkeypatch, cap
 def test_feedback_list_cli_handles_blank_branch_without_traceback(monkeypatch, capsys):
     store = make_store()
     monkeypatch.setenv("CI_AGENT_MODEL_PROVIDER", "fake")
-    monkeypatch.setattr("ci_owner_agent.main.get_history_store", lambda settings: store)
+    monkeypatch.setattr("ci_owner_agent.cli.commands.get_history_store", lambda settings: store)
     rc = main(["feedback", "list", "--repo", "repo-a", "--job", "job-x", "--branch", " ", "--build", "100"])
     captured = capsys.readouterr()
     assert rc == 2

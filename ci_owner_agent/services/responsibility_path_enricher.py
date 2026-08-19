@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from typing import Iterable
 
-from ci_owner_agent.schemas import CiResponsibilityNotice, ResponsibilityItem
+from ci_owner_agent.schemas import CiResponsibilityNotice
 from ci_owner_agent.services.repository_path import normalize_repository_path
 
 

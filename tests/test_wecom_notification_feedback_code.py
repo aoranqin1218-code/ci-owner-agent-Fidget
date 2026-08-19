@@ -3,11 +3,11 @@ from __future__ import annotations
 from dataclasses import replace
 
 from ci_owner_agent.config import load_settings
-from ci_owner_agent.main import _notify_notice
 from ci_owner_agent.schemas import CiResponsibilityNotice
-from ci_owner_agent.services.notification_formatter import notification_digest
+from ci_owner_agent.services.wecom_notification_routing import notification_digest
 from ci_owner_agent.services.wecom_bot_models import WeComInboundMessage, WeComTemplateCardEvent
 from ci_owner_agent.services.wecom_feedback_service import WeComFeedbackService
+from ci_owner_agent.services.wecom_notice_service import notify_notice as _notify_notice
 from tests.test_history_store import make_store
 from tests.test_notification_formatter import item, notice_payload
 
@@ -20,7 +20,7 @@ def test_notify_notice_persists_notice_for_bot_feedback(monkeypatch):
     store = make_store()
     notice = CiResponsibilityNotice.model_validate(notice_payload([item("Tang")]))
     settings = replace(load_settings(), notification_dedup_enabled=False, wecom_user_mapping_file=None)
-    monkeypatch.setattr("ci_owner_agent.main.get_history_store", lambda settings: store)
+    monkeypatch.setattr("ci_owner_agent.services.wecom_notice_service.get_history_store", lambda settings: store)
 
     first = _notify_notice(notice, settings, dry_run=True, force=False, feedback_base_url=None)
     code = store.feedback_contexts.docs[0]["code"]
@@ -49,7 +49,7 @@ def test_feedback_code_does_not_change_notification_digest(monkeypatch):
     notice_a = CiResponsibilityNotice.model_validate(notice_payload([item("Tang")]))
     notice_b = CiResponsibilityNotice.model_validate(notice_payload([item("Tang")]))
     settings = replace(load_settings(), notification_dedup_enabled=False, wecom_user_mapping_file=None)
-    monkeypatch.setattr("ci_owner_agent.main.get_history_store", lambda settings: store)
+    monkeypatch.setattr("ci_owner_agent.services.wecom_notice_service.get_history_store", lambda settings: store)
     digest_before = notification_digest(notice_a)
 
     first = _notify_notice(notice_a, settings, dry_run=True, force=False, feedback_base_url=None)

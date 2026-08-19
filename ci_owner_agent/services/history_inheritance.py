@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import datetime as dt
 from typing import Any
 
 from ci_owner_agent.constants import NO_OWNER_NAME
@@ -13,14 +12,6 @@ BLOCKING_FEEDBACK_ACTIONS = {"mark_flaky", "mark_no_owner"}
 def active_feedback_docs(store: Any, repo: str, job: str, branch: str | None) -> list[dict]:
     from ci_owner_agent.services.feedback_store import current_feedback_operations
     return current_feedback_operations(store.feedback, repo=repo, job=job, branch=branch)
-
-
-def sort_feedback_docs(docs: list[dict]) -> list[dict]:
-    return sorted(
-        docs,
-        key=lambda doc: (_time_sort_value(doc.get("updatedAt")), _time_sort_value(doc.get("createdAt"))),
-        reverse=True,
-    )
 
 
 def find_feedback_override_for_failure_signature(
@@ -260,15 +251,3 @@ def build_no_owner_item_from_decision(
         "reason": decision.get("reason") or "历史同类失败已判定为无高可信责任人。",
         "evidenceIds": [evidence_id],
     }
-
-
-def _time_sort_value(value: Any) -> float:
-    if isinstance(value, dt.datetime):
-        return value.timestamp()
-    if isinstance(value, str):
-        try:
-            text = value.replace("Z", "+00:00")
-            return dt.datetime.fromisoformat(text).timestamp()
-        except ValueError:
-            return 0
-    return 0

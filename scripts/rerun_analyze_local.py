@@ -5,24 +5,35 @@ import csv
 import datetime as dt
 import json
 import os
-import platform
-import signal
-import subprocess
 import sys
 import time
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 _SCRIPT_REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_SCRIPT_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_REPO_ROOT))
-from scripts._runtime import REPO_ROOT, build_subprocess_env, ensure_repo_on_sys_path, resolve_repo_default_path, resolve_user_path
+from scripts._runtime import (
+    BoundedProcessTimeout,
+    REPO_ROOT,
+    build_subprocess_env,
+    ensure_repo_on_sys_path,
+    read_last_jsonl,
+    resolve_repo_default_path,
+    resolve_user_path,
+    run_process_bounded,
+)
 ensure_repo_on_sys_path()
-from scripts.batch_analyze_company_logs import cleanup_previous_outputs, load_env_file
+from scripts._batch_common import cleanup_previous_outputs, load_env_file
+from scripts._langsmith_trace import (
+    find_matching_root_run,
+    serialize_langsmith_run,
+    summarize_trace_payload,
+    write_trace_artifact,
+)
 from ci_owner_agent.schemas import CiResponsibilityNotice
 from ci_owner_agent.services.branch_normalization import normalize_branch_name
-from ci_owner_agent.services.log_provider import resolve_final_status_from_console_log
+from ci_owner_agent.services.log_parsing import resolve_final_status_from_console_log
 
 SUMMARY_FIELDS = [
     "run", "status", "exitCode", "durationSec", "errorKind", "error", "noticeValid", "noticeValidationError",
@@ -33,12 +44,6 @@ SUMMARY_FIELDS = [
     "traceToolRunCount", "traceLlmRunCount", "traceUsageDictCount",
     "terminationReaped", "terminationWarning", "cleanupWarning",
 ]
-
-
-@dataclass(frozen=True)
-class ProcessTerminationResult:
-    reaped: bool
-    warning: str | None = None
 
 
 class RunPreparationError(RuntimeError):
@@ -89,73 +94,6 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def kill_process_tree(process: subprocess.Popen) -> None:
-    if process.poll() is not None:
-        return
-
-    if platform.system().lower().startswith("win"):
-        subprocess.run(
-            ["taskkill", "/PID", str(process.pid), "/T", "/F"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
-    else:
-        try:
-            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
-        except Exception:
-            process.kill()
-
-
-def terminate_timed_out_process(process: subprocess.Popen, *, grace_seconds: float = 5) -> ProcessTerminationResult:
-    warnings: list[str] = []
-    try:
-        kill_process_tree(process)
-    except (ProcessLookupError, ChildProcessError):
-        return ProcessTerminationResult(True)
-    except Exception as exc:
-        warnings.append(f"tree termination failed: {type(exc).__name__}: {exc}")
-    try:
-        process.wait(timeout=grace_seconds)
-        return ProcessTerminationResult(True, "; ".join(warnings) or None)
-    except (ProcessLookupError, ChildProcessError):
-        return ProcessTerminationResult(True, "; ".join(warnings) or None)
-    except Exception as exc:
-        warnings.append(f"initial reap failed: {type(exc).__name__}: {exc}")
-    try:
-        process.kill()
-    except (ProcessLookupError, ChildProcessError):
-        pass
-    except Exception as exc:
-        warnings.append(f"fallback kill failed: {type(exc).__name__}: {exc}")
-    try:
-        process.wait(timeout=grace_seconds)
-        return ProcessTerminationResult(True, "; ".join(warnings) or None)
-    except (ProcessLookupError, ChildProcessError):
-        return ProcessTerminationResult(True, "; ".join(warnings) or None)
-    except Exception as exc:
-        warnings.append(f"final reap failed: {type(exc).__name__}: {exc}")
-        return ProcessTerminationResult(False, "; ".join(warnings))
-
-
-def read_last_jsonl(path: Path) -> dict[str, Any] | None:
-    if not path.exists():
-        return None
-
-    lines = [
-        line.strip()
-        for line in path.read_text(encoding="utf-8", errors="replace").splitlines()
-        if line.strip()
-    ]
-    if not lines:
-        return None
-
-    try:
-        return json.loads(lines[-1])
-    except Exception:
-        return None
-
-
 def read_notice(path: Path) -> tuple[dict[str, Any] | None, str | None]:
     if not path.exists():
         return None, "notice file missing"
@@ -189,6 +127,11 @@ def write_summaries(out_dir: Path, rows: list[dict[str, Any]]) -> bool:
     except Exception as exc:
         print(f"ERROR: failed to write rerun summaries: {type(exc).__name__}: {exc}", file=sys.stderr)
         return False
+
+
+def _write_process_logs(stdout_path: Path, stderr_path: Path, stdout: str, stderr: str) -> None:
+    stdout_path.write_text(stdout, encoding="utf-8", errors="replace")
+    stderr_path.write_text(stderr, encoding="utf-8", errors="replace")
 
 
 def prepare_run(*, run_index: int, args: argparse.Namespace, console_file: Path, out_dir: Path, project_name: str) -> dict[str, Any]:
@@ -332,61 +275,6 @@ def summarize_notice(notice: dict[str, Any] | None) -> dict[str, Any]:
     }
 
 
-def to_jsonable(obj: Any, depth: int = 0) -> Any:
-    if depth > 12:
-        return str(obj)
-
-    if obj is None or isinstance(obj, (str, int, float, bool)):
-        return obj
-
-    if isinstance(obj, (dt.datetime, dt.date)):
-        return obj.isoformat()
-
-    if isinstance(obj, dict):
-        return {str(k): to_jsonable(v, depth + 1) for k, v in obj.items()}
-
-    if isinstance(obj, (list, tuple, set)):
-        return [to_jsonable(v, depth + 1) for v in obj]
-
-    if hasattr(obj, "model_dump"):
-        try:
-            return to_jsonable(obj.model_dump(), depth + 1)
-        except Exception:
-            pass
-
-    if hasattr(obj, "dict"):
-        try:
-            return to_jsonable(obj.dict(), depth + 1)
-        except Exception:
-            pass
-
-    if hasattr(obj, "__dict__"):
-        try:
-            return {
-                str(k): to_jsonable(v, depth + 1)
-                for k, v in vars(obj).items()
-                if not str(k).startswith("_")
-            }
-        except Exception:
-            pass
-
-    return str(obj)
-
-
-def get_run_metadata(run: Any) -> dict[str, Any]:
-    direct = getattr(run, "metadata", None)
-    if isinstance(direct, dict):
-        return direct
-
-    extra = getattr(run, "extra", None)
-    if isinstance(extra, dict):
-        metadata = extra.get("metadata")
-        if isinstance(metadata, dict):
-            return metadata
-
-    return {}
-
-
 def metadata_matches(
     metadata: dict[str, Any],
     *,
@@ -405,141 +293,6 @@ def metadata_matches(
     )
 
 
-def run_to_dict(run: Any) -> dict[str, Any]:
-    fields = [
-        "id",
-        "name",
-        "run_type",
-        "start_time",
-        "end_time",
-        "status",
-        "error",
-        "inputs",
-        "outputs",
-        "extra",
-        "metadata",
-        "events",
-        "serialized",
-        "tags",
-        "execution_order",
-        "dotted_order",
-        "parent_run_id",
-        "trace_id",
-        "child_runs",
-    ]
-
-    data: dict[str, Any] = {}
-    for field in fields:
-        try:
-            value = getattr(run, field, None)
-        except Exception:
-            continue
-        if value is not None:
-            data[field] = to_jsonable(value)
-
-    # Some LangSmith Run objects store metadata under extra.metadata.
-    if "metadata" not in data:
-        metadata = get_run_metadata(run)
-        if metadata:
-            data["metadata"] = to_jsonable(metadata)
-
-    return data
-
-
-def flatten_runs(payload: dict[str, Any]) -> list[dict[str, Any]]:
-    result: list[dict[str, Any]] = []
-
-    def walk(node: Any, depth: int = 0) -> None:
-        if not isinstance(node, dict):
-            return
-
-        result.append(
-            {
-                "depth": depth,
-                "id": node.get("id"),
-                "name": node.get("name"),
-                "run_type": node.get("run_type"),
-                "start_time": node.get("start_time"),
-                "end_time": node.get("end_time"),
-                "error": node.get("error"),
-            }
-        )
-
-        children = node.get("child_runs")
-        if isinstance(children, list):
-            for child in children:
-                walk(child, depth + 1)
-
-    walk(payload, 0)
-    return result
-
-
-def find_usage_dicts(obj: Any) -> list[dict[str, Any]]:
-    found: list[dict[str, Any]] = []
-
-    usage_keys = {
-        "input_tokens",
-        "prompt_tokens",
-        "output_tokens",
-        "completion_tokens",
-        "total_tokens",
-        "inputTokens",
-        "outputTokens",
-        "totalTokens",
-    }
-
-    def looks_like_usage(value: dict[str, Any]) -> bool:
-        return any(key in value for key in usage_keys)
-
-    def walk(value: Any, depth: int = 0) -> None:
-        if depth > 14:
-            return
-        if isinstance(value, dict):
-            if looks_like_usage(value):
-                found.append(value)
-            for child in value.values():
-                walk(child, depth + 1)
-        elif isinstance(value, list):
-            for child in value:
-                walk(child, depth + 1)
-
-    walk(obj)
-    return found
-
-
-def summarize_trace_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    runs = flatten_runs(payload)
-    usage_dicts = find_usage_dicts(payload)
-
-    root = runs[0] if runs else {}
-    tool_runs = [
-        item
-        for item in runs
-        if str(item.get("run_type") or "").lower() == "tool"
-        or str(item.get("name") or "").startswith(("log_", "repo_", "history_", "ts_"))
-    ]
-    llm_runs = [
-        item
-        for item in runs
-        if str(item.get("run_type") or "").lower() in {"llm", "chat_model"}
-        or "chat" in str(item.get("name") or "").lower()
-        or "model" in str(item.get("name") or "").lower()
-    ]
-    error_runs = [item for item in runs if item.get("error")]
-
-    return {
-        "rootRunId": root.get("id"),
-        "rootName": root.get("name"),
-        "totalRuns": len(runs),
-        "childRunCount": max(0, len(runs) - 1),
-        "toolRunCount": len(tool_runs),
-        "llmRunCount": len(llm_runs),
-        "errorRunCount": len(error_runs),
-        "usageDictCount": len(usage_dicts),
-        "runs": runs,
-    }
-
-
 def fetch_langsmith_trace(
     *,
     job: str,
@@ -553,88 +306,36 @@ def fetch_langsmith_trace(
     trace_summary_path: Path,
     wait_seconds: int,
 ) -> dict[str, Any]:
-    try:
-        from langsmith import Client
-    except Exception as exc:
-        return {"ok": False, "error": f"langsmith import failed: {exc}"}
-
-    client = Client()
-    deadline = time.time() + wait_seconds
-    last_error: str | None = None
-
-    while time.time() < deadline:
-        try:
-            runs = list(
-                client.list_runs(
-                    project_name=project_name,
-                    is_root=True,
-                    start_time=started_at - dt.timedelta(minutes=2),
-                    limit=100,
-                )
-            )
-
-            runs.sort(
-                key=lambda item: getattr(
-                    item,
-                    "start_time",
-                    dt.datetime.min.replace(tzinfo=dt.timezone.utc),
-                ),
-                reverse=True,
-            )
-
-            for run in runs:
-                full = client.read_run(getattr(run, "id"), load_child_runs=True)
-                metadata = get_run_metadata(full)
-
-                if not metadata_matches(
-                    metadata,
-                    job=job,
-                    repo=repo,
-                    build=build,
-                    base_commit=base_commit,
-                    head_commit=head_commit,
-                ):
-                    continue
-
-                payload = run_to_dict(full)
-
-                try:
-                    payload["_langsmith_url"] = client.get_run_url(
-                        run=full,
-                        project_name=project_name,
-                    )
-                except Exception:
-                    pass
-
-                summary = summarize_trace_payload(payload)
-
-                trace_path.write_text(
-                    json.dumps(payload, ensure_ascii=False, indent=2, default=str),
-                    encoding="utf-8",
-                )
-                trace_summary_path.write_text(
-                    json.dumps(summary, ensure_ascii=False, indent=2, default=str),
-                    encoding="utf-8",
-                )
-
-                return {
-                    "ok": True,
-                    "traceFile": str(trace_path),
-                    "traceSummaryFile": str(trace_summary_path),
-                    "runId": str(getattr(full, "id", "")),
-                    "url": payload.get("_langsmith_url"),
-                    "childRunCount": summary.get("childRunCount"),
-                    "toolRunCount": summary.get("toolRunCount"),
-                    "llmRunCount": summary.get("llmRunCount"),
-                    "usageDictCount": summary.get("usageDictCount"),
-                }
-
-        except Exception as exc:
-            last_error = str(exc)
-
-        time.sleep(2)
-
-    return {"ok": False, "error": last_error or "trace not found before timeout"}
+    result = find_matching_root_run(
+        project_name=project_name,
+        started_at=started_at,
+        wait_seconds=wait_seconds,
+        metadata_matches=lambda metadata: metadata_matches(
+            metadata,
+            job=job,
+            repo=repo,
+            build=build,
+            base_commit=base_commit,
+            head_commit=head_commit,
+        ),
+    )
+    if not result["ok"]:
+        return result
+    full = result["run"]
+    payload = write_trace_artifact(trace_path, full, result["url"], serializer=serialize_langsmith_run)
+    summary = summarize_trace_payload(payload)
+    trace_summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    return {
+        "ok": True,
+        "traceFile": str(trace_path),
+        "traceSummaryFile": str(trace_summary_path),
+        "runId": str(getattr(full, "id", "")),
+        "url": result["url"],
+        "childRunCount": summary.get("childRunCount"),
+        "toolRunCount": summary.get("toolRunCount"),
+        "llmRunCount": summary.get("llmRunCount"),
+        "usageDictCount": summary.get("usageDictCount"),
+    }
 
 
 def main() -> int:
@@ -725,32 +426,22 @@ def main() -> int:
         termination_warning: str | None = None
         termination_reaped: bool | None = None
 
+        timed_out = False
+        exit_code: int | None = None
         try:
-            with stdout_file.open("w", encoding="utf-8", errors="replace") as stdout_fp, stderr_file.open(
-                "w", encoding="utf-8", errors="replace"
-            ) as stderr_fp:
-                creationflags = 0
-                preexec_fn = None
-
-                if platform.system().lower().startswith("win"):
-                    creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
-                else:
-                    preexec_fn = os.setsid
-
-                process = subprocess.Popen(
-                    run_command, stdout=stdout_fp, stderr=stderr_fp, env=env, text=True,
-                    creationflags=creationflags, preexec_fn=preexec_fn, cwd=str(REPO_ROOT),
-                )
-
-                timed_out = False
-                try:
-                    exit_code = process.wait(timeout=args.timeout_sec)
-                except subprocess.TimeoutExpired:
-                    timed_out = True
-                    exit_code = None
-                    termination_result = terminate_timed_out_process(process)
-                    termination_reaped = termination_result.reaped
-                    termination_warning = termination_result.warning
+            completed = run_process_bounded(
+                run_command,
+                cwd=REPO_ROOT,
+                env=env,
+                timeout_seconds=args.timeout_sec,
+            )
+            _write_process_logs(stdout_file, stderr_file, completed.stdout, completed.stderr)
+            exit_code = completed.returncode
+        except BoundedProcessTimeout as exc:
+            timed_out = True
+            termination_reaped = exc.termination.reaped
+            termination_warning = exc.termination.warning
+            _write_process_logs(stdout_file, stderr_file, str(exc.output or ""), str(exc.stderr or ""))
         except Exception as exc:
             duration_sec = round(time.perf_counter() - started, 3)
             rows.append({

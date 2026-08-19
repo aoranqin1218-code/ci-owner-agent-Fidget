@@ -4,12 +4,11 @@ from pathlib import Path
 
 from ci_owner_agent.services.command_runner import run_command
 from ci_owner_agent.services.git_client import GitClient
-from ci_owner_agent.tools.git_tools import repo_get_diff_files, repo_get_file_content, repo_get_file_diff
 
 
 def test_git_diff_files_numstat_and_authors(repo_cache: Path, sample_repo):
     client = GitClient(repo_cache)
-    result = repo_get_diff_files(client, sample_repo["repo"], sample_repo["base"], sample_repo["head"])
+    result = client.get_diff_files(sample_repo["repo"], sample_repo["base"], sample_repo["head"])
     assert result["ok"] is True
     files = result["files"]
     assert files[0]["path"] == "packages/fxp-ai/errors/classify.ts"
@@ -20,8 +19,7 @@ def test_git_diff_files_numstat_and_authors(repo_cache: Path, sample_repo):
 
 def test_git_file_diff_and_content(repo_cache: Path, sample_repo):
     client = GitClient(repo_cache, max_output_chars=1000)
-    diff = repo_get_file_diff(
-        client,
+    diff = client.get_file_diff(
         sample_repo["repo"],
         sample_repo["base"],
         sample_repo["head"],
@@ -30,8 +28,7 @@ def test_git_file_diff_and_content(repo_cache: Path, sample_repo):
     assert diff["ok"] is True
     assert "limit = 10" in diff["diff"]
 
-    content = repo_get_file_content(
-        client,
+    content = client.get_file_content(
         sample_repo["repo"],
         sample_repo["head"],
         "packages/fxp-ai/errors/classify.ts",
@@ -45,7 +42,7 @@ def test_git_file_diff_and_content(repo_cache: Path, sample_repo):
 
 def test_git_failure_returns_structured_error(repo_cache: Path, sample_repo):
     client = GitClient(repo_cache)
-    result = repo_get_diff_files(client, sample_repo["repo"], "bad ref", sample_repo["head"])
+    result = client.get_diff_files(sample_repo["repo"], "bad ref", sample_repo["head"])
     assert result["ok"] is False
     assert "error" in result
 

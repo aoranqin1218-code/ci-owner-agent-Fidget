@@ -977,33 +977,33 @@ def test_confirmation_card_displays_truncated_note():
 
 
 def test_truncate_card_text_preserves_short_text():
-    from ci_owner_agent.services.wecom_feedback_service import _truncate_card_text
-    result = _truncate_card_text("hello", 10)
+    from ci_owner_agent.services.wecom_feedback_cards import truncate_card_text
+    result = truncate_card_text("hello", 10)
     assert result == "hello"
 
 
 def test_truncate_card_text_adds_ellipsis():
-    from ci_owner_agent.services.wecom_feedback_service import _truncate_card_text
-    result = _truncate_card_text("hello world", 6)
+    from ci_owner_agent.services.wecom_feedback_cards import truncate_card_text
+    result = truncate_card_text("hello world", 6)
     assert result == "hello…"
     assert len(result) == 6
 
 
 def test_truncate_card_text_normalizes_whitespace():
-    from ci_owner_agent.services.wecom_feedback_service import _truncate_card_text
-    result = _truncate_card_text("  hello   world  ", 20)
+    from ci_owner_agent.services.wecom_feedback_cards import truncate_card_text
+    result = truncate_card_text("  hello   world  ", 20)
     assert result == "hello world"
 
 
 def test_short_branch_removes_known_prefixes():
-    from ci_owner_agent.services.wecom_feedback_service import _short_branch
-    assert _short_branch("refs/remotes/origin/dev") == "dev"
-    assert _short_branch("refs/heads/feature/test") == "feature/test"
-    assert _short_branch("origin/release") == "release"
-    assert _short_branch("main") == "main"
+    from ci_owner_agent.services.wecom_feedback_cards import short_branch
+    assert short_branch("refs/remotes/origin/dev") == "dev"
+    assert short_branch("refs/heads/feature/test") == "feature/test"
+    assert short_branch("origin/release") == "release"
+    assert short_branch("main") == "main"
 
 
 def test_confirmation_subtitle_respects_total_limit():
-    from ci_owner_agent.services.wecom_feedback_service import _build_confirmation_subtitle
-    result = _build_confirmation_subtitle(["x" * 100, "y" * 100, "z" * 100])
+    from ci_owner_agent.services.wecom_feedback_cards import build_confirmation_subtitle
+    result = build_confirmation_subtitle(["x" * 100, "y" * 100, "z" * 100])
     assert len(result) <= 112

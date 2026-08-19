@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import logging
 import re
 from typing import Any, Protocol
@@ -188,28 +187,6 @@ def _build_prompt(text: str, *, repair: bool = False) -> list[dict[str, Any]]:
 
     parts.append({"role": "user", "content": text})
     return parts
-def _validate_decision(raw: str) -> WeComFeedbackAiDecision:
-    """Parse and validate LLM output through Pydantic."""
-    cleaned = raw.strip()
-    if cleaned.startswith("```"):
-        lines = cleaned.split("\n", 1)
-        if len(lines) > 1:
-            cleaned = lines[1]
-        else:
-            cleaned = cleaned[3:]
-        if cleaned.endswith("```"):
-            cleaned = cleaned[:-3]
-        cleaned = cleaned.strip()
-    try:
-        data = json.loads(cleaned)
-    except (json.JSONDecodeError, ValueError):
-        return _unknown_decision("\u65e0\u6cd5\u89e3\u6790\u6a21\u578b\u8f93\u51fa")
-    try:
-        return WeComFeedbackAiDecision.model_validate(data)
-    except Exception:
-        return _unknown_decision("\u6a21\u578b\u8f93\u51fa\u683c\u5f0f\u65e0\u6548")
-
-
 def _convert_decision(decision: WeComFeedbackAiDecision) -> ParsedFeedbackIntent:
     """Convert validated AI decision to ParsedFeedbackIntent with local checks."""
     if decision.intent_type == "help":

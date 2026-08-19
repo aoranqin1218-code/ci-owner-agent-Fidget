@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import json
-from typing import Any
 
 from ci_owner_agent.config import Settings, validate_model_settings
 from ci_owner_agent.schemas import ChangedFile, CommitInfo, FailureFactExtractionResult
 from ci_owner_agent.services.llm_client import build_chat_model
 from ci_owner_agent.services.metrics import llm_invoke_with_metrics
+from ci_owner_agent.services.structured_output import parse_json_object
 
 
 def extract_failure_facts_with_ai(
@@ -43,7 +43,7 @@ def extract_failure_facts_with_ai(
         model = build_chat_model(settings)
         response = llm_invoke_with_metrics(model, prompt)
         raw = str(getattr(response, "content", response))
-        data = _parse_json_object(raw)
+        data = parse_json_object(raw)
         if data is None:
             return FailureFactExtractionResult(ok=False, warning="AI failure facts invalid JSON")
         result = FailureFactExtractionResult.model_validate(data)
@@ -122,27 +122,3 @@ def _build_prompt(
         "isGenericWrapper=true, failureKind=generic_wrapper, confidence<=0.5。\n\n"
         f"输入：\n{json.dumps(payload, ensure_ascii=False)}"
     )
-
-
-def _parse_json_object(raw: str) -> dict[str, Any] | None:
-    text = raw.strip()
-    if text.startswith("```"):
-        import re
-
-        match = re.search(r"```(?:json)?\s*(.*?)\s*```", text, flags=re.S | re.I)
-        if match:
-            text = match.group(1).strip()
-    try:
-        value = json.loads(text)
-        return value if isinstance(value, dict) else None
-    except json.JSONDecodeError:
-        decoder = json.JSONDecoder()
-        for idx, char in enumerate(raw):
-            if char != "{":
-                continue
-            try:
-                value, _end = decoder.raw_decode(raw[idx:])
-            except json.JSONDecodeError:
-                continue
-            return value if isinstance(value, dict) else None
-    return None

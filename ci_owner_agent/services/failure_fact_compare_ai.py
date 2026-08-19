@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import json
-from typing import Any
 
 from ci_owner_agent.config import Settings, validate_model_settings
 from ci_owner_agent.schemas import FailureFact, FailureFactComparison
 from ci_owner_agent.services.llm_client import build_chat_model
 from ci_owner_agent.services.metrics import llm_invoke_with_metrics
+from ci_owner_agent.services.structured_output import parse_json_object
 
 
 def compare_failure_facts_with_ai(
@@ -44,7 +44,7 @@ def compare_failure_facts_with_ai(
         model = build_chat_model(settings)
         response = llm_invoke_with_metrics(model, _build_prompt(current_fact=current_fact, historical_fact=historical_fact))
         raw = str(getattr(response, "content", response))
-        data = _parse_json_object(raw)
+        data = parse_json_object(raw)
         if data is None:
             return _comparison(False, 0, "unclear", "AI failure fact comparison invalid JSON")
         comparison = FailureFactComparison.model_validate(data)
@@ -86,32 +86,6 @@ def _build_prompt(*, current_fact: FailureFact, historical_fact: FailureFact) ->
         "}\n\n"
         f"输入：\n{json.dumps(payload, ensure_ascii=False)}"
     )
-
-
-def _parse_json_object(raw: str) -> dict[str, Any] | None:
-    text = raw.strip()
-    if text.startswith("```"):
-        import re
-
-        match = re.search(r"```(?:json)?\s*(.*?)\s*```", text, flags=re.S | re.I)
-        if match:
-            text = match.group(1).strip()
-    try:
-        value = json.loads(text)
-        return value if isinstance(value, dict) else None
-    except json.JSONDecodeError:
-        decoder = json.JSONDecoder()
-        for idx, char in enumerate(raw):
-            if char != "{":
-                continue
-            try:
-                value, _end = decoder.raw_decode(raw[idx:])
-            except json.JSONDecodeError:
-                continue
-            return value if isinstance(value, dict) else None
-    return None
-
-
 def _comparison(same: bool, confidence: float, relationship: str, reason: str) -> FailureFactComparison:
     return FailureFactComparison(
         sameFailure=same,

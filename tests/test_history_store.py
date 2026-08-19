@@ -3,10 +3,11 @@ from __future__ import annotations
 from dataclasses import replace
 
 from ci_owner_agent.schemas import BuildInfo, FailureFact
-from ci_owner_agent.services.history_store import MongoHistoryStore, find_feedback_override_for_failure_signature, notice_hash
+from ci_owner_agent.services.history_store import MongoHistoryStore, notice_hash
 from ci_owner_agent.services.history_inheritance import is_no_owner_decision_item
+from ci_owner_agent.services.history_inheritance import find_feedback_override_for_failure_signature
 from ci_owner_agent.services.failure_identity import build_failure_summary_signature
-from ci_owner_agent.tools.history_tools import history_search_similar_failures
+from ci_owner_agent.services.history_search import history_search_similar_failures
 from tests.test_langchain_agent import high_confidence_payload, make_lc_context
 
 

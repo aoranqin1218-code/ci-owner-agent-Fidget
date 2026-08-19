@@ -10,11 +10,6 @@ from ci_owner_agent.orchestrator import analyze_jenkins
 from ci_owner_agent.services.git_client import GitClient
 from ci_owner_agent.services.jenkins_client import JenkinsClient
 from ci_owner_agent.services.log_provider import JenkinsLogProvider
-from ci_owner_agent.tools.jenkins_tools import (
-    jenkins_get_build_info,
-    jenkins_get_last_successful_build_info,
-    jenkins_get_latest_build_info,
-)
 
 
 class FakeResponse:
@@ -67,7 +62,7 @@ def client_for(routes: dict[str, FakeResponse]) -> JenkinsClient:
     return JenkinsClient("http://jenkins.test", user="u", token="t", session=FakeSession(routes))
 
 
-def test_jenkins_client_and_tools_extract_build_info(sample_repo):
+def test_jenkins_client_extracts_build_info(sample_repo):
     job = "services/fx-code-unittest"
     routes = {
         jenkins_url(job, "5061/api/json"): FakeResponse(build_payload(5061, "FAILURE", sample_repo["head"])),
@@ -81,16 +76,16 @@ def test_jenkins_client_and_tools_extract_build_info(sample_repo):
         ),
     }
     client = client_for(routes)
-    build = jenkins_get_build_info(client, job, 5061, 2)
+    build = client.get_build_info(job, 5061, 2)
     assert build["ok"] is True
     assert build["buildInfo"]["commit"] == sample_repo["head"]
     assert build["buildInfo"]["logTail"]["startLine"] == 2
 
-    latest = jenkins_get_latest_build_info(client, job, 1)
+    latest = client.get_latest_build_info(job, 1)
     assert latest["ok"] is True
     assert latest["buildInfo"]["buildNumber"] == 5061
 
-    last_success = jenkins_get_last_successful_build_info(client, job, "dev", 5061)
+    last_success = client.get_last_successful_build_info(job, "dev", 5061)
     assert last_success["ok"] is True
     assert last_success["successfulBuildInfo"]["commit"] == sample_repo["base"]
 
@@ -373,7 +368,7 @@ def test_cli_analyze_uses_jenkins_mode(repo_cache: Path, sample_repo, monkeypatc
 
     monkeypatch.setenv("JENKINS_URL", "http://jenkins.test")
     monkeypatch.setenv("CI_AGENT_REPO_CACHE_DIR", str(repo_cache))
-    monkeypatch.setattr("ci_owner_agent.main.JenkinsClient", FakeJenkinsClient)
+    monkeypatch.setattr("ci_owner_agent.cli.commands.JenkinsClient", FakeJenkinsClient)
     code = main(["analyze", "--job", job, "--build", "5060", "--repo", sample_repo["repo"]])
     assert code == 0
     payload = json.loads(capsys.readouterr().out)

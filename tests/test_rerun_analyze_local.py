@@ -1,13 +1,13 @@
 import argparse
 import json
-import subprocess
 import pytest
 import os
 import sys
 from pathlib import Path
 from ci_owner_agent.schemas import CiResponsibilityNotice, Owner
 from scripts import rerun_analyze_local
-from scripts.rerun_analyze_local import build_command, read_notice, terminate_timed_out_process, validate_notice, write_summaries
+from scripts._runtime import BoundedProcessTimeout, ProcessTerminationResult
+from scripts.rerun_analyze_local import build_command, read_notice, validate_notice, write_summaries
 
 FIXTURE = Path(__file__).parent / "fixtures" / "fake_analyze_launcher.py"
 
@@ -149,29 +149,23 @@ def test_rerun_timeout_reaps_process_and_returns_failure(tmp_path, monkeypatch):
     console = tmp_path / "console.log"
     console.write_text("Finished: FAILURE\n", encoding="utf-8")
     out_dir = tmp_path / "runs"
-    waits = []
 
-    class FakeProcess:
-        pid = 123
-        def wait(self, timeout=None):
-            waits.append(timeout)
-            if len(waits) == 1:
-                raise subprocess.TimeoutExpired("fake", timeout)
-            return -1
-        def poll(self):
-            return None
-        def kill(self):
-            return None
+    def timed_out(*_args, **_kwargs):
+        raise BoundedProcessTimeout(
+            ["fake"],
+            1,
+            output="partial stdout",
+            stderr="partial stderr",
+            termination=ProcessTerminationResult(True),
+        )
 
-    monkeypatch.setattr(rerun_analyze_local.subprocess, "Popen", lambda *a, **k: FakeProcess())
-    monkeypatch.setattr(rerun_analyze_local, "kill_process_tree", lambda process: None)
+    monkeypatch.setattr(rerun_analyze_local, "run_process_bounded", timed_out)
     monkeypatch.setattr(
         "sys.argv",
         ["rerun", "--runs", "1", "--timeout-sec", "1", "--repo", "fx-code", "--job", "j", "--build", "1",
          "--base-commit", "base", "--head-commit", "head", "--console-file", str(console), "--out-dir", str(out_dir)],
     )
     assert rerun_analyze_local.main() == 1
-    assert waits == [1, 5]
     rows = json.loads((out_dir / "summary.json").read_text(encoding="utf-8"))
     assert rows[0]["status"] == "TIMEOUT" and rows[0]["errorKind"] == "timeout"
     assert rows[0]["terminationReaped"] is True
@@ -179,18 +173,8 @@ def test_rerun_timeout_reaps_process_and_returns_failure(tmp_path, monkeypatch):
     assert rows[0]["noticeValidationError"] == "analysis outputs are untrusted because execution timed out"
     assert rows[0]["noticeOwner"] is None
     assert rows[0]["metricsDurationMs"] is None
-
-
-def test_timeout_termination_reports_warning_without_raising(monkeypatch):
-    class BrokenProcess:
-        def poll(self): return None
-        def wait(self, timeout=None): raise subprocess.TimeoutExpired("fake", timeout)
-        def kill(self): raise OSError("kill denied")
-    monkeypatch.setattr(rerun_analyze_local, "kill_process_tree", lambda process: (_ for _ in ()).throw(OSError("tree denied")))
-    result = terminate_timed_out_process(BrokenProcess(), grace_seconds=0.01)
-    assert result.reaped is False
-    assert "tree termination failed" in result.warning
-    assert "final reap failed" in result.warning
+    assert (out_dir / "run-01" / "stdout.log").read_text(encoding="utf-8") == "partial stdout"
+    assert (out_dir / "run-01" / "stderr.log").read_text(encoding="utf-8") == "partial stderr"
 
 
 def test_rerun_main_real_subprocess_success(tmp_path, monkeypatch):
@@ -301,11 +285,17 @@ def test_rerun_cleanup_failure_does_not_stop_next_run(tmp_path, monkeypatch):
 def test_rerun_main_preserves_unreaped_timeout(tmp_path, monkeypatch):
     console, out = tmp_path / "console.log", tmp_path / "out"
     console.write_text("Finished: FAILURE\n", encoding="utf-8")
-    class TimedOut:
-        pid = 1
-        def wait(self, timeout=None): raise subprocess.TimeoutExpired("fake", timeout)
-    monkeypatch.setattr(rerun_analyze_local.subprocess, "Popen", lambda *a, **k: TimedOut())
-    monkeypatch.setattr(rerun_analyze_local, "terminate_timed_out_process", lambda process: rerun_analyze_local.ProcessTerminationResult(False, "final reap failed"))
+
+    def timed_out(*_args, **_kwargs):
+        raise BoundedProcessTimeout(
+            ["fake"],
+            1,
+            output="",
+            stderr="",
+            termination=ProcessTerminationResult(False, "final reap failed"),
+        )
+
+    monkeypatch.setattr(rerun_analyze_local, "run_process_bounded", timed_out)
     monkeypatch.setattr("sys.argv", ["rerun", "--runs", "1", "--timeout-sec", "1", "--repo", "fx-code", "--job", "j", "--build", "1", "--base-commit", "base", "--head-commit", "head", "--console-file", str(console), "--out-dir", str(out)])
     assert rerun_analyze_local.main() == 1
     row = json.loads((out / "summary.json").read_text(encoding="utf-8"))[0]

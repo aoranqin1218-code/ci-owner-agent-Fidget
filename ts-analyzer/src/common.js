@@ -1,4 +1,3 @@
-const cp = require("child_process");
 const fs = require("fs");
 const path = require("path");
 
@@ -21,28 +20,6 @@ function loadTypescript() {
   } catch (error) {
     return { ok: false, error: `typescript package is not installed: ${error.message}` };
   }
-}
-
-function isTsFile(file) {
-  return file.endsWith(".ts") || file.endsWith(".tsx");
-}
-
-function runGit(repoPath, args) {
-  const result = cp.spawnSync("git", ["-C", repoPath, ...args], {
-    encoding: "utf8",
-    shell: false,
-    maxBuffer: 10 * 1024 * 1024
-  });
-  return {
-    ok: result.status === 0,
-    stdout: result.stdout || "",
-    stderr: result.stderr || "",
-    code: result.status
-  };
-}
-
-function gitShow(repoPath, commit, file) {
-  return runGit(repoPath, ["show", `${commit}:${file}`]);
 }
 
 function lineOf(ts, sourceFile, pos) {
@@ -104,14 +81,11 @@ function symbolKey(symbol) {
 
 module.exports = {
   createProgram,
-  gitShow,
-  isTsFile,
   lineOf,
   loadTypescript,
   normalizeFile,
   readInput,
   relativeToRepo,
   respond,
-  runGit,
   symbolKey
 };

@@ -4,7 +4,6 @@
   "private": true,
   "type": "commonjs",
   "scripts": {
-    "analyze-changed-functions": "node src/analyze_changed_functions.js",
     "find-definitions": "node src/find_definitions.js",
     "find-callers": "node src/find_callers.js"
   },

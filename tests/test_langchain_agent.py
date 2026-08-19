@@ -632,7 +632,6 @@ def test_langchain_tools_context_defaults(repo_cache, sample_repo, logs):
     assert "classifyError" in diff["diff"]
     keyword = tools["repo_keyword_search"].invoke({"keywords": ["FILE_SIZE_EXCEEDED"]})
     assert keyword["ok"] is True
-    assert "ts_analyze_changed_functions" not in tools
     assert "ts_find_definitions" in tools
     assert "ts_find_callers" in tools
     assert "check_node_dependencies_for_analysis" in tools

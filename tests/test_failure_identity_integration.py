@@ -6,7 +6,7 @@ import pytest
 
 from ci_owner_agent.schemas import BuildInfo, CiResponsibilityNotice, FailureFact
 from ci_owner_agent.services.feedback_store import FeedbackStore
-from ci_owner_agent.services.notification_formatter import notification_digest
+from ci_owner_agent.services.wecom_notification_routing import notification_digest
 from ci_owner_agent.services.responsibility_signature_enricher import enrich_responsibility_item_signatures
 from tests.test_history_store import make_store
 from tests.test_notification_formatter import item, notice_payload

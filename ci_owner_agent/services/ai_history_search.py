@@ -1,3 +1,5 @@
+"""AI-assisted, conservative history lookup for structured failure facts."""
+
 from __future__ import annotations
 
 from typing import Any

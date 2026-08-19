@@ -8,7 +8,7 @@ import pytest
 from ci_owner_agent.main import main
 from ci_owner_agent.orchestrator import analyze_local
 from ci_owner_agent.services.git_client import GitClient
-from ci_owner_agent.services.log_provider import detect_checkout_revision_from_console_log, resolve_checkout_revision_from_console_log
+from ci_owner_agent.services.log_parsing import detect_checkout_revision_from_console_log, resolve_checkout_revision_from_console_log
 
 
 def test_success_build_short_circuits(repo_cache: Path, sample_repo, logs):
@@ -270,7 +270,7 @@ def test_cli_analyze_local_accepts_last_success_build(repo_cache: Path, sample_r
         )
 
     monkeypatch.setenv("CI_AGENT_REPO_CACHE_DIR", str(repo_cache))
-    monkeypatch.setattr("ci_owner_agent.main.analyze_local", fake_analyze_local)
+    monkeypatch.setattr("ci_owner_agent.cli.commands.analyze_local", fake_analyze_local)
     code = main(
         [
             "analyze-local",
