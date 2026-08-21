@@ -104,7 +104,7 @@ class TextLogProvider(LogProvider):
         return find_focused_failure_chunks(self._lines(), tail_lines=tail_lines, max_chunks=max_chunks, max_output_chars=self.max_output_chars)
 
     def find_test_failure_summaries(self, tail_lines: int = 500, max_chunks: int = 5) -> dict:
-        focused = self.find_focused_failure_chunks(tail_lines=tail_lines, max_chunks=1)
+        focused = self.find_focused_failure_chunks(tail_lines=tail_lines, max_chunks=max_chunks)
         return build_test_failure_summaries(focused, max_chunks=max_chunks)
 
     def detect_final_status(self) -> FinalStatus:
@@ -141,11 +141,3 @@ class JenkinsLogProvider(TextLogProvider):
 
     def _lines(self) -> list[str]:
         return self._content().splitlines()
-
-    def find_focused_failure_chunks(self, tail_lines: int = 500, max_chunks: int = 3) -> dict:
-        result = super().find_focused_failure_chunks(tail_lines=tail_lines, max_chunks=max_chunks)
-        for chunk in result.get("chunks", []):
-            if chunk.get("chunkSource") in {"local_test_stage_tail", "local_make_docker_test_tail"}:
-                chunk["chunkSource"] = "jenkins_test_stage_tail"
-                chunk["stageName"] = "Test"
-        return result

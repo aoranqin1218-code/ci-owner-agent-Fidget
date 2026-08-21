@@ -10,6 +10,7 @@ from ci_owner_agent.agents.context import AgentRuntimeContext
 from ci_owner_agent.agents.langchain_agent import LangChainResponsibilityAgent
 from ci_owner_agent.agents.prompts import (
     CI_RESPONSIBILITY_NOTICE_JSON_SCHEMA_PROMPT,
+    INITIAL_INPUT_INSTRUCTION,
     LANGCHAIN_RESPONSIBILITY_AGENT_SYSTEM_PROMPT,
 )
 from ci_owner_agent.config import load_settings
@@ -955,6 +956,7 @@ def test_initial_prompt_contains_investigation_scope(repo_cache, sample_repo, lo
     assert "fullRange" in instruction
     assert "repo_get_diff_files(scope=\"full\")" in instruction
     assert "不要一开始就全量分析 fullRange" in instruction
+    assert instruction == INITIAL_INPUT_INSTRUCTION
 
 
 def test_initial_input_omits_full_log_tail_and_includes_failure_summaries(repo_cache, sample_repo, logs):

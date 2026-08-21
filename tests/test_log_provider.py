@@ -30,22 +30,22 @@ def test_resolve_final_status(text, status, detected, raw, unsupported):
 
 def provider(tmp_path, lines: list[str]) -> LocalFileLogProvider:
     path = tmp_path / "console.log"
-    path.write_text("\n".join(["[Pipeline] { (Test)", "+ make docker-test", *lines, "[Pipeline] // stage"]), encoding="utf-8")
+    path.write_text("\n".join(lines), encoding="utf-8")
     return LocalFileLogProvider(path)
 
 
-def test_mocha_failure_summary_still_extracts(tmp_path):
+def test_japa_failure_summary_extracts(tmp_path):
     result = provider(
         tmp_path,
         [
-            "1) SomeSuite should do something",
+            "✖ Some test title",
             "AssertionError: expected 1 to equal 2",
-            "    at test/server/foo.test.ts:10:5",
+            "at packages/fidget-sql/test/fooTest.ts:10:5",
         ],
     ).find_test_failure_summaries()
 
     assert result["chunks"]
-    assert result["chunks"][0]["anchorType"] == "mocha_failure_block"
+    assert result["chunks"][0]["anchorType"] == "japa_failure_block"
     assert result["chunks"][0]["signature"]["signatureKey"]
     assert result["chunks"][0]["chunkSource"] == "local_test_failure_summary"
 
@@ -75,7 +75,7 @@ def test_ts2305_docker_wrapper_no_summary_chunk(tmp_path):
     ).find_test_failure_summaries()
 
     assert result["chunks"] == []
-    assert "no Mocha/Japa failure block found" in result["warning"]
+    assert "no Japa failure block found" in result["warning"]
     assert "fatal_error_block" not in str(result)
     assert "fatal|fatal error|fatal error||" not in str(result)
 
@@ -91,5 +91,5 @@ def test_npm_etarget_docker_wrapper_no_summary_chunk(tmp_path):
     ).find_test_failure_summaries()
 
     assert result["chunks"] == []
-    assert "no Mocha/Japa failure block found" in result["warning"]
+    assert "no Japa failure block found" in result["warning"]
     assert "fatal_error_block" not in str(result)

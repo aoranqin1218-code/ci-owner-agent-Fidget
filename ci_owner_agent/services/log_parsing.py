@@ -25,7 +25,6 @@ ERROR_TERMS = [
     "error", "exception", "assertionerror", "typeerror", "referenceerror", "fail", "failed", "npm err",
     "expected", "received", "cannot read", "timeout", "stack trace",
 ]
-FAILURE_BLOCK_RE = re.compile(r"^\s*(\d+)\)\s+(.+?)\s*$")
 XFAIL_BLOCK_RE = re.compile(r"^\s*✖\s+(.+?)\s*$")
 ERROR_LINE_RE = re.compile(r"\b(AssertionError|Error|TypeError|ReferenceError):\s*(.*)")
 PATH_RE = re.compile(
@@ -125,57 +124,38 @@ def find_focused_failure_chunks(
     if not all_lines:
         return {"chunks": [], "warning": "log is empty"}
     count = max(50, tail_lines)
-    test_start = None
-    for idx, line in enumerate(all_lines):
-        if "[Pipeline] { (Test)" in line:
-            test_start = idx
-    if test_start is not None:
-        test_end = len(all_lines) - 1
-        for idx in range(test_start + 1, len(all_lines)):
-            if "[Pipeline] // stage" in all_lines[idx]:
-                test_end = idx
-                break
-        else:
-            for idx in range(test_start + 1, len(all_lines)):
-                if all_lines[idx].strip() == "[Pipeline] }":
-                    test_end = idx
-                    break
-        return {
-            "chunks": [
-                _focused_chunk(
-                    all_lines,
-                    test_start,
-                    test_end,
-                    count,
-                    max_output_chars=max_output_chars,
-                    chunk_source="local_test_stage_tail",
-                    stage_name="Test",
-                    step_name="make docker-test",
-                    anchor_type="jenkins_test_stage",
-                )
-            ][:max_chunks]
-        }
 
-    make_start = None
-    for idx, line in enumerate(all_lines):
-        if "+ make docker-test" in line:
-            make_start = idx
-    if make_start is not None:
-        return {
-            "chunks": [
-                _focused_chunk(
-                    all_lines,
-                    make_start,
-                    len(all_lines) - 1,
-                    count,
-                    max_output_chars=max_output_chars,
-                    chunk_source="local_make_docker_test_tail",
-                    stage_name="Test",
-                    step_name="make docker-test",
-                    anchor_type="make_docker_test_tail",
-                )
-            ][:max_chunks]
-        }
+    # Fidget/Japa 失败定位：直接在清洗后的日志中收集 Japa `✖` 失败行。
+    # 每行先剥 BuildKit `#N 时间戳` 前缀与 ANSI 色码，再用 Japa 失败正则命中 `✖ 标题`。
+    # 该方式同时适用于本地 `node ./bin/test_runner.mjs` 与 Jenkins BuildKit 合并单流输出，
+    # 不依赖任何特定 Stage/命令锚点。
+    clean_lines = [_semantic_log_line(line) for line in all_lines]
+    xfail_starts = [idx for idx, line in enumerate(clean_lines) if XFAIL_BLOCK_RE.match(line)]
+    if xfail_starts:
+        chunks = []
+        for chunk_index, start in enumerate(xfail_starts[: max(1, max_chunks)]):
+            block_end = start
+            for idx in range(start + 1, len(clean_lines)):
+                if XFAIL_BLOCK_RE.match(clean_lines[idx]):
+                    break
+                block_end = idx
+            # 收敛失败块：到下一个失败行前或日志尾部。后续包装 footer
+            # 会在摘要阶段裁掉，不能在这里硬截断，否则可能丢失失败块末尾
+            # 的错误消息和 packages/<package>/test 路径。
+            chunk = _focused_chunk(
+                all_lines,
+                start,
+                block_end,
+                count,
+                max_output_chars=max_output_chars,
+                chunk_source="japa_failure_block",
+                stage_name="Unit Tests",
+                step_name="test_runner",
+                anchor_type="japa_failure_block",
+            )
+            chunk["chunkIndex"] = chunk_index
+            chunks.append(chunk)
+        return {"chunks": chunks[:max_chunks]}
 
     start = max(0, len(all_lines) - count)
     content, truncated = truncate_tail_text("\n".join(all_lines[start:]), max_output_chars)
@@ -195,7 +175,7 @@ def find_focused_failure_chunks(
                 "truncated": truncated or start > 0,
             }
         ][:max_chunks],
-        "warning": "focused Test stage and make docker-test anchors unavailable; returned console tail fallback",
+        "warning": "no Japa failure block found; returned console tail fallback",
     }
 
 
@@ -209,7 +189,7 @@ def find_test_failure_summaries(
     focused = find_focused_failure_chunks(
         all_lines,
         tail_lines=tail_lines,
-        max_chunks=1,
+        max_chunks=max_chunks,
         max_output_chars=max_output_chars,
     )
     return build_test_failure_summaries(focused, max_chunks=max_chunks)
@@ -219,44 +199,37 @@ def build_test_failure_summaries(focused: dict, *, max_chunks: int = 5) -> dict:
     focused_chunks = focused.get("chunks", [])
     if not focused_chunks:
         return {"chunks": [], "warning": "focused failure chunks unavailable"}
-    focused_chunk = focused_chunks[0]
-    focused_source = focused_chunk.get("chunkSource")
-    if focused_source == "local_console_tail_fallback":
-        return {"chunks": [], "warning": "test failure summaries unavailable; focused chunk is console tail fallback"}
-    lines = [_semantic_log_line(line) for line in str(focused_chunk.get("content") or "").splitlines()]
-    chunk_source = _summary_source_for_focused_source(str(focused_source or ""))
-    starts = [idx for idx, line in enumerate(lines) if FAILURE_BLOCK_RE.match(line)]
-    if starts:
-        return {
-            "chunks": _build_summary_chunks(
-                lines=lines,
-                starts=starts,
-                max_chunks=max_chunks,
-                focused_chunk=focused_chunk,
-                chunk_source=chunk_source,
-                anchor_type="mocha_failure_block",
-                signature_extractor=_extract_failure_signature,
-                score=1.0,
-            )
-        }
-    xfail_starts = [idx for idx, line in enumerate(lines) if XFAIL_BLOCK_RE.match(line) and "ERROR:" not in line]
-    if xfail_starts:
-        return {
-            "chunks": _build_summary_chunks(
-                lines=lines,
-                starts=xfail_starts,
-                max_chunks=max_chunks,
-                focused_chunk=focused_chunk,
-                chunk_source=chunk_source,
-                anchor_type="japa_failure_block",
-                signature_extractor=_extract_xfail_signature,
-                score=0.9,
-            )
-        }
-    # Docker, BuildKit, Jenkins, and shell wrapper errors are not stable enough
-    # for deterministic historical inheritance.  Only structured Mocha/Japa
-    # blocks are currently eligible; other failures remain current-log evidence.
-    return {"chunks": [], "warning": "test failure summaries unavailable; no Mocha/Japa failure block found; history similarity skipped"}
+    chunks = []
+    for focused_chunk in focused_chunks:
+        if focused_chunk.get("chunkSource") == "local_console_tail_fallback":
+            continue
+        lines = [_semantic_log_line(line) for line in str(focused_chunk.get("content") or "").splitlines()]
+        xfail_starts = [idx for idx, line in enumerate(lines) if XFAIL_BLOCK_RE.match(line) and "ERROR:" not in line]
+        if not xfail_starts:
+            continue
+        built = _build_summary_chunks(
+            lines=lines,
+            starts=xfail_starts,
+            max_chunks=max_chunks - len(chunks),
+            focused_chunk=focused_chunk,
+            chunk_source="local_test_failure_summary",
+            anchor_type="japa_failure_block",
+            signature_extractor=_extract_xfail_signature,
+            score=0.9,
+        )
+        for chunk in built:
+            chunk["chunkIndex"] = len(chunks)
+            chunks.append(chunk)
+            if len(chunks) >= max_chunks:
+                break
+        if len(chunks) >= max_chunks:
+            break
+    if chunks:
+        return {"chunks": chunks}
+    # Docker, BuildKit, Jenkins, shell, typecheck, and lint failures are not
+    # stable enough for deterministic historical inheritance.  They remain
+    # current-build evidence and must be handled by the Agent when needed.
+    return {"chunks": [], "warning": "test failure summaries unavailable; no Japa failure block found; history similarity skipped"}
 
 
 def _focused_chunk(all_lines: list[str], start_idx: int, end_idx: int, tail_lines: int, *, max_output_chars: int, chunk_source: str, stage_name: str | None, step_name: str | None, anchor_type: str) -> dict:
@@ -288,16 +261,6 @@ def _summary_chunk(*, chunk_index: int, lines: list[str], start: int, end: int, 
     return {"chunkIndex": chunk_index, "schemaVersion": 3, "chunkSource": chunk_source, "stageName": focused_chunk.get("stageName"), "stepName": focused_chunk.get("stepName"), "anchorType": anchor_type, "startLine": start_line, "endLine": end_line, "score": score, "content": content, "truncated": truncated, "signature": signature, "signatureHash": _signature_hash(signature)}
 
 
-def _summary_source_for_focused_source(source: str) -> str:
-    if source == "local_make_docker_test_tail":
-        return "local_make_docker_test_failure_summary"
-    if source == "jenkins_test_stage_tail":
-        return "jenkins_test_failure_summary"
-    if source == "jenkins_failed_stage_log":
-        return "jenkins_failed_stage_failure_summary"
-    return "local_test_failure_summary"
-
-
 def _strip_docker_log_prefix(line: str) -> str:
     match = re.match(r"^#\d+\s+(?:\d+(?:\.\d+)?\s+)?(.*)$", line)
     return match.group(1) if match else line
@@ -312,37 +275,6 @@ def _trim_failure_block_end(lines: list[str], start: int, end: int) -> int:
         if any(lines[idx].strip().startswith(term) for term in FOOTER_TERMS):
             return idx
     return end
-
-
-def _extract_failure_signature(content: str) -> dict:
-    from ci_owner_agent.services.failure_identity import build_responsibility_signature
-
-    lines = content.splitlines()
-    first = FAILURE_BLOCK_RE.match(lines[0] if lines else "")
-    title = first.group(2).strip() if first else ""
-    test_name, test_case = _split_test_title(title)
-    for line in lines[1:]:
-        stripped = line.strip()
-        if not stripped:
-            continue
-        if ERROR_LINE_RE.search(stripped):
-            break
-        if not stripped.startswith(("at ", "+", "-", "expected", "actual")):
-            test_case = test_case or stripped.rstrip(":")
-            break
-    error_type = None
-    error_message = ""
-    for line in lines:
-        match = ERROR_LINE_RE.search(line)
-        if match:
-            error_type, error_message = match.group(1), match.group(2).strip()
-            break
-    files = _extract_stack_paths(lines)
-    test_file = next((path for path in files if path.startswith("test/") or "/test/" in path), None)
-    top_stack_file = files[0] if files else None
-    normalized_error = _stable_error_message(error_message)
-    signature_key = build_responsibility_signature(failure_title=" ".join(part for part in (test_name, test_case) if part), failure_summary="\n".join((content, normalized_error)), existing_signature="|".join([test_name or "", test_case or "", error_type or "", normalized_error, test_file or "", top_stack_file or ""]), error_type=error_type, test_file_path=test_file, failure_file_path=top_stack_file)
-    return {"testName": test_name, "testCase": test_case, "errorType": error_type, "errorMessage": normalized_error, "testFile": test_file, "topStackFile": top_stack_file, "businessStackFiles": files, "signatureKey": signature_key}
 
 
 def _extract_xfail_signature(content: str) -> dict:
@@ -391,14 +323,6 @@ def _first_meaningful_error_line(lines: list[str]) -> str | None:
         if stripped and not stripped.startswith(("at ", "+", "-")):
             return stripped
     return None
-
-
-def _split_test_title(title: str) -> tuple[str, str | None]:
-    cleaned = title.strip().rstrip(":")
-    parts = cleaned.split(maxsplit=1)
-    if len(parts) == 2 and (parts[0].endswith("Test") or parts[0].endswith("Spec")):
-        return parts[0], parts[1].rstrip(":")
-    return cleaned, None
 
 
 def _clean_stack_path(path: str) -> str:

@@ -13,9 +13,14 @@ ts-analyzer/node_modules/
 .idea/
 runs/
 bugs.txt
-samples/test_logs/
 .gitconfig
 Prompt.md
 evaluation/
 python_test_out.txt
 run-codex-silver-batch.ps1
+PROJECT_OVERVIEW.md
+Fidget 单元_连接_集成测试 CI 与失败通知平台化方案评审.md
+Fidget-单元_集成测试通知优化
+samples
+.trellis
+.claude

@@ -2,6 +2,8 @@
 
 CI Owner Agent 是一个用于分析 Jenkins / CI 构建失败并生成结构化责任判断通知的 Python 项目。
 
+它在接收 Jenkins / 本地 console log 时，按失败类型识别结构化失败块并生成指纹：原生支持 Mocha（`1)` 失败编号）与 Japa（`✖` 失败符号）两类测试运行器输出，覆盖 fx-code 的一期场景与 fidget 的二期场景，并清洗 Docker/BuildKit 行前缀与 ANSI 色码，使同一套失败定位逻辑同时适用于本地测试与 Jenkins BuildKit 合并单流输出。
+
 它不会简单地把失败归给“最后一次提交人”，而是综合构建状态、可信 checkout SHA、Git 提交与 diff、失败日志、历史失败、人工反馈和可选 LLM 工具调用，判断失败属于：
 
 - 当前构建新引入的问题；
@@ -82,7 +84,7 @@ Agent 应先调查 `focusRange`。只有证据不足或窄范围读取失败时�
 
 1. **可信构建信息**：状态、逻辑分支、构建号、构建链接和 checkout SHA。
 2. **Git 上下文**：commit 区间、changed files、文件 diff 和作者信息。
-3. **确定性失败摘要**：测试失败、Make / Docker 测试失败、TypeScript 编译错误等聚焦片段。
+3. **确定性失败摘要**：在清洗后日志中定位结构化失败块——Japa `✖` 失败行或 Mocha `N)` 失败块——并生成稳定指纹；Make / Docker 测试失败、TypeScript 编译错误等聚焦片段。
 4. **AI failure facts**：确定性摘要不足时，从非结构化日志提取真实内层失败事实。
 5. **历史失败查询**：按签名、结构和可选 AI semantic comparison 查找历史相似失败。
 6. **人工反馈**：确认、修正、标记偶发或标记无责任人的 active feedback。
@@ -163,6 +165,9 @@ pyproject.toml                    # Python 依赖和可选 extras
 | `services/history_search.py`            | 基于稳定失败摘要的确定性历史查询与责任继承决策。                               |
 | `services/ai_history_search.py`         | 基于 AI failure facts 的保守历史语义比对与继承预检。                           |
 | `services/history_no_owner.py`          | 历史无责任人结论的选择、信任校验、强证据回退与严格 notice 构造。              |
+| `services/log_parsing.py`              | 失败定位与摘要提取：清洗 BuildKit/ANSI 前缀后按 Japa `✖` / Mocha `N)` 识别失败块并生成指纹。 |
+| `agents/initial_input.py`              | 构造发给 LangChain Agent 的纯首轮输入 payload。                                |
+| `agents/notice_parser.py`              | 对模型输出进行严格、无副作用的 notice 解析与修复。                             |
 | `services/wecom_notice_service.py`      | CI notice 的格式化、去重、投递与通知失败隔离。                                 |
 | `services/wecom_feedback_service.py`    | 企业微信反馈的权限、确认状态机、幂等和反馈落库。                               |
 | `services/wecom_feedback_cards.py`      | 企业微信确认/状态卡片的纯渲染、字段限制和状态文案。                             |

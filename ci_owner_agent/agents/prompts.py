@@ -89,6 +89,43 @@ no_high_confidence_owner / unknown 必须输出 null。
 """
 
 
+INITIAL_INPUT_INSTRUCTION = (
+    "必须基于工具证据。证据不足输出 no_high_confidence_owner。最终只输出 JSON。"
+    "如需更多 changed files 或 commits，请调用 repo_get_diff_files / repo_get_commits_between。"
+    "当前 Agent 正常只处理 FAILURE / UNSTABLE / UNKNOWN；SUCCESS / ABORTED 已由 orchestrator 处理。"
+    "investigationScope 描述调查范围：fullRange 是 lastSuccessfulBuild -> currentBuild，focusRange 是 previousBuild -> currentBuild。"
+    "当前初始 changedFiles/commits 来自 initialDiffScope，首次出现 failure 必须优先基于 focusRange 分析。"
+    "只有 focusRange 无法解释当前失败，才允许调用 repo_get_diff_files(scope=\"full\") / repo_get_commits_between(scope=\"full\") / repo_get_file_diff(scope=\"full\") 扩大到 fullRange。"
+    "如果调用 fullRange，必须在 reason/evidence 中说明 focusRange 证据不足的原因；不要一开始就全量分析 fullRange。"
+    "如果 focusRange 和 fullRange 都没有直接证据，输出 no_high_confidence_owner。"
+    "仅凭 fullRange 中某个可疑提交，不能 high_confidence 定责，除非能和失败日志直接关联。"
+    "failureSummaries 是当前构建最重要的失败摘要；如果存在，优先基于它判断失败测试名、错误类型、测试文件和栈。"
+    "不要默认读取 log tail；只有 failureSummaries/failureFacts 不足、需要原文证据、或需要验证关键词/文件路径/测试名时，才调用日志工具。"
+    "failureFacts 是 AI 从非结构化日志中提取的内层失败事实；如果 failureSummaries 为空但 failureFacts 非空，"
+    "优先基于 failureFacts + log/diff 工具判断当前责任。Docker/Jenkins/BuildKit/shell wrapper 不能单独作为责任依据。"
+    "failureFacts 来自构建日志中的内层失败事实；如果基于 failureFacts 输出 evidence，对应 evidence.type 应优先使用 \"log\"，"
+    "不要使用 \"build_info\"；build_info 只用于 metadata / Jenkins build metadata，不用于具体错误证据。"
+    "high_confidence current_build_owner 必须至少包含一个 log evidence 和一个 diff / keyword_match / ts_symbol evidence。"
+    "如果 failureFacts[*].historyEligible=false 或 isGenericWrapper=true，不得基于它输出 inherited_failure_owner。"
+    "如果 responsibilityItems 对应某个 failureFact，failureSignature 优先使用 failureFact.signatureKey，便于后续历史事实比对。"
+    "当前版本 AI failureFacts 只辅助当前 build 定责，不代表历史继承结论。"
+    "aiHistoryPrecheck 是 AI failure facts 历史语义比对结果。"
+    "只有 aiHistoryPrecheck.currentFacts[*].inheritedOwner.found=true，且 matchType=\"ai_fact_semantic\"，"
+    "且 relationship=\"same_root_cause\"，才允许基于 AI facts 输出 inherited_failure_owner。"
+    "输出 inherited_failure_owner 时，responsibilityType=\"inherited_failure_owner\"，owner.type=\"inherited_failure_owner\"，"
+    "owner.name/email/commit 使用 inheritedOwner 中的 ownerName/ownerEmail/ownerCommit，owner.confidence 使用 inheritedOwner.confidence，"
+    "sourceBuildNumber/sourceBuildUrl 使用 inheritedOwner.sourceBuildNumber/sourceBuildUrl，matchType=\"ai_fact_semantic\"，"
+    "relationship=\"same_root_cause\"，failureSignature 使用当前 currentFact.signatureKey。"
+    "如果 aiHistoryPrecheck 没有 inheritedOwner.found=true，不得因为 historical facts 存在就继承。"
+    "如果 currentFact.blockedReason 存在，不得继承；如果 feedbackOverride 是 mark_flaky 或 mark_no_owner，不得继承。"
+    "Docker/Jenkins/BuildKit/shell wrapper 永远不能作为历史继承依据。"
+    "deterministic historyPrecheck 和 aiHistoryPrecheck 都存在时，优先使用 deterministic historyPrecheck；"
+    "AI history 只用于非结构化 failure facts；Japa 结构化失败优先走 deterministic history。"
+    "如需更多日志，再调用 log_read_range / log_search / log_find_error_chunks / log_read_tail。"
+    "不要仅凭 changedFiles 或 package.json 依赖升级输出 high_confidence。"
+)
+
+
 LANGCHAIN_RESPONSIBILITY_AGENT_SYSTEM_PROMPT = f"""你是 CI 测试失败自动定责 Agent。
 
 你只能基于工具返回的证据判断责任人，禁止编造文件、commit、作者、构建链接、测试名、调用关系。

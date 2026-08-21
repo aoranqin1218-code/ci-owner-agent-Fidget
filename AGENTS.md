@@ -3,19 +3,20 @@
 ## 适用范围与事实来源
 
 - 本文件适用于整个仓库。后续判断应同时参考当前用户要求、源码与测试、`README.md`，以及下列两篇飞书文档：
-  - 项目介绍：<https://fanruan-x.feishu.cn/wiki/WynLw41XZiV8zykRwYwcrEJhnQb>
-  - 部署维护手册：<https://fanruan-x.feishu.cn/wiki/SJwHwOOK3iTsmUkp7jac2xVenzc>
+
+  - 项目介绍：[https://fanruan-x.feishu.cn/wiki/WynLw41XZiV8zykRwYwcrEJhnQb](https://fanruan-x.feishu.cn/wiki/WynLw41XZiV8zykRwYwcrEJhnQb)
+  - 部署维护手册：[https://fanruan-x.feishu.cn/wiki/SJwHwOOK3iTsmUkp7jac2xVenzc](https://fanruan-x.feishu.cn/wiki/SJwHwOOK3iTsmUkp7jac2xVenzc)
 - 二期迁移还应参考最新需求文档：
-  - Fidget 单元/集成测试通知优化：<https://fanruan-x.feishu.cn/wiki/N8rNwNR2dihxCzkEf8xclopsnng>
+
+  - Fidget 单元/集成测试通知优化：[https://fanruan-x.feishu.cn/wiki/N8rNwNR2dihxCzkEf8xclopsnng](https://fanruan-x.feishu.cn/wiki/N8rNwNR2dihxCzkEf8xclopsnng)
 - 产品目标和业务取舍以项目介绍为背景；当前行为以工作区源码和测试为准；使用与架构说明以当前 `README.md` 为准；生产巡检、发布和恢复以部署维护手册为准。
 - 最新需求文档定义二期迁移方向，但不等于其中能力已经实现。涉及 fxp-fidget、简道云 Jenkins、飞书通知、自动治理或新的外部环境时，必须以当前源码、配置和验证结果确认实现状态，不得把规划写成现状。
 - 文档与代码不一致时，不要静默猜测。先用源码、测试、配置和只读运行结果确认现状，再说明差异并决定是否同步文档。
-- `main` 是当前生产维护分支。`dev` 是已暂停的 Agent 架构实验分支，`refactor` 是未完成的通用化重构分支；不得把后两者部署到生产，也不要把其中行为当作当前能力。
 - Git 分支与业务分析分支是两个概念。例如生产发布 `main` 不代表周报统计参数应自动从 `dev` 改为 `main`。
 
 ## 项目目标
 
-本项目分析 Jenkins/CI 构建失败，输出可审计的结构化责任判断，并结合 MongoDB 历史、企业微信通知与反馈、测试文件失败统计和周报，提高 fx-code 测试失败的可见性、归属明确度与治理效率。二期将这套能力迁移并扩展到 fxp-fidget，同时把仓库、Jenkins 来源、测试体系和通知渠道逐步抽象为可扩展边界，而不是复制一套 Fidget 专用实现。
+本项目分析 Jenkins/CI 构建失败，输出可审计的结构化责任判断，并结合 MongoDB 历史、企业微信通知与反馈、测试文件失败统计和周报，提高 fx-code 测试失败的可见性、归属明确度与治理效率。二期把一期已经验证的分析、历史、责任判断、通知和反馈流程迁移到 fxp-fidget，只针对 Fidget 仓库、Jenkins 日志和飞书渠道的实际差异做必要修改。飞书作为新增通知媒介，最终业务效果应尽量与企业微信一致；本期仍不建设面向任意仓库、Jenkins、测试体系或通知渠道的通用平台。
 
 核心原则不是“必须找到人”，而是“只在证据足够时找到正确的人”。不得简单把失败归给最后提交者；证据不足、环境或 Pipeline 问题、偶发问题都应明确输出“无高可信责任人”。
 
@@ -23,19 +24,20 @@
 
 ### 迁移范围与现状边界
 
+- 二期最终交付聚焦两项：分析 Fidget 单元测试结果（以 Jenkins 构建日志为主要输入），输出失败原因及证据充分时的责任判断；新增飞书渠道，承接与一期企业微信尽量一致的通知、人员触达和反馈闭环。
 - 二期目标仓库是 Bitbucket 项目 `FX/fxp-fidget`（工程名 `@fx/fidget`），它是数据引擎框架，为表单和其他业务对象提供统一数据访问层与多种存储引擎支持。
 - 目标 Jenkins 位于 `https://jenkins.jdydevelop.com/`，需求文档给出的流水线是 `npm/fxp-fidget/fidget-build`。它与一期 fx-code 的 Jenkins、仓库缓存、凭据和运行环境是不同外部系统；迁移时分别配置、验证和审计，不得覆盖一期配置或复用人工开发工作区。
-- 当前源码已经具备 Mocha/Japa 失败块解析、Git 责任窗口、MongoDB 历史、测试维护人路由、企业微信通知与反馈等可复用能力；是否已支持某个 Fidget job、飞书渠道或自动治理必须由代码和测试证明。
+- 当前源码已经具备 Fidget/Japa 失败块解析、Git 责任窗口、MongoDB 历史、测试维护人路由、企业微信通知与反馈等可复用能力；是否已支持某个 Fidget job、飞书渠道或自动治理必须由代码和测试证明。
+- 复用现有服务边界和严格 notice schema，但只为 Fidget 的实际差异做必要修改。不要为了潜在的第三个项目预先引入项目注册中心、通用 Project Profile、任意测试框架适配器或通用通知总线。
 - 一期生产部署手册仍是当前生产运维基线。二期未形成并评审新的部署配置、回退点、凭据方案和运行手册前，不得直接把 Fidget 迁移结果按一期路径部署为生产任务。
 
-### Fidget 工程与质量门禁
+### Fidget 工程背景与本期分析范围
 
 - Fidget 是 npm workspace 多包工程，包含 `fidget-core`、`fidget-lake`、`fidget-mongo`、`fidget-postgres`、`fidget-sql`、`fidget-sdk`。解析路径、模块名和测试身份时要兼容 workspace/package 维度，不能沿用 fx-code 的目录假设。
-- 质量检查是 CI 必跑门禁：`npm run typecheck`、`npm run lint`、`npm run lint:test`。这三类失败应与测试失败区分，提取最内层 TypeScript/Lint 事实，不能误标为测试用例责任。
+- 本期实现和验收聚焦 Fidget 单元测试失败。质量检查 `npm run typecheck`、`npm run lint`、`npm run lint:test` 仍是 CI 背景；日志命中这些阶段时要与单元测试失败区分，不能误标为测试用例责任，但本期不要求建设完整的 TypeScript/Lint 通用分析器。
 - 单元测试使用 Japa，覆盖率使用 c8。单元测试位于 `packages/*/test/**/*Test.ts`，入口包括 `npm run test`、`npm run test:coverage` 和 `npm run lint:test`。
 - 单元测试要求 6 个 package 全部通过；100% 覆盖率目标适用于 `fidget-core`、`fidget-lake`、`fidget-mongo`、`fidget-postgres`、`fidget-sql`，需求文档未把 `fidget-sdk` 列入该覆盖率集合。不要擅自扩大或缩小口径。
-- Connection 测试覆盖 `fidget-mongo`、`fidget-postgres`、`fidget-lake`，依赖真实数据库环境；相关命令分别为各 workspace 的 `test:connection`。外部数据库不可用、版本不兼容或连接失败时优先判断为环境/基础设施问题，不得直接归责代码提交者。
-- 集成测试位于 `packages/fidget-sdk/test/integration`，覆盖 select、insert、update、delete、upsert、bulk 六类业务元语和 shadow 测试。统计、通知和历史身份应保留具体类别、package 与测试文件。
+- Connection 测试和 `packages/fidget-sdk/test/integration` 集成测试属于需求文档背景，不在当前两项交付范围内；只有后续用户明确扩展范围时才接入。日志若包含外部数据库不可用、版本不兼容或连接失败证据，优先判断为环境/基础设施问题，不得直接归责代码提交者。
 - 本地参考环境为 MongoDB 4.2+、PostgreSQL 18+，但需求文档明确提示 SELECT 集成测试可能报错；测试环境使用 MongoDB 4.2+ 和 Protonbase。连接信息属于外部凭据，只能从授权配置或技术支持获取，不得写入仓库、日志或提示词。
 
 ### 二期责任路由与治理原则
@@ -43,17 +45,18 @@
 - “总是能找到人”应解释为“总能给出可执行的处理路径”，不能降低高可信责任人的证据门槛：有可信 checkout、责任窗口、失败事实和相关 diff 时可指向引入提交者；证据不足时保持 `no_high_confidence_owner`，再按明确映射通知待确认 Maintainer。
 - Maintainer 是处置/关注路由，不等于根因责任人。通知、schema、MongoDB 和反馈中必须区分 causal owner、待确认维护者以及兜底通知对象，不能为了满足 @ 人需求篡改责任结论。
 - Git、历史、通知和统计身份至少按 `repo + job + branch` 隔离。接入多个 Jenkins 实例前还要审计 Jenkins 实例标识是否需要进入缓存、去重键和持久化身份，避免不同系统的同名 job 混用。
-- 持续记录失败用例和文件的次数、频率、连续失败及维护人反馈，为周报和治理提供依据。阈值必须配置化、可审计，并区分代码失败、偶发失败和环境失败。
-- “达到频率后强制关闭并要求重构”属于会影响上游 CI/代码的治理动作。默认先报告、告警和人工确认；未经明确规则、责任方批准、回退方案和真实环境验证，不得自动禁用测试、关闭任务或修改上游仓库。
+- 自动治理、按频率关闭测试和 Fidget 周报不属于本期交付。飞书反馈闭环属于二期范围，应优先复用一期反馈 operation、历史修正、幂等和持久化语义；只有飞书身份、消息和交互能力确实不同时才增加渠道专用实现。
 - Fidget 可能一次产生大量失败项。通知必须优先保证根因、责任类型、关键证据和处理入口可读；按渠道的 UTF-8 字节/卡片限制做整体预算、摘要、分组或下钻，不能简单丢弃未展示失败。
 
-### 扩展与上线约束
+### 本期实现与上线约束
 
-- 仓库接入应通过配置/适配层表达 fx-code、fxp-fidget 及后续工程差异；通知节点也应允许企业微信、飞书等扩展。不得在核心编排中散落仓库名、Jenkins URL、package 列表或渠道专用判断。
-- 企业微信是当前已验证渠道；飞书是二期扩展方向，在实现发送、@ 映射、字节/卡片限制、去重、失败降级和测试覆盖前，不得宣称已支持。
+- Fidget 仓库路径、Jenkins URL/job 和单元测试特征应集中在明确的配置或 Fidget 边界中，不能散落在核心编排里；但不要求把它们抽象为支持任意项目的通用框架。
+- 企业微信是一期当前已验证渠道，既有能力继续保持兼容；二期新增飞书渠道。可以在确有重复时提取通知与反馈的共享业务逻辑，但不要求预先重构全部企微实现或建设支持任意渠道的通用分发框架。
+- 飞书最终效果原则上与企微一致，包括分析结果展示、责任人/维护人触达、消息长度控制、去重、失败降级、反馈提交与历史修正闭环。飞书 API 能力与企微不完全一致时，追求业务结果一致，不强求卡片外观或交互形式逐像素一致。
+- 飞书发送、用户身份映射与 @、互动消息/卡片、反馈回写、幂等和测试覆盖完成并经过真实环境验证前，不得宣称已经达到企微同等效果。
 - 二期生产模型必须使用获准的国产模型服务，例如火山方舟或通义千问等；保持 OpenAI-compatible/模型客户端边界，不把供应商密钥、模型名或 URL 硬编码进业务逻辑。
-- 本地应先跑通 Fidget 的质量检查、单元测试、Connection 测试和集成测试，再接入 Jenkins 在线分析。真实数据库测试和 CI 验收要避免与正在运行的任务争用环境或相互污染。
-- 最终交付包括方案设计文档、测试/验收证据、实际 CI 接入以及一段时间的运行维护记录；每周至少进行一次进度汇报、评审或演示。文档中的“两到三周”是项目节奏参考，不应转化为代码中的硬期限。
+- 验证顺序收敛为：Fidget 日志样本离线回放 -> 本地 Fidget 单元测试日志 -> Jenkins 单构建在线分析（不通知）-> 飞书 dry-run -> 测试群真实发送与 @ 验证 -> 飞书反馈闭环验证 -> 目标群/生产配置评审。Connection/集成测试不再作为本期上线前置门禁。
+- 最终交付包括精简方案、Fidget 日志分析测试/验收证据、实际 Jenkins 接入、飞书测试群与目标群投递证据，以及必要的部署/回退说明。文档中的“两到三周”只是原需求节奏参考，不应转化为代码中的硬期限。
 
 ## 不可破坏的业务不变量
 
@@ -62,7 +65,7 @@
 - 保留完整责任窗口 `fullRange = last successful commit -> current head`；有上一构建 commit 时可先查更窄的 `focusRange`，但不得丢失完整窗口语义。
 - `SUCCESS` 直接生成成功 notice；`ABORTED` 默认无责任人；`FAILURE`、`UNSTABLE`、`UNKNOWN` 才进入失败分析。不能只靠进程退出码判断分析有效性，必须校验 notice 内容与 schema。
 - 优先提取最内层失败事实。Docker、BuildKit、Jenkins、shell、Make 等外层 wrapper 不能在存在内层证据时充当根因。
-- 确定性历史继承只使用足够稳定的结构化测试失败摘要（当前主要为 Mocha/Japa 类失败块）。非结构化失败通过可选 AI failure facts 处理；generic wrapper 或低置信事实不得形成历史继承。
+- 确定性历史继承只使用足够稳定的结构化测试失败摘要（当前为 Fidget/Japa 失败块）。非结构化失败通过可选 AI failure facts 处理；generic wrapper 或低置信事实不得形成历史继承。
 - 历史责任继承必须能追溯到更早的可信构建和匹配失败项；人工反馈可确认、修正或阻断继承。跨 `repo + job + branch` 的记录不得混用。
 - 对外 JSON 使用 `schemas.py` 中的严格 Pydantic 模型（`extra="forbid"`）。新增或修改责任字段时，保持构建级 owner、`responsibilityItems`、`hasHighConfidenceOwner` 和历史来源字段一致；不一致时应保守降级。
 - 通知是 notice 的下游副作用，通知失败不得覆盖或破坏已生成的 notice。Webhook 直发与 Bot Outbox 是两条不同链路，不能混淆其依赖、去重和重试语义。
@@ -123,7 +126,6 @@
   python -m compileall ci_owner_agent scripts tests
   python -m pytest -q
   ```
-
 - 仅文档变更可不跑全量测试，但必须检查链接、命令、文件名与当前源码一致，并审阅 `git diff --check` 和目标文件 diff。
 - 改动 `ts-analyzer/` 时至少对变更的 JS 执行 `node --check`；依赖验证使用锁文件与 `npm ci`，不要无故重写 `package-lock.json`。
 - 外部集成验证遵循：fake/local -> 真实模型但不通知 -> Jenkins 单构建 -> MongoDB/周报 dry-run -> 通知 dry-run -> 测试群真实发送 -> 定时任务/生产链路。
