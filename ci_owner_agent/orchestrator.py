@@ -24,6 +24,7 @@ from ci_owner_agent.services.ai_history_search import (
     history_search_similar_failure_facts,
 )
 from ci_owner_agent.services.branch_normalization import normalize_branch_name
+from ci_owner_agent.services.coverage_responsibility import reconcile_coverage_responsibilities
 from ci_owner_agent.services.failure_fact_ai import extract_failure_facts_with_ai
 from ci_owner_agent.services.git_client import GitClient
 from ci_owner_agent.services.history_no_owner import (
@@ -55,6 +56,26 @@ from ci_owner_agent.services.scorer import no_owner, validate_notice
 def _metrics_stage(name: str) -> ContextManager[None]:
     recorder = current_metrics_recorder()
     return recorder.stage(name) if recorder is not None else nullcontext()
+
+
+def _is_coverage_only_failures(failure_summaries: dict | None) -> bool:
+    """failure_summaries 是否仅含 coverage 失败块（且至少有一个 coverage 块）。
+
+    coverage-only 分支判断：有 coverage chunk、且没有任何 Japa 等非 coverage chunk 时为 True。
+    空摘要（无任何 chunk）不算 coverage-only，走原 agent 流程。
+    """
+    if not isinstance(failure_summaries, dict):
+        return False
+    chunks = failure_summaries.get("chunks") or []
+    if not chunks:
+        return False
+    has_coverage = any(
+        isinstance(c, dict) and c.get("anchorType") == "coverage_failure_block" for c in chunks
+    )
+    has_other = any(
+        isinstance(c, dict) and c.get("anchorType") != "coverage_failure_block" for c in chunks
+    )
+    return has_coverage and not has_other
 
 
 def _restore_authoritative_build_metadata(
@@ -317,25 +338,45 @@ def analyze_failed_build(
             history_store=history_store,
         )
         return notice
-    try:
-        with _metrics_stage("agentAnalyze"):
-            agent = create_responsibility_agent(settings, runtime_context)
-            if isinstance(agent, LangChainResponsibilityAgent):
-                notice = agent.analyze()
-            else:
-                notice = agent.analyze(context)
-    except AgentConfigurationError as exc:
-        return failure_without_context(build_info, base_commit, f"LLM 配置错误：{exc}", repo=repo)
-    notice = _restore_authoritative_build_metadata(
-        notice,
-        repo=repo,
-        build_info=build_info,
-        base_commit=base_commit,
-        head_commit=head_commit,
-    )
-    if sync_warning is not None:
-        notice.evidence.append(sync_warning)
-    notice = validate_notice(notice)
+    # Fidget 二期（方案 X）：仅存在覆盖率门槛失败（无 Japa 测试失败）时，跳过责任分析
+    # Agent，直接走确定性 coverage reconciler 生成 notice。
+    if _is_coverage_only_failures(runtime_context.failure_summaries):
+        # coverage-only：coverage 责任项完全由确定性 reconciler 生成，不调 LLM。
+        notice = CiResponsibilityNotice(
+            repo=repo,
+            job=build_info.job,
+            buildNumber=build_info.buildNumber,
+            buildUrl=build_info.buildUrl,
+            result=build_info.result,
+            branch=build_info.branch,
+            headCommit=head_commit,
+            baseCommit=base_commit,
+            owner=no_owner(),
+            failureReason="构建失败：c8 覆盖率门槛失败（coverage-only，未发现 Japa 测试失败）。",
+            evidence=[],
+            suggestions=["查看 Coverage summary 中未达 100% 的指标与文件。"],
+            hasHighConfidenceOwner=False,
+        )
+    else:
+        try:
+            with _metrics_stage("agentAnalyze"):
+                agent = create_responsibility_agent(settings, runtime_context)
+                if isinstance(agent, LangChainResponsibilityAgent):
+                    notice = agent.analyze()
+                else:
+                    notice = agent.analyze(context)
+        except AgentConfigurationError as exc:
+            return failure_without_context(build_info, base_commit, f"LLM 配置错误：{exc}", repo=repo)
+        notice = _restore_authoritative_build_metadata(
+            notice,
+            repo=repo,
+            build_info=build_info,
+            base_commit=base_commit,
+            head_commit=head_commit,
+        )
+        if sync_warning is not None:
+            notice.evidence.append(sync_warning)
+        notice = validate_notice(notice)
     notice = enrich_responsibility_item_signatures(
         notice,
         runtime_context.failure_summaries,
@@ -346,6 +387,16 @@ def analyze_failed_build(
         runtime_context.failure_summaries,
         runtime_context.failure_facts,
         repo=repo,
+    )
+    # Fidget 二期：coverage 责任项由确定性 reconciler 单一写入（方案 X），
+    # Agent 不生成 coverage 项。追加后由 validate 重算顶层 owner。
+    notice = reconcile_coverage_responsibilities(
+        notice,
+        failure_summaries=runtime_context.failure_summaries,
+        repo=repo,
+        head_commit=head_commit,
+        git_client=runtime_context.git_client,
+        investigation_scope=runtime_context.investigation_scope,
     )
     notice = validate_notice(notice)
     _save_history(

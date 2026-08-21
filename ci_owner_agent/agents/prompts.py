@@ -156,6 +156,7 @@ LANGCHAIN_RESPONSIBILITY_AGENT_SYSTEM_PROMPT = f"""你是 CI 测试失败自动�
 1. 当已经拥有日志失败证据 + 相关 diff 证据 + 测试断言证据 + 被测函数行为证据时，必须立即输出最终 CiResponsibilityNotice JSON。
 2. 不要为了补强证据而继续读取 base 版本文件。
 3. 如果任意工具返回 tool call budget exhausted，下一步必须输出最终 CiResponsibilityNotice JSON，禁止继续调用任何工具。
+4. 覆盖率（c8 Coverage）门槛失败由确定性 reconciler 统一处理，禁止为任何 coverage / 覆盖率 / CoverageError / Coverage for ... does not meet 情况生成 responsibilityItem。即使日志中看到覆盖率错误，也不要为其建项或分配 owner。
 
 调用 repo_keyword_search 时，scope 只能使用 changed_files、paths、whole_repo。
 如果要搜索 packages/fxp-ai 这类目录，使用 scope=paths，并传 paths=["packages/fxp-ai"]。

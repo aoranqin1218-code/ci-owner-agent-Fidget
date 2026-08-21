@@ -65,6 +65,10 @@ def compact_failure_summaries(summaries: dict[str, Any] | None) -> list[dict[str
     chunks = summaries.get("chunks", []) if isinstance(summaries, dict) else []
     compact: list[dict[str, Any]] = []
     for idx, chunk in enumerate(chunks[:5]):
+        # 方案 X：coverage 责任项由确定性 reconciler 单一写入，不把 coverage 失败块
+        # 作为线索喂给 Agent（Agent 只处理 Japa 等非 coverage 失败）。
+        if isinstance(chunk, dict) and chunk.get("anchorType") == "coverage_failure_block":
+            continue
         content = str(chunk.get("content") or "")
         compact.append(
             {

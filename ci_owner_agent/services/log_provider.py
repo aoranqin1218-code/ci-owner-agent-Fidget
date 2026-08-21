@@ -15,6 +15,7 @@ from ci_owner_agent.services.log_parsing import (
     CheckoutCommitResolution,
     FinalStatus,
     FinalStatusResolution,
+    build_coverage_failure_summaries,
     build_test_failure_summaries,
     detect_checkout_revision_from_console_log,
     find_error_chunks,
@@ -105,7 +106,14 @@ class TextLogProvider(LogProvider):
 
     def find_test_failure_summaries(self, tail_lines: int = 500, max_chunks: int = 5) -> dict:
         focused = self.find_focused_failure_chunks(tail_lines=tail_lines, max_chunks=max_chunks)
-        return build_test_failure_summaries(focused, max_chunks=max_chunks)
+        summaries = build_test_failure_summaries(focused, max_chunks=max_chunks)
+        # Fidget 二期：Japa 失败块为空时，若存在 c8 check-coverage 门槛失败，将其作为
+        # 独立的确定性失败来源汇入 failure summaries（与测试用例失败平级，可进历史与归责）。
+        if not summaries.get("chunks"):
+            coverage = build_coverage_failure_summaries(self._lines(), max_chunks=max_chunks)
+            if coverage:
+                return {"chunks": coverage}
+        return summaries
 
     def detect_final_status(self) -> FinalStatus:
         return log_detect_final_status(self._content())

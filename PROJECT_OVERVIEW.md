@@ -113,7 +113,7 @@ python -m ci_owner_agent <command>
 >
 > 判断规则一句话：**只有结构化 Japa 失败块才提指纹进历史；包装类（Docker/Jenkins/shell/typecheck/lint）只作当前日志证据**。解析实现见 [log_parsing.py](ci_owner_agent/services/log_parsing.py)（log_provider.py 是薄壳，只管"日志从哪来"）。
 
-9. **确定性失败摘要**：`log_provider.find_test_failure_summaries(tail_lines, max_chunks=5)` 调用 [log_parsing.py](ci_owner_agent/services/log_parsing.py) 的纯解析规则——直接在日志中收集最多 `max_chunks` 个 Japa `✖ 标题` 失败块，逐块提取签名 `signatureKey` + `signatureHash`（schemaVersion=3）。**Docker/Jenkins/shell/typecheck/lint 包装失败不生成历史签名**（它们不能进历史继承）。
+9. **确定性失败摘要**：`log_provider.find_test_failure_summaries(tail_lines, max_chunks=5)` 调用 [log_parsing.py](ci_owner_agent/services/log_parsing.py) 的纯解析规则——直接在日志中收集最多 `max_chunks` 个 Japa `✖ 标题` 失败块，逐块提取签名 `signatureKey` + `signatureHash`（schemaVersion=3）。**Docker/Jenkins/shell/typecheck/lint 包装失败不生成历史签名**（它们不能进历史继承）。**Fidget 二期另识别 c8 `check-coverage` 门槛失败**（`Coverage for <metric> (<pct>%) does not meet threshold ... for <file>`），无 Japa 失败块时产出 `coverage_failure_block` chunk，并按 Nx task 块归属包名（`> nx run @fx/<pkg>:` + `> @fx/<pkg>@` 一致才写 `packageName`）。
 10. **AI failure facts**（可选，`CI_AGENT_AI_FAILURE_FACTS_ENABLED`）：若确定性摘要为空，`extract_failure_facts_with_ai`（[failure_fact_ai.py](ci_owner_agent/services/failure_fact_ai.py)）从非结构化日志提取内层失败事实（`FailureFact`：failureKind/errorCode/filePath/symbol/message/rootCauseSummary/confidence），并按置信度 ≥0.70 过滤、本地重算 signatureKey。
 11. **历史预检**：`history_search_similar_failures(enriched, maxCandidates, store)`（[history_search.py](ci_owner_agent/services/history_search.py)）——按稳定失败签名查 MongoDB 历史相似失败，附带 `inheritedOwner`（可继承的责任人）和 `feedbackOverride`（人工反馈覆盖）。
 12. **AI 历史语义比对**（可选）：`history_search_similar_failure_facts`（[ai_history_search.py](ci_owner_agent/services/ai_history_search.py)）——对 AI facts 做语义比对，阈值 0.90，命中才允许基于 AI facts 继承。
@@ -225,8 +225,9 @@ python -m ci_owner_agent <command>
 │
 ├─ Service 层：确定性领域能力，全部可单测
 │   ├─ 数据获取：git_client / jenkins_client / log_provider / command_runner
-│   ├─ 日志解析：log_parsing（状态、可信 checkout、聚焦片段、Japa 摘要）
+│   ├─ 日志解析：log_parsing（状态、可信 checkout、聚焦片段、Japa 摘要、coverage 门槛失败）
 │   ├─ 失败身份：failure_identity / failure_similarity / log_parsing(摘要)
+│   ├─ 覆盖率定责：coverage_responsibility（Fidget 二期；包名归属 B/C → 确定性 owner，reconciler 唯一写入口）
 │   ├─ 历史：history_store(Mongo) / history_search / ai_history_search / history_no_owner / history_inheritance
 │   ├─ AI：failure_fact_ai / failure_fact_compare_ai / structured_output / llm_client
 │   ├─ 校验：scorer / responsibility_*_enricher
@@ -351,4 +352,4 @@ python -m ci_owner_agent <command>
 6. **[services/log_provider.py](ci_owner_agent/services/log_provider.py) + [services/log_parsing.py](ci_owner_agent/services/log_parsing.py) + jenkins_client.py** → 日志来源、失败摘要和可信 checkout 怎么来；
 7. **[services/wecom_notice_service.py](ci_owner_agent/services/wecom_notice_service.py) + [notification_formatter.py](ci_owner_agent/services/notification_formatter.py) + [wecom_notification_routing.py](ci_owner_agent/services/wecom_notification_routing.py) + [wecom_feedback_service.py](ci_owner_agent/services/wecom_feedback_service.py)** → 参考并复用现有通知、人员触达、副作用隔离、去重、格式预算和反馈修正闭环；把飞书 API 与交互差异留在飞书边界。
 
-二期最相关的点：**Fidget 是 npm workspace 多包工程，单元测试使用 Japa**。当前 [log_parsing.py](ci_owner_agent/services/log_parsing.py) 直接识别 Japa `✖` 失败块，并兼容 `packages/<package>/test/...` 路径；仍需按验证顺序使用真实 Fidget 日志和 Jenkins 单构建确认。除这些实际差异外，应尽量复用一期的编排、schema、历史、责任判断、通知和反馈语义。不要把范围扩张成通用 Project Profile、任意测试框架适配器或通用通知总线；飞书只隔离渠道 API、身份映射、格式和交互差异，并保持通知失败不破坏分析结果。
+二期最相关的点：**Fidget 是 npm workspace 多包工程，单元测试使用 Japa，且 c8 配置 `check-coverage` 100% 门槛**。当前 [log_parsing.py](ci_owner_agent/services/log_parsing.py) 直接识别 Japa `✖` 失败块和 c8 覆盖率门槛失败，并兼容 `packages/<package>/test/...` 路径；覆盖率失败由 [coverage_responsibility.py](ci_owner_agent/services/coverage_responsibility.py) 确定性定责（coverage-only 构建跳过 Agent，reconciler 为唯一写入口，Agent 输入过滤 + prompt 禁令 + 按稳定签名移除误生成项三道防线）。仍需按验证顺序使用真实 Fidget 日志和 Jenkins 单构建确认。除这些实际差异外，应尽量复用一期的编排、schema、历史、责任判断、通知和反馈语义。不要把范围扩张成通用 Project Profile、任意测试框架适配器或通用通知总线；飞书只隔离渠道 API、身份映射、格式和交互差异，并保持通知失败不破坏分析结果。
