@@ -16,6 +16,23 @@ from ci_owner_agent.services.wecom_notification_routing import (
 from ci_owner_agent.services.wecom_user_mapping import WeComUserMapper
 
 
+COVERAGE_FAILURE_SIGNATURE_PREFIX = "coverage_threshold_failure|"
+COVERAGE_FAILURE_TITLE_RE = re.compile(
+    r"^coverage\s+(?P<metrics>.+?)\s+below threshold for\s+(?P<path>.+)$",
+    re.IGNORECASE,
+)
+SINGLE_AUTHOR_COVERAGE_REASON_RE = re.compile(
+    r"^single author (?P<name>.+?) modified (?P<path>.+?) in (?P<scope>focus|full) range$",
+    re.IGNORECASE,
+)
+COVERAGE_METRIC_LABELS = {
+    "branches": "分支",
+    "functions": "函数",
+    "lines": "行",
+    "statements": "语句",
+}
+
+
 def format_wecom_markdown_notice(
     notice: CiResponsibilityNotice,
     feedback_base_url: str | None = None,
@@ -56,7 +73,7 @@ def format_wecom_markdown_notice(
     lines.extend(
         [
             f"**原因**：{public_single_line(notice.failureReason, max_reason_chars)}",
-            responsibility_item_stats(notice.responsibilityItems),
+            responsibility_item_stats(notice),
             "",
             "#### 📌 责任项",
             "",
@@ -67,11 +84,14 @@ def format_wecom_markdown_notice(
             owner_name = format_item_owner(item.owner, mapper, mention_mode)
             item_type = str(item.responsibilityType or "unknown")
             item_lines = [
-                f"{idx}. {responsibility_type_icon(item_type)} {responsibility_type_label(item_type)} | {public_single_line(item.failureTitle, 120)}",
-                f"   - 👤 责任人：{owner_name}",
+                f"{idx}. {responsibility_item_icon(item, notice)} {responsibility_item_label(item, notice)} | {format_item_title(item, 120)}",
+                f"   - 👤 {format_item_owner_label(item)}：{owner_name}",
                 f"   - 来源：{source_build_label(item, notice)}",
                 f"   - 🔎 证据：{format_item_evidence(item, evidence_by_id, max_evidence_chars)}",
             ]
+            coverage_suggestion = format_coverage_item_suggestion(item)
+            if coverage_suggestion:
+                item_lines.append(f"   - 🛠️ 建议：{coverage_suggestion}")
             match = maintainer_matches[idx - 1]
             if match is not None:
                 item_lines.extend(
@@ -160,9 +180,87 @@ def format_item_owner(owner: Owner, mapper: WeComUserMapper, mention_mode: str) 
     return mapper.mention_owner(owner.name, owner.email, mode=mention_mode)
 
 
+def format_item_owner_label(item: ResponsibilityItem) -> str:
+    if item.owner.type == "medium_confidence":
+        return "责任人（中等置信）"
+    return "责任人"
+
+
+def is_coverage_failure_item(item: ResponsibilityItem) -> bool:
+    return str(item.failureSignature or "").startswith(COVERAGE_FAILURE_SIGNATURE_PREFIX)
+
+
+def is_continuing_coverage_item(item: ResponsibilityItem, notice: CiResponsibilityNotice) -> bool:
+    return (
+        item.responsibilityType == "current_build_owner"
+        and is_coverage_failure_item(item)
+        and bool(item.sourceCommit)
+        and bool(notice.headCommit)
+        and item.sourceCommit != notice.headCommit
+    )
+
+
+def responsibility_item_icon(item: ResponsibilityItem, notice: CiResponsibilityNotice) -> str:
+    if is_continuing_coverage_item(item, notice):
+        return "♻️"
+    return responsibility_type_icon(item.responsibilityType)
+
+
+def responsibility_item_label(item: ResponsibilityItem, notice: CiResponsibilityNotice) -> str:
+    if is_continuing_coverage_item(item, notice):
+        return "覆盖率持续"
+    return responsibility_type_label(item.responsibilityType)
+
+
+def coverage_title_parts(item: ResponsibilityItem) -> tuple[str, tuple[str, ...]]:
+    match = COVERAGE_FAILURE_TITLE_RE.match(str(item.failureTitle or "").strip())
+    if not match:
+        return str(item.failureFilePath or "").strip(), ()
+    metrics = tuple(
+        COVERAGE_METRIC_LABELS.get(metric.strip().lower(), metric.strip())
+        for metric in match.group("metrics").split(",")
+        if metric.strip()
+    )
+    return match.group("path"), metrics
+
+
+def format_item_title(item: ResponsibilityItem, max_chars: int) -> str:
+    title = public_single_line(item.failureTitle, max_chars)
+    if not is_coverage_failure_item(item):
+        return title
+    path, metrics = coverage_title_parts(item)
+    if not path:
+        return f"覆盖率未达标：{title}"
+    return truncate_single_line(
+        f"覆盖率未达标：{path}（{'、'.join(metrics) or '指标'}）",
+        max_chars,
+    )
+
+
+def format_item_reason(item: ResponsibilityItem, max_chars: int) -> str:
+    reason = item.reason.strip()
+    if is_coverage_failure_item(item):
+        match = SINGLE_AUTHOR_COVERAGE_REASON_RE.match(reason)
+        if match:
+            return truncate_single_line(
+                f"在本次责任排查范围内，仅 {match.group('name')} 修改了 {match.group('path')}。",
+                max_chars,
+            )
+    return public_single_line(reason, max_chars)
+
+
+def format_coverage_item_suggestion(item: ResponsibilityItem) -> str | None:
+    if not is_coverage_failure_item(item):
+        return None
+    path, metrics = coverage_title_parts(item)
+    target = path or "相关源码文件"
+    metric_text = "、".join(metrics) or "覆盖率"
+    return f"补充 {target} 中未覆盖分支的测试，使 {metric_text} 达到配置阈值。"
+
+
 def format_item_evidence(item: ResponsibilityItem, evidence_by_id: dict[str, EvidenceItem], max_chars: int = 500) -> str:
     if item.reason.strip():
-        return public_single_line(item.reason, max_chars)
+        return format_item_reason(item, max_chars)
     if item.responsibilityType == "inherited_failure_owner":
         build = item.sourceBuildNumber or "-"
         name = item.owner.name or NO_OWNER_NAME
@@ -217,16 +315,25 @@ def responsibility_type_label(value: str) -> str:
     }.get(str(value or ""), str(value or "unknown"))
 
 
-def responsibility_item_stats(items: list[ResponsibilityItem]) -> str:
+def responsibility_item_stats(notice: CiResponsibilityNotice) -> str:
+    items = notice.responsibilityItems
     if not items:
         return "📌 **责任项**：未识别到独立责任项"
-    current = sum(1 for item in items if item.responsibilityType == "current_build_owner")
+    current = sum(
+        1
+        for item in items
+        if item.responsibilityType == "current_build_owner"
+        and not is_continuing_coverage_item(item, notice)
+    )
+    continuing_coverage = sum(1 for item in items if is_continuing_coverage_item(item, notice))
     inherited = sum(1 for item in items if item.responsibilityType == "inherited_failure_owner")
     unresolved = sum(1 for item in items if item.responsibilityType == "no_high_confidence_owner")
-    other = len(items) - current - inherited - unresolved
+    other = len(items) - current - continuing_coverage - inherited - unresolved
     parts = [f"共 {len(items)} 项"]
     if current:
         parts.append(f"当前引入 {current}")
+    if continuing_coverage:
+        parts.append(f"覆盖率持续 {continuing_coverage}")
     if inherited:
         parts.append(f"历史持续 {inherited}")
     if unresolved:

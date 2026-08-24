@@ -184,6 +184,70 @@ def test_responsibility_type_labels_are_public_readable():
     assert "no_high_confidence_owner" not in markdown
 
 
+def test_coverage_item_is_rendered_in_chinese_without_changing_its_schema_data():
+    coverage = item(
+        "AoranQin-秦奥然",
+        "medium_confidence",
+        "current_build_owner",
+        "single author AoranQin-秦奥然 modified packages/fidget-sql/src/generator/SqlUtils.ts in focus range",
+        "aoranqin@example.com",
+    )
+    coverage.update(
+        {
+            "failureTitle": "coverage branches,lines,statements below threshold for src/generator/SqlUtils.ts",
+            "failureSignature": "coverage_threshold_failure|packages/fidget-sql/src/generator/sqlutils.ts",
+            "failureSummary": "coverage branches,lines,statements below threshold for src/generator/SqlUtils.ts",
+            "failureFilePath": "packages/fidget-sql/src/generator/SqlUtils.ts",
+            "confidence": 0.6,
+            "sourceCommit": "h",
+        }
+    )
+    notice = CiResponsibilityNotice.model_validate(notice_payload([coverage]))
+
+    markdown = format_wecom_markdown_notice(notice)
+
+    assert "覆盖率未达标：src/generator/SqlUtils.ts（分支、行、语句）" in markdown
+    assert "责任人（中等置信）：@AoranQin-秦奥然" in markdown
+    assert "在本次责任排查范围内，仅 AoranQin-秦奥然 修改了 packages/fidget-sql/src/generator/SqlUtils.ts。" in markdown
+    assert "coverage branches,lines,statements below threshold" not in markdown
+    assert "single author AoranQin-秦奥然 modified" not in markdown
+
+
+def test_mixed_failure_notice_distinguishes_continuing_coverage_and_includes_its_fix():
+    japa = item("AoranQin-秦奥然", "high_confidence", "current_build_owner", "当前构建新增测试失败。", "aoranqin@example.com")
+    japa.update({"sourceBuildNumber": 10, "sourceCommit": "build-10"})
+    coverage = item(
+        "AoranQin-秦奥然",
+        "medium_confidence",
+        "current_build_owner",
+        "single author AoranQin-秦奥然 modified packages/fidget-sql/src/generator/SqlUtils.ts in focus range",
+        "aoranqin@example.com",
+    )
+    coverage.update(
+        {
+            "failureTitle": "coverage branches,lines,statements below threshold for src/generator/SqlUtils.ts",
+            "failureSignature": "coverage_threshold_failure|packages/fidget-sql/src/generator/sqlutils.ts",
+            "failureSummary": "coverage branches,lines,statements below threshold for src/generator/SqlUtils.ts",
+            "failureFilePath": "packages/fidget-sql/src/generator/SqlUtils.ts",
+            "confidence": 0.6,
+            "sourceBuildNumber": 10,
+            "sourceCommit": "build-9",
+        }
+    )
+    payload = notice_payload([japa, coverage])
+    payload.update({"buildNumber": 10, "headCommit": "build-10"})
+    notice = CiResponsibilityNotice.model_validate(payload)
+
+    markdown = format_wecom_markdown_notice(notice)
+
+    assert "📌 **责任项**：共 2 项，当前引入 1，覆盖率持续 1" in markdown
+    assert "其他 1" not in markdown
+    assert "🔥 当前引入 | EtlUtils - getInputEntryInfo" in markdown
+    assert "♻️ 覆盖率持续 | 覆盖率未达标：src/generator/SqlUtils.ts（分支、行、语句）" in markdown
+    assert "🛠️ 建议：补充 src/generator/SqlUtils.ts 中未覆盖分支的测试，使 分支、行、语句 达到配置阈值。" in markdown
+    assert len(markdown.encode("utf-8")) <= 4096
+
+
 def test_top_responsible_owners_use_mapper_userid_mention(tmp_path):
     path = tmp_path / "mapping.csv"
     path.write_text(
