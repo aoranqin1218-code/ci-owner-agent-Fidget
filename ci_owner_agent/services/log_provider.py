@@ -107,13 +107,17 @@ class TextLogProvider(LogProvider):
     def find_test_failure_summaries(self, tail_lines: int = 500, max_chunks: int = 5) -> dict:
         focused = self.find_focused_failure_chunks(tail_lines=tail_lines, max_chunks=max_chunks)
         summaries = build_test_failure_summaries(focused, max_chunks=max_chunks)
-        # Fidget 二期：Japa 失败块为空时，若存在 c8 check-coverage 门槛失败，将其作为
-        # 独立的确定性失败来源汇入 failure summaries（与测试用例失败平级，可进历史与归责）。
-        if not summaries.get("chunks"):
-            coverage = build_coverage_failure_summaries(self._lines(), max_chunks=max_chunks)
-            if coverage:
-                return {"chunks": coverage}
-        return summaries
+        # Fidget 二期：c8 check-coverage 门槛失败作为独立的确定性失败来源，始终与 Japa
+        # 失败块合并返回（混合失败时两者都要进 failure summaries，不能只取其一）。
+        coverage = build_coverage_failure_summaries(self._lines(), max_chunks=max_chunks)
+        japa_chunks = summaries.get("chunks") or []
+        if not coverage:
+            return summaries
+        if not japa_chunks:
+            return {"chunks": coverage}
+        merged = list(japa_chunks)
+        merged.extend(coverage[: max(0, max_chunks - len(merged))])
+        return {"chunks": merged[:max_chunks]}
 
     def detect_final_status(self) -> FinalStatus:
         return log_detect_final_status(self._content())
