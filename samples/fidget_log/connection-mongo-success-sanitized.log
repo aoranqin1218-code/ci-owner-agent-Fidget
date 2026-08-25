@@ -1,0 +1,15 @@
+
+> @fx/fidget-mongo@1.8.0-dev.1 test:connection
+> node ./bin/test_runner.mjs dialect
+
+(node:27720) [DEP0180] DeprecationWarning: fs.Stats constructor is deprecated.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+enable dialect test, please ensure your local mongodb is running
+
+dialect / CommonUtilsTest (test\common\CommonUtilsTest.ts)
+  ✔ 测试isMongoObjectId (2.02ms)
+...[中间大量通过记录已裁剪]...
+ PASSED 
+
+Tests  1360 passed (1360)
+ Time  2s

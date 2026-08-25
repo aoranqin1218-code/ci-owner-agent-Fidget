@@ -1,0 +1,15 @@
+
+> @fx/fidget-lake@1.8.0-dev.1 test:connection
+> node ./bin/test_runner.mjs integrate
+
+(node:39492) [DEP0180] DeprecationWarning: fs.Stats constructor is deprecated.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+
+integrate / DuckDBIntegrateTest (test\integrate\DuckDBIntegrateTest.ts)
+  ✔ simple query (5.25ms)
+  ✔ simple group (14.26ms)
+...[中间大量通过记录已裁剪]...
+ PASSED 
+
+Tests  1331 passed (1331)
+ Time  556ms
