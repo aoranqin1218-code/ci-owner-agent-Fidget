@@ -22,6 +22,7 @@ run-codex-silver-batch.ps1
 PROJECT_OVERVIEW.md
 Fidget 单元_连接_集成测试 CI 与失败通知平台化方案评审.md
 Fidget-单元_集成测试通知优化
-samples
+samples/*
+!samples/fidget_log/
 .trellis
 .claude

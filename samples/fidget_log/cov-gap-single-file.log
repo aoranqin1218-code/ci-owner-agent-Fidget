@@ -1,0 +1,29 @@
+# Synthetic sample: single-package coverage-gap on fidget-sql.
+# Modeled on real c8@9.1.0 text-summary output (see samples/fidget_log/fidget-build-dev-313.log:994-1010).
+# Scenario: all Japa unit tests pass (no ✖), but c8 per-file threshold check fails for src/parser/TokenScanner.ts
+# on statements & lines. Non-zero exit -> Finished: FAILURE. Expected: c8 coverage_failure detected, no Japa chunk.
+# Note: real logs carry BuildKit "#N ts " prefixes + ANSI color codes; models here omitted color, prefixes kept.
+> fxp-fidget@0.1.0 test:coverage
+> c8 node ./bin/test_runner.mjs
+
+#23 15.87 > nx run @fx/fidget-sql:"test:coverage"
+#23 15.87
+#23 15.87 > @fx/fidget-sql@1.8.0-dev.0 test:coverage
+#23 15.87 > c8 node ./bin/test_runner.mjs
+#23 15.87
+#23 15.87 PASSED
+#23 15.87
+#23 15.87 Tests  240 passed (240)
+#23 15.87 Time   313ms
+#23 15.87
+#23 15.87 =============================== Coverage summary ===============================
+#23 15.87 Statements   : 88% ( 2522/2866 )
+#23 15.87 Branches     : 100% ( 560/560 )
+#23 15.87 Functions    : 100% ( 210/210 )
+#23 15.87 Lines        : 91% ( 2330/2560 )
+#23 15.87 ================================================================================
+#23 15.87 ERROR: Coverage for statements (88%) does not meet threshold (100%) for src/parser/TokenScanner.ts
+#23 15.87 ERROR: Coverage for lines (90.83%) does not meet threshold (100%) for src/parser/TokenScanner.ts
+#23 15.88
+
+Finished: FAILURE
