@@ -100,6 +100,49 @@ def test_focused_failure_chunk_truncates_from_head_and_keeps_final_failure(tmp_p
     assert "ViewDataQueryTest.ts" in chunk["content"]
 
 
+def test_long_single_japa_block_keeps_anchor_for_structured_summary(tmp_path):
+    lines = ["✖ deliberately long Japa failure"]
+    lines.extend(f"wrapper noise {index}" for index in range(700))
+    lines.extend(["AssertionError: final expected value", "at packages/fidget-sql/test/SqlLexerTest.ts:12:3"])
+    path = tmp_path / "console.log"
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+    summaries = LocalFileLogProvider(path, max_output_chars=260).find_test_failure_summaries(
+        tail_lines=100,
+        max_chunks=5,
+    )
+
+    assert summaries["totals"]["japa"] == 1
+    assert len(summaries["chunks"]) == 1
+    chunk = summaries["chunks"][0]
+    assert "deliberately long Japa failure" in chunk["content"]
+    assert "AssertionError: final expected value" in chunk["content"]
+
+
+def test_interleaved_japa_detail_uses_its_matching_assertion_and_test_file(tmp_path):
+    lines = [
+        "✖ controlled failure (1.16ms)",
+        "OtherTest (test/other/OtherTest.ts)",
+        *[f"✔ unrelated test {index}" for index in range(180)],
+        "❯ SqlLexer / controlled failure",
+        "ℹ AssertionError: expected actual to equal expected",
+        "⁃ at Assert.equal (/var/opt/build/node_modules/@japa/assert/build/index.js:69:19)",
+        "⁃ at Object.executor (test/lexer/SqlLexerTest.ts:179:16)",
+        "FAILED",
+    ]
+    path = tmp_path / "console.log"
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+    chunk = LocalFileLogProvider(path).find_test_failure_summaries(max_chunks=5)["chunks"][0]
+
+    signature = chunk["signature"]
+    assert signature["testName"] == "controlled failure (1.16ms)"
+    assert signature["errorType"] == "AssertionError"
+    assert signature["testFile"] == "test/lexer/SqlLexerTest.ts"
+    assert signature["topStackFile"] == "test/lexer/SqlLexerTest.ts"
+    assert "OtherTest.ts" not in chunk["content"]
+
+
 def test_jenkins_focused_failure_chunks_keeps_japa_source():
     class FakeJenkinsClient:
         def get_console_text(self, job, build_number):

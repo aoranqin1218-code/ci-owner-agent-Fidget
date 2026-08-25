@@ -48,6 +48,26 @@ def test_checkout_resolution_marks_conflicting_commits_ambiguous():
     assert detect_checkout_revision_from_console_log(text) is None
 
 
+def test_checkout_resolution_prefers_explicit_checkout_stage_over_script_scm_checkout():
+    script_commit = "a" * 40
+    tested_commit = "b" * 40
+    text = (
+        f"Checking out Revision {script_commit} (refs/remotes/origin/main)\n"
+        "[Pipeline] stage\n"
+        "[Pipeline] { (Checkout)\n"
+        f"Checking out Revision {tested_commit} (refs/remotes/origin/main)\n"
+        f" > git checkout -f {tested_commit} # timeout=10\n"
+        "[Pipeline] // stage\n"
+    )
+
+    resolution = resolve_checkout_revision_from_console_log(text)
+
+    assert resolution.commit == tested_commit
+    assert resolution.ambiguous is False
+    assert resolution.refs == ("refs/remotes/origin/main",)
+    assert resolution.from_explicit_checkout_stage is True
+
+
 def test_analyze_local_rejects_ambiguous_checkout_before_git(repo_cache, tmp_path):
     log = tmp_path / "ambiguous.log"
     log.write_text(

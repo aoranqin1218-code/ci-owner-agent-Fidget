@@ -1,5 +1,10 @@
 # CI Owner Agent 项目约定
 
+## 每次开工检查
+
+- 每次开始新的用户任务前，必须先完整阅读本文件，并以其中的路径、仓库用途、可修改范围和验证约束为当前工作基线；不得仅凭记忆、默认工作区或先前结论推断。
+- 用户对本机参考/测试仓库的实际用途作出更具体说明时，先核对该仓库的 `remote`、当前分支与未提交改动，再按用户明确授权执行；Git 定责缓存限制不等同于禁止在获授权的测试仓库中修改代码。
+
 ## 适用范围与事实来源
 
 - 本文件适用于整个仓库。后续判断应同时参考当前用户要求、源码与测试、`README.md`，以及下列两篇飞书文档：
@@ -20,6 +25,14 @@
 
 核心原则不是“必须找到人”，而是“只在证据足够时找到正确的人”。不得简单把失败归给最后提交者；证据不足、环境或 Pipeline 问题、偶发问题都应明确输出“无高可信责任人”。
 
+## 面向阶段二接手人的沟通方式
+
+- 默认把当前用户视为阶段二接手人：了解业务目标，但不假设熟悉一期代码、内部术语、历史设计或调用链。首次出现 `notice`、责任项、reconciler、历史继承等术语时，先用一句中文说明它在业务流程里负责什么。
+- 评审、排障和交付说明必须先回答“这会造成什么用户可见问题、为什么现在要处理”，再说明原因、修改方案和涉及文件；不要直接堆砌函数名、行号、测试编号或没有前因后果的问题清单。
+- 同时发现多个问题时，按业务结果分组，并明确区分“必须修复，否则会错报/漏报”和“只影响文档、可维护性或后续扩展”。必要时用一个构建示例说明修复前后差异。
+- 最终回复优先给出可执行结论：现在是否合格、是否可以进入下一阶段、还有什么阻塞。源码位置和技术细节作为结论证据放在后面，不能让用户自行从代码细节推导结论。
+- 用户表示看不懂或缺少背景时，后续回复应主动降低术语密度、补齐数据流和上下文，不重复原来的技术列表。
+
 ## 二期迁移：fxp-fidget
 
 ### 迁移范围与现状边界
@@ -39,6 +52,19 @@
 - 单元测试要求 6 个 package 全部通过；100% 覆盖率目标适用于 `fidget-core`、`fidget-lake`、`fidget-mongo`、`fidget-postgres`、`fidget-sql`，需求文档未把 `fidget-sdk` 列入该覆盖率集合。不要擅自扩大或缩小口径。
 - Connection 测试和 `packages/fidget-sdk/test/integration` 集成测试属于需求文档背景，不在当前两项交付范围内；只有后续用户明确扩展范围时才接入。日志若包含外部数据库不可用、版本不兼容或连接失败证据，优先判断为环境/基础设施问题，不得直接归责代码提交者。
 - 本地参考环境为 MongoDB 4.2+、PostgreSQL 18+，但需求文档明确提示 SELECT 集成测试可能报错；测试环境使用 MongoDB 4.2+ 和 Protonbase。连接信息属于外部凭据，只能从授权配置或技术支持获取，不得写入仓库、日志或提示词。
+
+### Fidget 二期当前代码基线与本地验证资料
+
+- 当前 Python 工作区为 `F:\FanRuan\Project_3\ci-owner-agent-Fidget`；本机 Fidget 参考工作区为 `F:\FanRuan\fxp-fidget\fxp-fidget`。后者只用于只读核对 package 配置、Nx/Japa/c8 行为和本地复现；Git 定责仍必须使用 Agent 专用 repo cache，不得把人工工作区接入会 fetch、checkout 或切换提交的 Git service。
+- 稳定 CLI 入口是 `python -m ci_owner_agent <command>`。Fidget 本地复现常用 `npm --workspace @fx/fidget-sql run test` 与 `npm --workspace @fx/fidget-sql run test:coverage`；Windows 下需要 `WT_SESSION=1` 才能稳定得到当前解析器识别的 Japa `✔/✖` 符号。不得把本机路径或环境变量值硬编码进生产逻辑。
+- `samples/fidget_log/` 是二期离线回放入口：`err1-source-tampered.log` 为多 Japa 失败样本，`err2-test-assert.log` 为单 Japa 失败样本，`fidget-build-dev-313.log` 为 SUCCESS/5 包 coverage 基线，`cov-gap-single-file.log` 为 c8 coverage-gap 样本。样本只能证明其覆盖到的协议；真实 Jenkins 多包失败输出、行交错和渠道投递仍需按上线验证顺序单独确认。
+- 当前 Fidget 结构化测试失败以 Japa `✖` 失败行为锚点；解析前会剥离 Docker/BuildKit `#N <time>` 行前缀和 ANSI 控制码，以兼容本地输出与 Jenkins 合并日志。不得重新把一期 Mocha stage/make 锚点作为 Fidget 主路径，也不得把 Docker、Jenkins、shell、typecheck 或 lint wrapper 当成可继承的测试失败事实。
+- c8 coverage 失败只认 `ERROR: Coverage for <metric> (<pct>%) does not meet [global] threshold (<thr>%) [for <file>]`，且只有 `pct < threshold` 才成立；`Coverage summary` 或 sdk 的 `text` 表格低于 100% 不能单独触发门槛失败。per-file 路径是包内相对路径，global 行没有文件路径，禁止伪造 `failureFilePath`。
+- coverage 解析和定责采用方案 X：coverage failure facts 可以保留在完整 `failure_summaries` 供审计和 reconciler 使用，但不得作为 Agent 的责任项输入；coverage-only 构建可跳过责任分析 Agent；`coverage_responsibility` reconciler 是 coverage `ResponsibilityItem` 的唯一写入口，并应移除 Agent 意外生成的 coverage 项后再写 canonical item。
+- coverage 包定位采用受约束 B+C：B 只使用能确认边界且 Nx task 包头与 npm lifecycle 包名一致的已有日志块；B 不可靠或缺失时，C 在可信 `headCommit` 上批量校验 5 个 gating 包的完整候选路径，只有唯一命中才接受。B/C 冲突、零命中、多命中、路径不存在或日志疑似交错时必须 fail closed；不得修改 Fidget 生产代码只为给日志补包名。
+- coverage deterministic owner 的上限是 `medium_confidence`：完整文件路径存在、可信 `base..head` 责任窗口有效、相关 diff 非空且只有一个作者时才可建 `current_build_owner`；多作者、无 diff、范围无效或 Git 校验失败都输出 `no_high_confidence_owner`。禁止选择最后、最近或提交最多的作者；若未来需要 high，必须另建受确定性校验的证据增强阶段，不能恢复 Agent 与 reconciler 双写。
+- Japa 与 coverage 可以在同一构建中同时失败，日志服务必须合并两类摘要，不能因已有 Japa chunk 丢掉 coverage；即使达到 chunk 预算，也必须通过完整 totals/coverage 文件记账保证 coverage 事实不被静默丢失。coverage 不进入 Japa 确定性历史继承，也不写入 `ci_test_file_failures`；feedback 可使用 `failureFilePath`，无 owner 的维护人路由应读取 `testFilePath or failureFilePath`，但不得把 Maintainer 写成 causal owner。
+- Fidget 二期长期回归测试必须命名为 `test_*.py`，确保当前 `pyproject.toml` 的默认 `python -m pytest -q` 能发现；仅显式运行成功的 `stage2_*.py` 不算进入标准门禁。归档任务可从 `.trellis/tasks/archive/2026-08/08-21-fidget-coverage-gap-recognition/` 查设计背景，但 `task.json.status=completed`、聊天总结或 commit message 都不能替代 `task.py validate`、默认测试发现、源码逐项验收和真实日志回放。
 
 ### 二期责任路由与治理原则
 

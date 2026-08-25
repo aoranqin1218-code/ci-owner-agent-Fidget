@@ -17,6 +17,7 @@ from ci_owner_agent.services.log_parsing import (
     FinalStatusResolution,
     build_coverage_failure_summaries,
     build_test_failure_summaries,
+    count_japa_failure_blocks,
     detect_checkout_revision_from_console_log,
     find_error_chunks,
     find_focused_failure_chunks,
@@ -105,19 +106,45 @@ class TextLogProvider(LogProvider):
         return find_focused_failure_chunks(self._lines(), tail_lines=tail_lines, max_chunks=max_chunks, max_output_chars=self.max_output_chars)
 
     def find_test_failure_summaries(self, tail_lines: int = 500, max_chunks: int = 5) -> dict:
-        focused = self.find_focused_failure_chunks(tail_lines=tail_lines, max_chunks=max_chunks)
-        summaries = build_test_failure_summaries(focused, max_chunks=max_chunks)
-        # Fidget 二期：c8 check-coverage 门槛失败作为独立的确定性失败来源，始终与 Japa
-        # 失败块合并返回（混合失败时两者都要进 failure summaries，不能只取其一）。
-        coverage = build_coverage_failure_summaries(self._lines(), max_chunks=max_chunks)
-        japa_chunks = summaries.get("chunks") or []
-        if not coverage:
-            return summaries
-        if not japa_chunks:
-            return {"chunks": coverage}
-        merged = list(japa_chunks)
-        merged.extend(coverage[: max(0, max_chunks - len(merged))])
-        return {"chunks": merged[:max_chunks]}
+        all_lines = self._lines()
+        limit = max(0, max_chunks)
+        focused = self.find_focused_failure_chunks(tail_lines=tail_lines, max_chunks=max(1, limit))
+        summaries = build_test_failure_summaries(focused, max_chunks=max(1, limit))
+        japa_chunks = list(summaries.get("chunks") or [])
+        coverage_chunks = build_coverage_failure_summaries(all_lines, max_chunks=None)
+
+        # 统一预算：混合失败时优先保留尽可能多的 Japa，但 coverage 至少占 1 个展示位。
+        if coverage_chunks and limit:
+            displayed_japa = japa_chunks[: max(0, limit - 1)]
+            displayed_coverage = coverage_chunks[: limit - len(displayed_japa)]
+        else:
+            displayed_japa = japa_chunks[:limit]
+            displayed_coverage = []
+        merged = [*displayed_japa, *displayed_coverage]
+        for index, chunk in enumerate(merged):
+            chunk["chunkIndex"] = index
+
+        japa_total = count_japa_failure_blocks(all_lines)
+        totals = {
+            "japa": japa_total,
+            "coverage": len(coverage_chunks),
+            "omittedJapa": max(0, japa_total - len(displayed_japa)),
+            "omittedCoverage": max(0, len(coverage_chunks) - len(displayed_coverage)),
+        }
+        coverage_files = [
+            {
+                "packageName": (chunk.get("signature") or {}).get("packageName"),
+                "rawCoveragePath": (chunk.get("signature") or {}).get("rawCoveragePath"),
+                "metrics": (chunk.get("signature") or {}).get("metrics") or {},
+                "signatureKey": (chunk.get("signature") or {}).get("signatureKey"),
+                "content": chunk.get("content") or "",
+            }
+            for chunk in coverage_chunks
+        ]
+        result = {"chunks": merged, "totals": totals, "coverageFiles": coverage_files}
+        if not merged and summaries.get("warning"):
+            result["warning"] = summaries["warning"]
+        return result
 
     def detect_final_status(self) -> FinalStatus:
         return log_detect_final_status(self._content())
@@ -147,8 +174,21 @@ class JenkinsLogProvider(TextLogProvider):
 
     def _content(self) -> str:
         if self._cached_content is None:
-            result = self.client.get_console_text(self.job, self.build_number)
-            self._cached_content = result.get("content", "") if result.get("ok") else ""
+            # JenkinsClient keeps normal ``get_console_text`` bounded.  Structured
+            # Japa/c8 facts may occur long before the final Jenkins/Docker footer,
+            # so use the analysis-specific full fetch when the client supports it.
+            # Keep the fallback for lightweight fake clients used by callers/tests.
+            load_for_analysis = getattr(self.client, "get_console_text_for_analysis", None)
+            result = (
+                load_for_analysis(self.job, self.build_number)
+                if callable(load_for_analysis)
+                else self.client.get_console_text(self.job, self.build_number)
+            )
+            self._cached_content = (
+                result.get("analysisContent") or result.get("content", "")
+                if result.get("ok")
+                else ""
+            )
         return self._cached_content
 
     def _lines(self) -> list[str]:

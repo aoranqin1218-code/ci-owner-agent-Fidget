@@ -325,6 +325,18 @@ def analyze_failed_build(
             runtime_context.failure_facts,
             repo=repo,
         )
+        # 防御性接线：即使历史 no-owner 规则允许短路，当前构建里的 coverage
+        # 事实仍必须经过唯一 reconciler，不能直接沿用旧 notice 后返回。
+        notice = reconcile_coverage_responsibilities(
+            notice,
+            failure_summaries=runtime_context.failure_summaries,
+            repo=repo,
+            head_commit=head_commit,
+            git_client=runtime_context.git_client,
+            investigation_scope=runtime_context.investigation_scope,
+        )
+        # 历史 no-owner item 会保留来源构建用于审计；再次 model_validate 会按公共
+        # schema 的普通 no-owner 归一规则清空这些历史字段，因此此分支不重复校验。
         _save_history(
             settings,
             build_info,

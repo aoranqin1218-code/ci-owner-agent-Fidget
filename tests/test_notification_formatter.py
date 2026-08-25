@@ -47,13 +47,14 @@ def notice_payload(items):
     }
 
 
-def item(owner_name="Tang.Tangerine-唐嘉伟", owner_type="inherited_failure_owner", responsibility_type="inherited_failure_owner", reason="历史持续失败。", owner_email="x@example.com", test_file_path=None):
+def item(owner_name="Tang.Tangerine-唐嘉伟", owner_type="inherited_failure_owner", responsibility_type="inherited_failure_owner", reason="历史持续失败。", owner_email="x@example.com", test_file_path=None, failure_file_path=None):
     return {
         "failureId": "failure-secret",
         "failureTitle": "EtlUtils - getInputEntryInfo",
         "failureSignature": "sig-secret",
         "failureSummary": "summary",
         "testFilePath": test_file_path,
+        "failureFilePath": failure_file_path,
         "owner": {"type": owner_type, "name": owner_name, "email": owner_email, "commit": "secretcommit", "confidence": 0.9},
         "responsibilityType": responsibility_type,
         "sourceBuildNumber": 5094 if responsibility_type == "inherited_failure_owner" else 5099,
@@ -1023,6 +1024,29 @@ def test_no_owner_path_routes_single_maintainer_without_changing_owner(tmp_path)
     assert "📁 测试文件：test/service/view/ViewDataQueryServiceTest.ts" in markdown
     assert notice.owner.type == "no_high_confidence_owner"
     assert notice.responsibilityItems[0].owner.name == "无高可信责任人"
+
+
+def test_coverage_failure_file_path_routes_maintainer_without_becoming_owner(tmp_path):
+    no_owner = item(
+        "无高可信责任人",
+        "no_high_confidence_owner",
+        "no_high_confidence_owner",
+        "覆盖率文件没有可确认的因果责任人。",
+        test_file_path=None,
+        failure_file_path="packages/fidget-sql/src/parser/TokenScanner.ts",
+    )
+    notice = CiResponsibilityNotice.model_validate(notice_payload([no_owner]))
+    resolver = _maintainer_resolver(
+        tmp_path,
+        [("Dust", "dust")],
+        pattern="packages/fidget-sql/src/**",
+    )
+
+    markdown = format_wecom_markdown_notice(notice, maintainer_resolver=resolver, repo="fx-code")
+
+    assert "**待确认维护人**：<@dust>" in markdown
+    assert notice.owner.type == "no_high_confidence_owner"
+    assert notice.responsibilityItems[0].failureFilePath == "packages/fidget-sql/src/parser/TokenScanner.ts"
 
 
 def test_no_owner_path_routes_multiple_maintainers_in_order(tmp_path):

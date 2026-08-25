@@ -27,6 +27,11 @@ ERROR_TERMS = [
 ]
 XFAIL_BLOCK_RE = re.compile(r"^\s*✖\s+(.+?)\s*$")
 ERROR_LINE_RE = re.compile(r"\b(AssertionError|Error|TypeError|ReferenceError):\s*(.*)")
+# Japa prints an early ``✖ <test>`` result and, after other test output, a
+# detailed ``❯ <group> / <test>`` error section.  The two can be separated by
+# hundreds of lines in Docker/BuildKit's merged stream.
+JAPA_ERROR_HEADER_RE = re.compile(r"^\s*❯\s+(?P<label>.+?)\s*$")
+JAPA_DURATION_SUFFIX_RE = re.compile(r"\s*\(\d+(?:\.\d+)?(?:ms|s)\)\s*$", re.IGNORECASE)
 # Nx task 输出块边界（Fidget 二期，用于把覆盖率报错归属到具体包）：
 #   nx 包头：  > nx run @fx/fidget-sql:"test:coverage"
 #   npm 行：   > @fx/fidget-sql@1.8.0-dev.0 test:coverage
@@ -78,18 +83,49 @@ class CheckoutCommitResolution:
     commit: str | None
     ambiguous: bool = False
     refs: tuple[str, ...] = ()
+    from_explicit_checkout_stage: bool = False
 
 
 def resolve_checkout_revision_from_console_log(text: str) -> CheckoutCommitResolution:
     clean = ANSI_RE.sub("", text)
-    candidates = {
-        match.group("commit").lower()
-        for pattern in (CHECKING_OUT_REVISION_RE, GIT_CHECKOUT_FORCE_RE)
-        for match in pattern.finditer(clean)
-    }
-    refs = tuple(sorted({match.group("ref").strip() for match in CHECKING_OUT_REVISION_RE.finditer(clean) if match.group("ref")}))
-    if len(candidates) == 1:
-        return CheckoutCommitResolution(candidates.pop(), refs=refs)
+    candidates: set[str] = set()
+    refs_by_commit: dict[str, set[str]] = {}
+    checkout_stage_candidates: set[str] = set()
+    current_stage: str | None = None
+
+    for line in clean.splitlines():
+        stage_match = re.match(r"^\s*\[Pipeline\]\s+\{\s+\((?P<stage>.+)\)\s*$", line)
+        if stage_match:
+            current_stage = stage_match.group("stage").strip()
+            continue
+        if re.match(r"^\s*\[Pipeline\]\s+//\s+stage\s*$", line):
+            current_stage = None
+            continue
+
+        revision_match = CHECKING_OUT_REVISION_RE.match(line)
+        force_match = GIT_CHECKOUT_FORCE_RE.match(line)
+        match = revision_match or force_match
+        if match is None:
+            continue
+        commit = match.group("commit").lower()
+        candidates.add(commit)
+        if revision_match and revision_match.group("ref"):
+            refs_by_commit.setdefault(commit, set()).add(revision_match.group("ref").strip())
+        if current_stage and current_stage.strip().lower() == "checkout":
+            checkout_stage_candidates.add(commit)
+
+    # “Pipeline script from SCM” may checkout an older Jenkinsfile before any stage.
+    # When the log later has one distinct SHA inside the explicit Checkout stage,
+    # that later checkout is the source tree that the pipeline actually tests.
+    selected = checkout_stage_candidates if len(checkout_stage_candidates) == 1 and len(candidates) > 1 else candidates
+    if len(selected) == 1:
+        commit = next(iter(selected))
+        return CheckoutCommitResolution(
+            commit,
+            refs=tuple(sorted(refs_by_commit.get(commit, set()))),
+            from_explicit_checkout_stage=selected is checkout_stage_candidates,
+        )
+    refs = tuple(sorted({ref for values in refs_by_commit.values() for ref in values}))
     return CheckoutCommitResolution(None, ambiguous=bool(candidates), refs=refs)
 
 
@@ -175,6 +211,7 @@ def find_coverage_errors(all_lines: list[str]) -> list[dict]:
         hits.append(
             {
                 "line": idx + 1,
+                "content": clean,
                 "metric": cov_m.group("metric"),
                 "pct": pct,
                 "threshold": threshold,
@@ -184,6 +221,11 @@ def find_coverage_errors(all_lines: list[str]) -> list[dict]:
             }
         )
     return hits
+
+
+def count_japa_failure_blocks(all_lines: list[str]) -> int:
+    """Count all structured Japa failure anchors without applying a display budget."""
+    return sum(1 for line in all_lines if XFAIL_BLOCK_RE.match(_semantic_log_line(line)))
 
 
 def find_focused_failure_chunks(
@@ -206,25 +248,46 @@ def find_focused_failure_chunks(
     if xfail_starts:
         chunks = []
         for chunk_index, start in enumerate(xfail_starts[: max(1, max_chunks)]):
-            block_end = start
-            for idx in range(start + 1, len(clean_lines)):
-                if XFAIL_BLOCK_RE.match(clean_lines[idx]):
-                    break
-                block_end = idx
-            # 收敛失败块：到下一个失败行前或日志尾部。后续包装 footer
-            # 会在摘要阶段裁掉，不能在这里硬截断，否则可能丢失失败块末尾
-            # 的错误消息和 packages/<package>/test 路径。
-            chunk = _focused_chunk(
-                all_lines,
-                start,
-                block_end,
-                count,
-                max_output_chars=max_output_chars,
-                chunk_source="japa_failure_block",
-                stage_name="Unit Tests",
-                step_name="test_runner",
-                anchor_type="japa_failure_block",
-            )
+            detail_start = _find_japa_error_detail_start(clean_lines, start)
+            if detail_start is not None:
+                detail_end = _find_japa_error_detail_end(clean_lines, detail_start)
+                detail_segment = [
+                    all_lines[start],
+                    "...[interleaved Japa output omitted]...",
+                    *all_lines[detail_start:detail_end],
+                ]
+                chunk = _focused_chunk_from_segment(
+                    detail_segment,
+                    start_line=start + 1,
+                    end_line=detail_end,
+                    tail_lines=count,
+                    max_output_chars=max_output_chars,
+                    chunk_source="japa_failure_block",
+                    stage_name="Unit Tests",
+                    step_name="test_runner",
+                    anchor_type="japa_failure_block",
+                    prior_truncated=True,
+                )
+            else:
+                block_end = start
+                for idx in range(start + 1, len(clean_lines)):
+                    if XFAIL_BLOCK_RE.match(clean_lines[idx]):
+                        break
+                    block_end = idx
+                # 收敛失败块：到下一个失败行前或日志尾部。单个 Japa 失败在
+                # Docker/BuildKit 合并日志里可能一直延伸到 Jenkins footer；截断时
+                # 必须同时保留开头的 ``✖`` 身份和末尾的错误/路径，不能只留尾部。
+                chunk = _focused_chunk(
+                    all_lines,
+                    start,
+                    block_end,
+                    count,
+                    max_output_chars=max_output_chars,
+                    chunk_source="japa_failure_block",
+                    stage_name="Unit Tests",
+                    step_name="test_runner",
+                    anchor_type="japa_failure_block",
+                )
             chunk["chunkIndex"] = chunk_index
             chunks.append(chunk)
         return {"chunks": chunks[:max_chunks]}
@@ -304,46 +367,103 @@ def build_test_failure_summaries(focused: dict, *, max_chunks: int = 5) -> dict:
     return {"chunks": [], "warning": "test failure summaries unavailable; no Japa failure block found; history similarity skipped"}
 
 
-def build_coverage_failure_summaries(all_lines: list[str], *, max_chunks: int = 5) -> list[dict]:
-    """把 c8 覆盖率门槛失败转成 failure summary chunks，与 Japa 失败块平级。
+def build_coverage_failure_summaries(
+    all_lines: list[str],
+    *,
+    max_chunks: int | None = 5,
+) -> list[dict]:
+    """把 c8 门槛失败聚合为可审计的 coverage chunks。
 
-    仅当存在覆盖率错误时返回非空列表；每个 per-file/global 门槛失败一条。
-    用 c8 原始 ERROR 行作为块 content，签名基于 metric + 目标文件（稳定可去重）。
+    per-file 以文件为粒度聚合：同一文件的 statements/branches/functions/lines
+    只生成一个 chunk。global 没有文件，只能按 package + metric 保守建项。
+    `max_chunks=None` 返回完整事实，供 provider 做统一预算和 omitted 记账。
     """
     errors = find_coverage_errors(all_lines)
     if not errors:
         return []
-    coverage_lines = []
-    for e in errors:
-        file_part = f" for {e['file']}" if e.get("file") else ""
-        # 若已确认可信包名（B），拼上仓库相对前缀，使签名/后续 reconcile 能识别归属包。
-        if e.get("file") and e.get("package_name"):
-            file_part = f" for packages/{e['package_name']}/{e['file'].lstrip('/')}"
-        coverage_lines.append(
-            f"ERROR: Coverage for {e['metric']} ({e['pct']}%) "
-            f"does not meet {'global ' if e['kind'] == 'global' else ''}threshold "
-            f"({e['threshold']}%){file_part}"
+
+    grouped: dict[tuple[str, str, str], list[dict]] = {}
+    for error in errors:
+        package = str(error.get("package_name") or "")
+        if error.get("kind") == "global":
+            key = ("global", package, str(error.get("metric") or "coverage").lower())
+        else:
+            key = ("per_file", package, str(error.get("file") or "").replace("\\", "/"))
+        grouped.setdefault(key, []).append(error)
+
+    chunks: list[dict] = []
+    for chunk_index, ((kind, package, identity), group) in enumerate(grouped.items()):
+        if max_chunks is not None and len(chunks) >= max(0, max_chunks):
+            break
+        raw_path = identity if kind == "per_file" else None
+        metrics: dict[str, dict[str, float]] = {}
+        for error in group:
+            metric = str(error.get("metric") or "coverage").lower()
+            value = {"pct": float(error["pct"]), "threshold": float(error["threshold"])}
+            previous = metrics.get(metric)
+            if previous is None or value["pct"] < previous["pct"]:
+                metrics[metric] = value
+        metric_names = sorted(metrics)
+        if kind == "global":
+            signature_key = f"coverage_threshold_failure|global|{package or 'unresolved'}|{identity}"
+        else:
+            file_scope = f"packages/{package}/{raw_path}" if package else f"unresolved|{raw_path}"
+            signature_key = f"coverage_threshold_failure|{file_scope}"
+        content = "\n".join(str(error.get("content") or "") for error in group)
+        signature = {
+            "failureKind": "coverage_threshold_failure",
+            "testName": "coverage threshold failure",
+            "testCase": "coverage threshold failure",
+            "errorType": "CoverageError",
+            "errorMessage": f"{','.join(metric_names)} below coverage threshold",
+            "testFile": None,
+            "packageName": package or None,
+            "topStackFile": None,
+            "rawCoveragePath": raw_path,
+            "businessStackFiles": [],
+            "metrics": metrics,
+            "signatureKey": signature_key,
+        }
+        chunks.append(
+            {
+                "chunkIndex": chunk_index,
+                "schemaVersion": 3,
+                "chunkSource": "c8_coverage_threshold_failure",
+                "stageName": "Unit Tests",
+                "stepName": "test_runner",
+                "anchorType": "coverage_failure_block",
+                "startLine": min(int(error["line"]) for error in group),
+                "endLine": max(int(error["line"]) for error in group),
+                "score": 0.9,
+                "content": content,
+                "truncated": False,
+                "signature": signature,
+                # pct/threshold 属于详情，会随构建变化；hash 只锚定稳定 signatureKey。
+                "signatureHash": hashlib.sha256(signature_key.encode("utf-8")).hexdigest(),
+            }
         )
-    chunks = _build_summary_chunks(
-        lines=coverage_lines,
-        starts=list(range(len(coverage_lines))),
-        max_chunks=max_chunks,
-        focused_chunk={"startLine": 1, "content": "\n".join(coverage_lines)},
-        chunk_source="local_test_failure_summary",
-        anchor_type="coverage_failure_block",
-        signature_extractor=_extract_coverage_signature,
-        score=0.9,
-    )
-    for idx, chunk in enumerate(chunks):
-        chunk["chunkIndex"] = idx
-    return chunks[:max_chunks]
+    return chunks
 
 
 def _focused_chunk(all_lines: list[str], start_idx: int, end_idx: int, tail_lines: int, *, max_output_chars: int, chunk_source: str, stage_name: str | None, step_name: str | None, anchor_type: str) -> dict:
     segment = all_lines[start_idx : end_idx + 1]
-    tail_start = max(0, len(segment) - tail_lines)
-    content, text_truncated = truncate_tail_text("\n".join(segment[tail_start:]), max_output_chars)
-    return {"chunkIndex": 0, "schemaVersion": 2, "chunkSource": chunk_source, "stageName": stage_name, "stepName": step_name, "anchorType": anchor_type, "startLine": start_idx + tail_start + 1, "endLine": end_idx + 1, "score": 1.0, "content": content, "truncated": text_truncated or tail_start > 0}
+    return _focused_chunk_from_segment(
+        segment,
+        start_line=start_idx + 1,
+        end_line=end_idx + 1,
+        tail_lines=tail_lines,
+        max_output_chars=max_output_chars,
+        chunk_source=chunk_source,
+        stage_name=stage_name,
+        step_name=step_name,
+        anchor_type=anchor_type,
+    )
+
+
+def _focused_chunk_from_segment(segment: list[str], *, start_line: int, end_line: int, tail_lines: int, max_output_chars: int, chunk_source: str, stage_name: str | None, step_name: str | None, anchor_type: str, prior_truncated: bool = False) -> dict:
+    selected, line_truncated = _keep_failure_block_edges(segment, tail_lines)
+    content, text_truncated = _truncate_failure_block_text("\n".join(selected), max_output_chars)
+    return {"chunkIndex": 0, "schemaVersion": 2, "chunkSource": chunk_source, "stageName": stage_name, "stepName": step_name, "anchorType": anchor_type, "startLine": start_line, "endLine": end_line, "score": 1.0, "content": content, "truncated": text_truncated or line_truncated or prior_truncated}
 
 
 def _build_summary_chunks(*, lines: list[str], starts: list[int], max_chunks: int, focused_chunk: dict, chunk_source: str, anchor_type: str, signature_extractor: Callable[[str], dict], score: float) -> list[dict]:
@@ -356,12 +476,9 @@ def _build_summary_chunks(*, lines: list[str], starts: list[int], max_chunks: in
 
 def _summary_chunk(*, chunk_index: int, lines: list[str], start: int, end: int, focused_chunk: dict, chunk_source: str, anchor_type: str, signature_extractor: Callable[[str], dict], score: float) -> dict:
     end = _trim_failure_block_end(lines, start, end)
-    block_lines = lines[start:end][:120]
-    content = "\n".join(block_lines)
-    truncated = end - start > len(block_lines)
-    if len(content) > 12000:
-        content = content[:12000]
-        truncated = True
+    block_lines, line_truncated = _keep_failure_block_edges(lines[start:end], 120)
+    content, text_truncated = _truncate_failure_block_text("\n".join(block_lines), 12000)
+    truncated = line_truncated or text_truncated
     signature = signature_extractor(content)
     start_line = (focused_chunk.get("startLine") or 1) + start
     end_line = start_line + max(0, len(block_lines) - 1)
@@ -375,6 +492,59 @@ def _strip_docker_log_prefix(line: str) -> str:
 
 def _semantic_log_line(line: str) -> str:
     return ANSI_RE.sub("", _strip_docker_log_prefix(line)).strip()
+
+
+def _find_japa_error_detail_start(clean_lines: list[str], xfail_start: int) -> int | None:
+    xfail = XFAIL_BLOCK_RE.match(clean_lines[xfail_start])
+    if not xfail:
+        return None
+    title = _normalize_japa_title(xfail.group(1))
+    for idx in range(xfail_start + 1, len(clean_lines)):
+        header = JAPA_ERROR_HEADER_RE.match(clean_lines[idx])
+        if header and _normalize_japa_title(header.group("label").rsplit(" / ", 1)[-1]) == title:
+            return idx
+    return None
+
+
+def _find_japa_error_detail_end(clean_lines: list[str], detail_start: int, *, max_lines: int = 120) -> int:
+    end = min(len(clean_lines), detail_start + max(1, max_lines))
+    for idx in range(detail_start + 1, end):
+        line = clean_lines[idx]
+        if (
+            line == "FAILED"
+            or line == "PASSED"
+            or line.startswith("Tests  ")
+            or line.startswith("Time  ")
+            or line.startswith("===")
+            or line.startswith("npm error")
+            or line.startswith("> nx run ")
+        ):
+            return idx
+    return end
+
+
+def _normalize_japa_title(value: str) -> str:
+    return JAPA_DURATION_SUFFIX_RE.sub("", value).strip().casefold()
+
+
+def _keep_failure_block_edges(lines: list[str], max_lines: int) -> tuple[list[str], bool]:
+    """Bound a failure block without dropping its ``✖`` anchor or final evidence."""
+    if max_lines <= 0 or len(lines) <= max_lines:
+        return lines, False
+    head_count = max(1, max_lines // 2)
+    tail_count = max(1, max_lines - head_count)
+    return [*lines[:head_count], "...[truncated failure block middle]...", *lines[-tail_count:]], True
+
+
+def _truncate_failure_block_text(text: str, max_output_chars: int) -> tuple[str, bool]:
+    """Keep both stable Japa identity and trailing failure evidence when bounded."""
+    if max_output_chars <= 0 or len(text) <= max_output_chars:
+        return text, False
+    marker = "\n...[truncated failure block middle]...\n"
+    remaining = max(0, max_output_chars - len(marker))
+    head_count = (remaining + 1) // 2
+    tail_count = remaining - head_count
+    return text[:head_count] + marker + text[-tail_count:], True
 
 
 def _trim_failure_block_end(lines: list[str], start: int, end: int) -> int:
@@ -404,59 +574,12 @@ def _extract_xfail_signature(content: str) -> dict:
             error_message = _first_meaningful_error_line(lines[1:]) or "error"
     files = _extract_stack_paths(lines)
     test_file = _pick_test_file(files)
-    top_stack_file = files[0] if files else None
+    # For Japa assertions, the framework's node_modules frame is not the
+    # failing file.  Prefer the concrete test path whenever it is available.
+    top_stack_file = test_file or next((path for path in files if "node_modules/" not in path), None)
     normalized_error = _stable_error_message(error_message)
     signature_key = build_responsibility_signature(failure_title=title, failure_summary="\n".join((content, normalized_error)), existing_signature="|".join(["xfail", title, error_type, normalized_error, test_file or "", top_stack_file or ""]), failure_kind="xfail", error_type=error_type, test_file_path=test_file, failure_file_path=top_stack_file)
     return {"testName": title, "testCase": title, "errorType": error_type, "errorMessage": normalized_error, "testFile": test_file, "topStackFile": top_stack_file, "businessStackFiles": files, "signatureKey": signature_key}
-
-
-def _extract_coverage_signature(content: str) -> dict:
-    """从 c8 覆盖率错误行生成稳定指纹。
-
-    指纹键基于 metric + 目标文件（不含变化的 pct/threshold），保证同一文件同一指标
-    的覆盖率失败可去重、可寻历史。
-    """
-    from ci_owner_agent.services.failure_identity import build_responsibility_signature
-
-    lines = content.splitlines()
-    match = next((COVERAGE_ERROR_RE.match(line) for line in lines if COVERAGE_ERROR_RE.match(line)), None)
-    metric = match.group("metric") if match else "coverage"
-    raw_file = match.group("file") if match and match.group("file") else None
-    threshold = match.group("thr") if match else "100"
-    # 重建行可能带仓库前缀 `packages/<pkg>/...`（B 已确认包名时），拆出包名与包内相对路径
-    package_name: str | None = None
-    file_path = raw_file
-    if raw_file and raw_file.startswith("packages/"):
-        parts = raw_file.split("/", 2)
-        if len(parts) >= 2:
-            package_name = parts[1]
-        if len(parts) >= 3:
-            file_path = parts[2]
-    title = f"coverage {metric} below {threshold}%"
-    error_message = _stable_error_message(f"{metric} below {threshold}% threshold")
-    test_file = None
-    top_stack_file = file_path
-    failure_title = f"{metric} coverage below {threshold}%"
-    signature_key = build_responsibility_signature(
-        failure_title=failure_title,
-        failure_summary="\n".join((content, error_message)),
-        existing_signature="|".join(["coverage", metric, file_path or ""]),
-        failure_kind="coverage",
-        error_type="CoverageError",
-        test_file_path=None,
-        failure_file_path=file_path,
-    )
-    return {
-        "testName": failure_title,
-        "testCase": failure_title,
-        "errorType": "CoverageError",
-        "errorMessage": error_message,
-        "testFile": None,
-        "packageName": package_name,
-        "topStackFile": file_path,
-        "businessStackFiles": [file_path] if file_path else [],
-        "signatureKey": signature_key,
-    }
 
 
 def _extract_stack_paths(lines: list[str]) -> list[str]:

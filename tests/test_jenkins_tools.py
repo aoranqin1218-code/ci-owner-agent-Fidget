@@ -102,6 +102,79 @@ def test_jenkins_client_warns_when_commit_missing():
     assert any("commit not found" in item for item in result["buildInfo"]["warnings"])
 
 
+def test_jenkins_client_uses_explicit_checkout_stage_sha_and_branch_when_script_checkout_differs():
+    job = "npm/fxp-fidget/fidget-xiaoqin-pipeline"
+    script_commit = "a" * 40
+    tested_commit = "b" * 40
+    payload = {
+        "number": 5,
+        "result": "FAILURE",
+        "url": "http://jenkins.test/build/5/",
+        "timestamp": 1700000000000,
+        "duration": 1234,
+        "actions": [
+            {"lastBuiltRevision": {"SHA1": script_commit}},
+            {"buildsByBranchName": {"refs/remotes/origin/main": {}, "refs/remotes/origin/script": {}}},
+        ],
+        "changeSet": {"items": []},
+    }
+    console = (
+        f"Checking out Revision {script_commit} (refs/remotes/origin/main)\n"
+        "[Pipeline] stage\n"
+        "[Pipeline] { (Checkout)\n"
+        f"Checking out Revision {tested_commit} (refs/remotes/origin/main)\n"
+        "[Pipeline] // stage\n"
+        "Finished: FAILURE\n"
+    )
+
+    result = client_for({
+        jenkins_url(job, "5/api/json"): FakeResponse(payload),
+        jenkins_url(job, "5/consoleText"): FakeResponse(text=console),
+    }).get_build_info(job, 5)
+
+    assert result["ok"] is True
+    assert result["buildInfo"]["commit"] == tested_commit
+    assert result["buildInfo"]["branch"] == "main"
+
+
+def test_last_successful_build_uses_explicit_checkout_stage_when_api_metadata_is_ambiguous():
+    job = "npm/fxp-fidget/fidget-xiaoqin-pipeline"
+    script_commit = "a" * 40
+    tested_commit = "b" * 40
+    payload = {
+        "number": 4,
+        "result": "SUCCESS",
+        "url": "http://jenkins.test/build/4/",
+        "timestamp": 1700000000000,
+        "duration": 1234,
+        "actions": [
+            {"lastBuiltRevision": {"SHA1": script_commit}},
+            {"parameters": [{"name": "GIT_COMMIT", "value": "c" * 40}]},
+        ],
+        "changeSet": {"items": []},
+    }
+    console = (
+        f"Checking out Revision {script_commit} (refs/remotes/origin/main)\n"
+        "[Pipeline] stage\n"
+        "[Pipeline] { (Checkout)\n"
+        f"Checking out Revision {tested_commit} (refs/remotes/origin/main)\n"
+        "[Pipeline] // stage\n"
+        "Finished: SUCCESS\n"
+    )
+    client = client_for({
+        jenkins_url(job, "lastSuccessfulBuild/api/json"): FakeResponse(payload),
+        jenkins_url(job, "4/api/json"): FakeResponse(payload),
+        jenkins_url(job, "4/consoleText"): FakeResponse(text=console),
+    })
+
+    result = client.get_last_successful_build_info(job, branch="main", before_build_number=5)
+
+    assert result["ok"] is True
+    assert result["successfulBuildInfo"]["buildNumber"] == 4
+    assert result["successfulBuildInfo"]["branch"] == "main"
+    assert result["successfulBuildInfo"]["commit"] == tested_commit
+
+
 def test_jenkins_branch_extraction_normalizes_and_rejects_ambiguous_candidates():
     job = "services/fx-code-unittest"
     payload = build_payload(1, "FAILURE", "abc1234", branch="refs/heads/feature/a")
@@ -264,6 +337,34 @@ def test_long_jenkins_console_keeps_tail_for_status_and_tail():
     assert provider.detect_final_status() == "FAILURE"
     assert provider.search("AssertionError", 1, 1)["matches"]
     assert provider.find_error_chunks(5, 1)["chunks"]
+
+
+def test_jenkins_log_provider_scans_early_japa_failure_beyond_bounded_console_tail():
+    """A long Jenkins console must not lose an early structured test failure.
+
+    The regular client response is deliberately tail-truncated for Agent tool
+    output.  The provider must nevertheless scan the full console for the
+    durable Japa signature used by historical failure matching.
+    """
+    job = "npm/fxp-fidget/fidget-build"
+    early_failure = "✖ ci-owner-agent controlled failure\nAssertionError: expected true to be false\n"
+    long_middle = "\n".join(f"noise line {idx}" for idx in range(400))
+    console = f"{early_failure}{long_middle}\nFinished: FAILURE\n"
+    client = JenkinsClient(
+        "http://jenkins.test",
+        session=FakeSession({jenkins_url(job, "5/consoleText"): FakeResponse(text=console)}),
+        max_output_chars=20,
+    )
+
+    bounded = client.get_console_text(job, 5)
+    assert "ci-owner-agent controlled failure" not in bounded["content"]
+    assert bounded["truncated"] is True
+
+    summaries = JenkinsLogProvider(client, job, 5).find_test_failure_summaries(max_chunks=5)
+    assert summaries["totals"]["japa"] == 1
+    assert len(summaries["chunks"]) == 1
+    assert summaries["chunks"][0]["anchorType"] == "japa_failure_block"
+    assert "ci-owner-agent controlled failure" in summaries["chunks"][0]["content"]
 
 
 def test_last_successful_build_extracts_commit_from_console(sample_repo):

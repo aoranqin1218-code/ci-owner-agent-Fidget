@@ -46,11 +46,14 @@ def resolve_test_maintainer_matches(
         if item.responsibilityType != "no_high_confidence_owner":
             matches.append(None)
             continue
+        # Japa 责任项通常使用 testFilePath；coverage 指向未覆盖的源文件，使用
+        # failureFilePath。两者都只是维护人路由依据，不改变 causal owner。
+        route_path = item.testFilePath or item.failureFilePath
         matches.append(
             resolver.resolve(
                 repo=repo or notice.repo,
                 job=notice.job,
-                test_file_path=item.testFilePath,
+                test_file_path=route_path,
                 fallback_userids=fallback_userids,
             )
         )

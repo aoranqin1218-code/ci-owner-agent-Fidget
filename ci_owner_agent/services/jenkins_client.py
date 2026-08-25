@@ -49,18 +49,47 @@ class JenkinsClient:
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
 
-    def _get_text(self, url: str) -> dict[str, Any]:
+    def _get_text(self, url: str, *, retain_full_content: bool = False) -> dict[str, Any]:
         try:
             response = self.session.get(url, auth=self.auth, timeout=self.timeout)
             response.raise_for_status()
-            resolution = resolve_checkout_revision_from_console_log(response.text)
-            text, truncated = truncate_tail_text(response.text, self.max_output_chars * 5)
-            return {"ok": True, "content": text, "truncated": truncated, "checkoutCommit": resolution.commit, "checkoutCommitAmbiguous": resolution.ambiguous}
+            full_text = response.text
+            resolution = resolve_checkout_revision_from_console_log(full_text)
+            text, truncated = truncate_tail_text(full_text, self.max_output_chars * 5)
+            result = {
+                "ok": True,
+                "content": text,
+                "truncated": truncated,
+                "checkoutCommit": resolution.commit,
+                "checkoutCommitAmbiguous": resolution.ambiguous,
+                "checkoutRefs": list(resolution.refs),
+                "checkoutCommitFromExplicitStage": resolution.from_explicit_checkout_stage,
+            }
+            # ``content`` remains bounded for regular callers and Agent tool output.
+            # JenkinsLogProvider asks explicitly for the full text so it can scan the
+            # complete console for structured Japa/c8 facts.  Keeping only the tail
+            # here can discard the actual test failure while retaining its Docker
+            # footer, which makes historical failure matching unsafe.
+            if retain_full_content:
+                result["analysisContent"] = full_text
+            return result
         except Exception as exc:
             return {"ok": False, "error": str(exc), "content": ""}
 
     def get_console_text(self, job: str, build_number: int) -> dict:
         return self._get_text(self._url(job, f"{build_number}/consoleText"))
+
+    def get_console_text_for_analysis(self, job: str, build_number: int) -> dict:
+        """Fetch a console with full text for bounded LogProvider operations.
+
+        The HTTP response is already read in full to obtain checkout evidence.
+        This method keeps that text only inside the log-provider boundary; every
+        public Agent-facing operation still applies its own output limit.
+        """
+        return self._get_text(
+            self._url(job, f"{build_number}/consoleText"),
+            retain_full_content=True,
+        )
 
     def get_build_json(self, job: str, build_number: int | str) -> dict:
         return self._get_json(self._url(job, f"{build_number}/api/json"))
@@ -78,11 +107,36 @@ class JenkinsClient:
             warnings.append("console text was truncated while reading from Jenkins")
         log_tail = self._tail_from_text(console_text, log_tail_lines)
         metadata = self._resolve_checkout_commit_from_metadata(data)
-        console_resolution = CheckoutCommitResolution(console.get("checkoutCommit"), bool(console.get("checkoutCommitAmbiguous")))
+        console_resolution = CheckoutCommitResolution(
+            console.get("checkoutCommit"),
+            bool(console.get("checkoutCommitAmbiguous")),
+            tuple(str(ref) for ref in console.get("checkoutRefs") or ()),
+            bool(console.get("checkoutCommitFromExplicitStage")),
+        )
         commit, commit_error = self._merge_checkout_commit_resolutions(metadata, console_resolution)
         if commit_error:
             warnings.append(commit_error)
         branch = self._extract_branch(data)
+        if console_resolution.from_explicit_checkout_stage and console_resolution.commit:
+            console_branches = {
+                normalized
+                for ref in console_resolution.refs
+                if (normalized := normalize_branch_name(ref)) is not None
+            }
+            if len(console_branches) == 1:
+                branch = console_branches.pop()
+            elif len(console_branches) > 1:
+                warnings.append("could not determine a unique logical branch from trusted checkout refs")
+        elif branch is None and not self._has_branch_metadata(data) and console_resolution.commit:
+            console_branches = {
+                normalized
+                for ref in console_resolution.refs
+                if (normalized := normalize_branch_name(ref)) is not None
+            }
+            if len(console_branches) == 1:
+                branch = console_branches.pop()
+            elif len(console_branches) > 1:
+                warnings.append("could not determine a unique logical branch from trusted checkout refs")
         if branch is None and self._has_branch_metadata(data):
             warnings.append("could not determine a unique logical branch from Jenkins build metadata")
         build_info = BuildInfo(
@@ -153,33 +207,50 @@ class JenkinsClient:
                 return None
             seen_numbers.add(number)
             scanned += 1
-            branch_name = self._extract_branch(data)
             reasons: list[str] = []
             if before_build_number is not None and number >= before_build_number:
                 reasons.append("not before current build")
             result = (data.get("result") or "UNKNOWN").upper()
             if result != "SUCCESS":
                 reasons.append(f"result={result}")
-            if branch_name != current_branch:
-                reasons.append(f"branch={branch_name!r} does not match {current_branch!r}")
             if reasons:
                 rejected.append(f"{source}: build {number} rejected: {', '.join(reasons)}")
                 return None
+
+            branch_name = self._extract_branch(data)
             metadata = self._resolve_checkout_commit_from_metadata(data)
-            if metadata.ambiguous:
-                rejected.append(f"{source}: build {number} rejected: ambiguous trusted checkout commit metadata")
-                return None
             commit = metadata.commit
-            if not commit:
+            if branch_name is None or metadata.ambiguous or not commit:
                 console = self.get_console_text(job, number)
                 if not console.get("ok"):
                     rejected.append(f"{source}: build {number} console unreadable: {console.get('error')}")
                     return None
-                console_resolution = CheckoutCommitResolution(console.get("checkoutCommit"), bool(console.get("checkoutCommitAmbiguous")))
-                if console_resolution.ambiguous:
-                    rejected.append(f"{source}: build {number} rejected: ambiguous trusted checkout commit")
+                console_resolution = CheckoutCommitResolution(
+                    console.get("checkoutCommit"),
+                    bool(console.get("checkoutCommitAmbiguous")),
+                    tuple(str(ref) for ref in console.get("checkoutRefs") or ()),
+                    bool(console.get("checkoutCommitFromExplicitStage")),
+                )
+                commit, commit_error = self._merge_checkout_commit_resolutions(metadata, console_resolution)
+                if commit_error:
+                    rejected.append(f"{source}: build {number} rejected: {commit_error}")
                     return None
-                commit = console_resolution.commit
+                if console_resolution.from_explicit_checkout_stage or (
+                    branch_name is None and not self._has_branch_metadata(data)
+                ):
+                    console_branches = {
+                        normalized
+                        for ref in console_resolution.refs
+                        if (normalized := normalize_branch_name(ref)) is not None
+                    }
+                    if len(console_branches) == 1:
+                        branch_name = console_branches.pop()
+                    elif len(console_branches) > 1:
+                        rejected.append(f"{source}: build {number} rejected: ambiguous trusted checkout branch")
+                        return None
+            if branch_name != current_branch:
+                rejected.append(f"{source}: build {number} rejected: branch={branch_name!r} does not match {current_branch!r}")
+                return None
             if not commit:
                 rejected.append(f"{source}: build {number} rejected: missing commit")
                 return None
@@ -275,6 +346,8 @@ class JenkinsClient:
         return CheckoutCommitResolution(None, ambiguous=bool(candidates))
 
     def _merge_checkout_commit_resolutions(self, metadata: CheckoutCommitResolution, console: CheckoutCommitResolution) -> tuple[str | None, str | None]:
+        if console.from_explicit_checkout_stage and console.commit and not console.ambiguous:
+            return console.commit, None
         if metadata.ambiguous or console.ambiguous or (metadata.commit and console.commit and metadata.commit != console.commit):
             return None, "trusted checkout commit metadata is ambiguous or conflicting"
         commit = metadata.commit or console.commit

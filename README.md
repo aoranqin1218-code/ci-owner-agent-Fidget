@@ -4,7 +4,7 @@ CI Owner Agent 是一个用于分析 Jenkins / CI 构建失败并生成结构化
 
 它在接收 Jenkins / 本地 console log 时，按失败类型识别结构化失败块并生成指纹：以 Japa（`✖` 失败符号）测试运行器输出定位测试用例失败（Fidget 二期），并识别 c8 `check-coverage` 100% 门槛不足的覆盖率失败（`Coverage for <metric> (<pct>%) does not meet threshold ... for <file>`），同时清洗 Docker/BuildKit 行前缀与 ANSI 色码，使同一套失败定位逻辑同时适用于本地测试与 Jenkins BuildKit 合并单流输出。
 
-覆盖率失败（Fidget 二期）由确定性 reconciler 负责定责：先按 Nx task 输出块归属包名，必要时在候选包完整路径上唯一消歧，再在可信 `base..head` diff 内找唯一作者 → 中等置信责任人；多作者 / 无 diff / 路径不可验证 → 诚实输出无高可信责任人。Agent 不参与 coverage 责任项生成。
+覆盖率失败（Fidget 二期）由确定性 reconciler 负责定责：同一文件的多个 coverage 指标先合并为一个责任项；Japa 与 coverage 混合失败时两类事实同时保留，展示预算不足也会完整记录 coverage 文件与遗漏数量。随后按 Nx task 输出块归属包名，必要时在候选包完整路径上唯一消歧，再在可信 `base..head` diff 内找唯一作者 → 中等置信责任人；多作者 / 无 diff / 路径不可验证 → 诚实输出无高可信责任人。Agent 不参与 coverage 责任项生成。
 
 它不会简单地把失败归给“最后一次提交人”，而是综合构建状态、可信 checkout SHA、Git 提交与 diff、失败日志、历史失败、人工反馈和可选 LLM 工具调用，判断失败属于：
 

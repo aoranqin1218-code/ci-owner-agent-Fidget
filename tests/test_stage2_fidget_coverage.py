@@ -12,13 +12,18 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from ci_owner_agent.schemas import CiResponsibilityNotice
 from ci_owner_agent.services.coverage_responsibility import (
+    reconcile_coverage_responsibilities,
     resolve_coverage_owner_candidate,
     resolve_coverage_package,
 )
+from ci_owner_agent.services.history_search import CURRENT_ALLOWED_CHUNK_SOURCES
+from ci_owner_agent.services.history_store import ALLOWED_HISTORY_CHUNK_SOURCES
 from ci_owner_agent.services.investigation_scope import InvestigationScope
-from ci_owner_agent.services.log_parsing import find_coverage_errors
-from ci_owner_agent.services.log_provider import LocalFileLogProvider
+from ci_owner_agent.services.log_parsing import build_coverage_failure_summaries, find_coverage_errors
+from ci_owner_agent.services.log_provider import LocalFileLogProvider, TextLogProvider
+from ci_owner_agent.services.scorer import no_owner, validate_notice
 
 _SAMPLES = Path(__file__).resolve().parents[1] / "samples" / "fidget_log"
 _HEAD = "a" * 40
@@ -42,6 +47,18 @@ class FakeGitClient:
     def get_file_diff(self, repo, base, head, path):
         authors = self.authors_by_path.get(path, [])
         return {"ok": True, "diff": "diff --git a b", "authors": authors}
+
+
+class MemoryLogProvider(TextLogProvider):
+    def __init__(self, lines):
+        super().__init__()
+        self.lines = list(lines)
+
+    def _lines(self):
+        return self.lines
+
+    def _content(self):
+        return "\n".join(self.lines)
 
 
 def _scope():
@@ -132,8 +149,10 @@ def test_summary_builds_coverage_chunk_with_package():
     for chunk in chunks:
         assert chunk["anchorType"] == "coverage_failure_block"
         sig = chunk.get("signature") or {}
-        assert sig.get("signatureKey", "").startswith("coverage|")
-        assert sig.get("topStackFile") == "src/parser/TokenScanner.ts"
+        assert sig.get("signatureKey", "").startswith("coverage_threshold_failure|")
+        assert sig.get("topStackFile") is None
+        assert sig.get("rawCoveragePath") == "src/parser/TokenScanner.ts"
+        assert chunk["chunkSource"] == "c8_coverage_threshold_failure"
 
 
 def test_summary_success_log_no_coverage_chunk():
@@ -143,6 +162,55 @@ def test_summary_success_log_no_coverage_chunk():
     chunks = result.get("chunks") or []
     coverage = [c for c in chunks if c.get("anchorType") == "coverage_failure_block"]
     assert coverage == []
+
+
+def test_same_file_multiple_metrics_becomes_one_chunk_and_one_signature():
+    lines = [
+        "ERROR: Coverage for statements (80%) does not meet threshold (100%) for src/X.ts",
+        "ERROR: Coverage for lines (90%) does not meet threshold (100%) for src/X.ts",
+    ]
+    chunks = build_coverage_failure_summaries(lines, max_chunks=None)
+
+    assert len(chunks) == 1
+    signature = chunks[0]["signature"]
+    assert set(signature["metrics"]) == {"statements", "lines"}
+    assert signature["signatureKey"] == "coverage_threshold_failure|unresolved|src/X.ts"
+    changed_percentages = build_coverage_failure_summaries(
+        [
+            "ERROR: Coverage for statements (70%) does not meet threshold (100%) for src/X.ts",
+            "ERROR: Coverage for lines (85%) does not meet threshold (100%) for src/X.ts",
+        ],
+        max_chunks=None,
+    )
+    assert changed_percentages[0]["signatureHash"] == chunks[0]["signatureHash"]
+
+
+def test_mixed_budget_keeps_coverage_and_records_omitted_counts():
+    lines = []
+    for index in range(5):
+        lines.extend([f"✖ test {index}", "AssertionError: expected true to be false"])
+    lines.append("ERROR: Coverage for lines (90%) does not meet threshold (100%) for src/X.ts")
+
+    result = MemoryLogProvider(lines).find_test_failure_summaries(max_chunks=5)
+
+    assert len(result["chunks"]) == 5
+    assert sum(chunk["anchorType"] == "coverage_failure_block" for chunk in result["chunks"]) == 1
+    assert result["totals"] == {
+        "japa": 5,
+        "coverage": 1,
+        "omittedJapa": 1,
+        "omittedCoverage": 0,
+    }
+    assert result["coverageFiles"][0]["rawCoveragePath"] == "src/X.ts"
+
+
+def test_coverage_chunk_source_is_excluded_from_deterministic_history():
+    chunk = build_coverage_failure_summaries(
+        ["ERROR: Coverage for lines (90%) does not meet threshold (100%) for src/X.ts"]
+    )[0]
+
+    assert chunk["chunkSource"] not in CURRENT_ALLOWED_CHUNK_SOURCES
+    assert chunk["chunkSource"] not in ALLOWED_HISTORY_CHUNK_SOURCES
 
 
 def test_resolve_single_author_medium():
@@ -214,3 +282,132 @@ def test_resolve_package_c_ambiguous_no_owner():
         git_client=git, trusted_head_commit=_HEAD,
     )
     assert pkg is None
+
+
+def _notice() -> CiResponsibilityNotice:
+    return CiResponsibilityNotice(
+        repo="fxp-fidget",
+        job="npm/fxp-fidget/fidget-build",
+        buildNumber=1,
+        buildUrl="https://jenkins.example/build/1",
+        result="FAILURE",
+        branch="dev",
+        headCommit=_HEAD,
+        baseCommit=_BASE,
+        owner=no_owner(),
+        failureReason="coverage failed",
+        hasHighConfidenceOwner=False,
+    )
+
+
+def test_reconciler_uses_complete_coverage_files_and_promotes_single_medium_owner():
+    path = "packages/fidget-sql/src/X.ts"
+    git = FakeGitClient(
+        existing_paths=[path],
+        authors_by_path={
+            path: [{"name": "Zhang San", "email": "zs@x.com", "commits": [_HEAD]}]
+        },
+    )
+    summaries = {
+        "chunks": [],
+        "coverageFiles": [
+            {
+                "packageName": "fidget-sql",
+                "rawCoveragePath": "src/X.ts",
+                "metrics": {
+                    "statements": {"pct": 80.0, "threshold": 100.0},
+                    "lines": {"pct": 90.0, "threshold": 100.0},
+                },
+                "content": "ERROR: Coverage for statements ... for src/X.ts",
+            }
+        ],
+    }
+
+    notice = reconcile_coverage_responsibilities(
+        _notice(),
+        failure_summaries=summaries,
+        repo="fxp-fidget",
+        head_commit=_HEAD,
+        git_client=git,
+        investigation_scope=_scope(),
+    )
+    notice = validate_notice(notice)
+
+    assert len(notice.responsibilityItems) == 1
+    item = notice.responsibilityItems[0]
+    assert item.failureSignature == f"coverage_threshold_failure|{path.lower()}"
+    assert item.owner.type == "medium_confidence"
+    assert item.failureFilePath == path
+    assert notice.owner.type == "medium_confidence"
+    assert notice.owner.name == "Zhang San"
+    assert notice.hasHighConfidenceOwner is False
+    assert {evidence.type for evidence in notice.evidence if evidence.id in item.evidenceIds} == {"log", "diff"}
+
+
+def test_global_coverage_reconciles_to_no_owner_without_fake_path():
+    summaries = {
+        "coverageFiles": [
+            {
+                "packageName": "fidget-sql",
+                "rawCoveragePath": None,
+                "metrics": {"branches": {"pct": 80.0, "threshold": 100.0}},
+                "content": "ERROR: Coverage for branches ... global threshold",
+            }
+        ]
+    }
+
+    notice = reconcile_coverage_responsibilities(
+        _notice(),
+        failure_summaries=summaries,
+        repo="fxp-fidget",
+        head_commit=_HEAD,
+        git_client=FakeGitClient(),
+        investigation_scope=_scope(),
+    )
+
+    item = notice.responsibilityItems[0]
+    assert item.failureFilePath is None
+    assert item.owner.type == "no_high_confidence_owner"
+    assert item.failureSignature == "coverage_threshold_failure|global|fidget-sql|branches"
+    assert item.evidenceIds and all(value.startswith("coverage-log-") for value in item.evidenceIds)
+
+
+def test_reconciler_does_not_choose_one_build_owner_when_files_have_different_owners():
+    first = "packages/fidget-sql/src/A.ts"
+    second = "packages/fidget-core/src/B.ts"
+    git = FakeGitClient(
+        existing_paths=[first, second],
+        authors_by_path={
+            first: [{"name": "Author A", "email": "a@x.com", "commits": ["commit-a"]}],
+            second: [{"name": "Author B", "email": "b@x.com", "commits": ["commit-b"]}],
+        },
+    )
+    summaries = {
+        "coverageFiles": [
+            {
+                "packageName": "fidget-sql",
+                "rawCoveragePath": "src/A.ts",
+                "metrics": {"lines": {"pct": 90.0, "threshold": 100.0}},
+                "content": "coverage A",
+            },
+            {
+                "packageName": "fidget-core",
+                "rawCoveragePath": "src/B.ts",
+                "metrics": {"lines": {"pct": 90.0, "threshold": 100.0}},
+                "content": "coverage B",
+            },
+        ]
+    }
+
+    notice = reconcile_coverage_responsibilities(
+        _notice(),
+        failure_summaries=summaries,
+        repo="fxp-fidget",
+        head_commit=_HEAD,
+        git_client=git,
+        investigation_scope=_scope(),
+    )
+
+    assert [item.owner.name for item in notice.responsibilityItems] == ["Author A", "Author B"]
+    assert notice.owner.type == "no_high_confidence_owner"
+    assert notice.hasHighConfidenceOwner is False

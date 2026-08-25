@@ -1,9 +1,9 @@
 """Fidget 二期：为 c8 覆盖率门槛失败解析确定性 owner 候选。
 
 与一期一致性：
-- 确定性逻辑支持"定位候选人 + 给 medium_confidence"，**medium 是确定性上限**；
+- 确定性逻辑支持"定位候选人 + 给 medium_confidence"，**medium 是当前 coverage 上限**；
 - 从多人里选"最后/最近/最多"提交者是被禁止的，多作者一律降级 no_high_confidence_owner；
-- 要提升到 high_confidence 需 Agent 拿 c8 日志 + diff 的语义证据确认，不在本模块内猜测。
+- coverage 采用方案 X，由本模块单一写入，Agent 不参与 coverage 建项或置信度提升。
 """
 
 from __future__ import annotations
@@ -231,25 +231,57 @@ def resolve_coverage_owner_candidate(
         reason=f"no applicable diff range; cannot attribute {full_path} coverage gap",
     )
 
-def _coverage_chunks(failure_summaries: dict[str, Any] | None) -> list[dict[str, Any]]:
-    """从 failure_summaries 提取 coverage 类型的 chunk。"""
+def _coverage_records(failure_summaries: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """读取不受展示预算影响的 coverage facts，并兼容旧版 chunk-only 输入。"""
     if not isinstance(failure_summaries, dict):
         return []
-    return [
-        chunk
-        for chunk in (failure_summaries.get("chunks") or [])
-        if isinstance(chunk, dict) and chunk.get("anchorType") == "coverage_failure_block"
-    ]
+    coverage_files = failure_summaries.get("coverageFiles")
+    if isinstance(coverage_files, list) and coverage_files:
+        return [dict(item) for item in coverage_files if isinstance(item, dict)]
+    records: list[dict[str, Any]] = []
+    for chunk in failure_summaries.get("chunks") or []:
+        if not isinstance(chunk, dict) or chunk.get("anchorType") != "coverage_failure_block":
+            continue
+        signature = chunk.get("signature") or {}
+        raw_path = signature.get("rawCoveragePath") or signature.get("topStackFile")
+        if not raw_path and signature.get("businessStackFiles"):
+            raw_path = signature["businessStackFiles"][0]
+        metrics = signature.get("metrics") or {}
+        if not metrics:
+            metric = str(signature.get("errorMessage") or "coverage").split(" ", 1)[0]
+            metrics = {metric: {}}
+        records.append(
+            {
+                "packageName": signature.get("packageName"),
+                "rawCoveragePath": raw_path,
+                "metrics": metrics,
+                "signatureKey": signature.get("signatureKey"),
+                "content": chunk.get("content") or "",
+            }
+        )
+    return records
 
 
-def _coverage_stable_signature(file_or_scope: str, package: str | None, metric: str) -> str:
-    """coverage 责任项的稳定签名，用于识别/去重 AI 意外生成项。"""
-    return f"coverage_threshold_failure|{file_or_scope}|{package or ''}|{metric}"
+def _coverage_stable_signature(
+    *,
+    resolved_path: str | None,
+    raw_path: str | None,
+    package: str | None,
+    metric: str | None = None,
+) -> str:
+    """每文件一个稳定签名；只有 global 项需要 metric 区分。"""
+    if raw_path is None:
+        return f"coverage_threshold_failure|global|{package or 'unresolved'}|{metric or 'coverage'}"
+    return f"coverage_threshold_failure|{resolved_path or f'unresolved|{raw_path}'}"
 
 
 def _is_coverage_item(item: ResponsibilityItem) -> bool:
-    sig = (item.failureSignature or "") or str(item.failureTitle or "")
-    return sig.startswith("coverage_threshold_failure|") or "coverage" in str(item.failureTitle or "").lower()
+    signature = item.failureSignature or ""
+    return (
+        signature.startswith("coverage_threshold_failure|")
+        or signature.startswith("coverage|")
+        or str(item.failureId or "").startswith("coverage-")
+    )
 
 
 def reconcile_coverage_responsibilities(
@@ -264,13 +296,12 @@ def reconcile_coverage_responsibilities(
     """coverage 责任项的唯一生产者（方案 X）：确定性地把 coverage 失败写进 notice。
 
     规则：
-    1. 从 failure_summaries 提取 coverage chunk，逐个 resolve 出 canonical owner；
+    1. 从 failure_summaries 的完整 coverageFiles 提取事实，逐个 resolve 出 canonical owner；
     2. 移除（reconciler 是唯一生产者）Agent 意外生成的所有 coverage 项，按稳定签名识别；
-    3. 追加规范化后的 coverage 项；顶层 owner 由后续 validate_notice 的
-       enforce_owner_consistency 自动重算。
+    3. 追加规范化后的 coverage 项，并显式聚合顶层 owner；后续 validate_notice 负责复检。
     """
-    chunks = _coverage_chunks(failure_summaries)
-    if not chunks:
+    records = _coverage_records(failure_summaries)
+    if not records:
         return notice
 
     # 1. 移除 AI / 其它来源意外生成 coverage 项（reconciler 唯一写入口）
@@ -278,28 +309,39 @@ def reconcile_coverage_responsibilities(
         item for item in notice.responsibilityItems if not _is_coverage_item(item)
     ]
 
-    for chunk in chunks:
-        signature = chunk.get("signature") or {}
-        raw_path = signature.get("topStackFile") or signature.get("businessStackFiles") and (
-            signature["businessStackFiles"][0] if signature.get("businessStackFiles") else None
-        )
-        package_name = signature.get("packageName")
-        metric = (signature.get("errorMessage") or "coverage").split(" ", 1)[0]
-        file_or_scope = raw_path or "global"
-        tag = _coverage_stable_signature(file_or_scope, package_name, metric)
-
+    for record in records:
+        raw_path = record.get("rawCoveragePath")
+        package_name = record.get("packageName")
+        metrics = record.get("metrics") or {"coverage": {}}
+        metric_names = sorted(str(metric) for metric in metrics)
         if not raw_path:
             # global 覆盖率失败：无具体文件，直接 no-owner（无法定位责任文件）
-            item = _build_coverage_item(
-                failure_signature=tag,
-                failure_title=f"coverage {metric} below threshold",
-                file_path=None,
-                owner_type="no_high_confidence_owner",
-                owner=None,
-                confidence=0.0,
-                reason=f"coverage {metric} below threshold without a concrete file; cannot attribute",
-            )
-            notice.responsibilityItems.append(item)
+            for metric in metric_names:
+                tag = _coverage_stable_signature(
+                    resolved_path=None,
+                    raw_path=None,
+                    package=package_name,
+                    metric=metric,
+                )
+                evidence_ids = _append_coverage_evidence(
+                    notice,
+                    tag=tag,
+                    content=str(record.get("content") or ""),
+                    metrics={metric: metrics.get(metric) or {}},
+                    resolution=None,
+                )
+                notice.responsibilityItems.append(
+                    _build_coverage_item(
+                        failure_signature=tag,
+                        failure_title=f"coverage {metric} below threshold",
+                        file_path=None,
+                        owner_type="no_high_confidence_owner",
+                        owner=None,
+                        confidence=0.0,
+                        reason=f"coverage {metric} below threshold without a concrete file; cannot attribute",
+                        evidence_ids=evidence_ids,
+                    )
+                )
             continue
 
         resolution = resolve_coverage_responsibility(
@@ -313,18 +355,107 @@ def reconcile_coverage_responsibilities(
             trusted_head_commit=head_commit or "",
         )
         owner = resolution.owner_candidate
+        tag = _coverage_stable_signature(
+            resolved_path=resolution.resolved_path,
+            raw_path=raw_path,
+            package=package_name,
+        )
+        evidence_ids = _append_coverage_evidence(
+            notice,
+            tag=tag,
+            content=str(record.get("content") or ""),
+            metrics=metrics,
+            resolution=resolution,
+        )
         notice.responsibilityItems.append(
             _build_coverage_item(
                 failure_signature=tag,
-                failure_title=f"coverage {metric} below threshold for {raw_path}",
+                failure_title=f"coverage {','.join(metric_names)} below threshold for {raw_path}",
                 file_path=resolution.resolved_path,
                 owner_type=resolution.owner_type,
                 owner=owner,
                 confidence=0.6 if resolution.owner_type == "medium_confidence" else 0.0,
                 reason=resolution.reason,
+                evidence_ids=evidence_ids,
             )
         )
+    _aggregate_top_level_owner(notice)
     return notice
+
+
+def _append_coverage_evidence(
+    notice: CiResponsibilityNotice,
+    *,
+    tag: str,
+    content: str,
+    metrics: dict[str, Any],
+    resolution: CoverageOwnerResolution | None,
+) -> list[str]:
+    """为每个 coverage item 建立自己的 c8 日志证据和可用的 diff 证据。"""
+    import hashlib
+
+    suffix = hashlib.sha256(tag.encode("utf-8")).hexdigest()[:12]
+    evidence_ids = {item.id for item in notice.evidence}
+    result: list[str] = []
+    log_id = f"coverage-log-{suffix}"
+    if log_id not in evidence_ids:
+        notice.evidence.append(
+            EvidenceItem(
+                id=log_id,
+                type="log",
+                summary="c8 coverage threshold failure",
+                detail=(content or str(metrics))[:2000],
+                source="c8",
+            )
+        )
+        evidence_ids.add(log_id)
+    result.append(log_id)
+    if resolution is not None and resolution.diff_evidence and resolution.resolved_path:
+        diff_id = f"coverage-diff-{suffix}"
+        if diff_id not in evidence_ids:
+            notice.evidence.append(
+                EvidenceItem(
+                    id=diff_id,
+                    type="diff",
+                    summary=f"coverage file changed in {resolution.scope_used} responsibility range",
+                    detail=resolution.reason[:2000],
+                    source=resolution.resolved_path,
+                )
+            )
+        result.append(diff_id)
+    return result
+
+
+def _aggregate_top_level_owner(notice: CiResponsibilityNotice) -> None:
+    """按责任项显式聚合构建级 owner；schema 本身只会降级，不会提升。"""
+    current_items = [
+        item
+        for item in notice.responsibilityItems
+        if item.responsibilityType == "current_build_owner"
+        and item.owner.type in {"high_confidence", "medium_confidence"}
+        and item.owner.name
+        and item.owner.name != NO_OWNER_NAME
+    ]
+    identity_keys = {
+        (item.owner.name, item.owner.email, item.owner.commit, item.responsibilityType)
+        for item in current_items
+    }
+    if len(identity_keys) != 1:
+        notice.owner = Owner(
+            type="no_high_confidence_owner",
+            name=NO_OWNER_NAME,
+            email=None,
+            commit=None,
+            confidence=0.0,
+        )
+        notice.hasHighConfidenceOwner = False
+        return
+    selected = next(
+        (item for item in current_items if item.owner.type == "high_confidence"),
+        current_items[0],
+    )
+    notice.owner = Owner.model_validate(selected.owner.model_dump())
+    notice.hasHighConfidenceOwner = selected.owner.type == "high_confidence"
 
 
 def _build_coverage_item(
@@ -336,6 +467,7 @@ def _build_coverage_item(
     owner: dict[str, Any] | None,
     confidence: float,
     reason: str,
+    evidence_ids: list[str],
 ) -> ResponsibilityItem:
     """构造一个 canonical coverage ResponsibilityItem。"""
     if owner_type == "medium_confidence" and owner:
@@ -370,7 +502,7 @@ def _build_coverage_item(
         relationship=None,
         confidence=confidence,
         reason=reason,
-        evidenceIds=[],
+        evidenceIds=evidence_ids,
     )
 
 

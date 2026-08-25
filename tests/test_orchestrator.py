@@ -914,7 +914,16 @@ def test_all_chunks_no_owner_decision_short_circuits_agent(monkeypatch, repo_cac
     def fail_agent(*args, **kwargs):
         raise AssertionError("agent should be skipped when all failures are historical no-owner")
 
+    from ci_owner_agent.services.coverage_responsibility import reconcile_coverage_responsibilities as original_reconcile
+
+    reconcile_calls = []
+
+    def recording_reconcile(notice, **kwargs):
+        reconcile_calls.append(kwargs.get("failure_summaries"))
+        return original_reconcile(notice, **kwargs)
+
     monkeypatch.setattr("ci_owner_agent.orchestrator.create_responsibility_agent", fail_agent)
+    monkeypatch.setattr("ci_owner_agent.orchestrator.reconcile_coverage_responsibilities", recording_reconcile)
     build_info = BuildInfo(job=context.job, buildNumber=5089, result="FAILURE", buildUrl="local://job/5089", branch=context.branch, commit=context.head_commit)
 
     notice = analyze_failed_build(
@@ -948,6 +957,7 @@ def test_all_chunks_no_owner_decision_short_circuits_agent(monkeypatch, repo_cac
     assert "sig-timeout-b" not in notice.evidence[1].detail
     assert "sig-timeout-b" in notice.evidence[2].detail
     assert "sig-timeout-a" not in notice.evidence[2].detail
+    assert len(reconcile_calls) == 1
     restored = CiResponsibilityNotice.model_validate_json(notice.model_dump_json())
     assert [item.evidenceIds for item in restored.responsibilityItems] == [
         ["E_HISTORY_NO_OWNER_1"],
