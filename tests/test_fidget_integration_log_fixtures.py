@@ -101,8 +101,10 @@ def _samples_by_id() -> dict[str, dict]:
 def test_manifest_declares_exact_three_sample_ids():
     data = _load_manifest()
     samples = data.get("samples", [])
-    ids = {s.get("id") for s in samples}
-    assert ids == _EXPECTED_SAMPLE_IDS, f"exactly 3 sample ids expected, got {ids}"
+    assert len(samples) == len(_EXPECTED_SAMPLE_IDS), f"expected {len(_EXPECTED_SAMPLE_IDS)} samples, got {len(samples)}"
+    ids = [s.get("id") for s in samples]
+    assert len(ids) == len(set(ids)), f"sample ids must be unique, got duplicates: {ids}"
+    assert set(ids) == _EXPECTED_SAMPLE_IDS, f"exactly 3 sample ids expected, got {set(ids)}"
 
 
 def test_protocol_path_resolves_and_readable():
@@ -233,6 +235,21 @@ def test_assertion_sample_only_known_failures():
     text = _read(_SAMPLES / sample["file"])
     # 只有 select 非零（suiteTotals failed=1）
     assert sample["suiteTotals"]["failed"] == 1
+
+    # 逐条解析 8 个 suite 的 exit，断言只有 select 非零、其余全为 0
+    markers = _marker_lines(text)
+    exits: dict[str, int] = {}
+    for ln in markers:
+        if "phase=suite" in ln and "status=end" in ln:
+            name = _suite_name(ln)
+            m = re.search(r"exit=(\d+)", ln)
+            assert m, f"suite end missing exit in {ln}"
+            exits[name] = int(m.group(1))
+    assert set(exits) == _SUITE_ENUM, f"expected all 8 suite exits, got {set(exits)}"
+    assert exits["select-integration"] != 0, "select-integration must be non-zero"
+    for name in _SUITE_ENUM - {"select-integration"}:
+        assert exits[name] == 0, f"{name} must exit 0, got {exits[name]}"
+
     # 两个已知断言失败锚点，无其它 ✖
     fails = [ln for ln in text.splitlines() if "✖" in ln]
     assert len(fails) == 2, f"expected exactly 2 assertion failures, got {len(fails)}"
