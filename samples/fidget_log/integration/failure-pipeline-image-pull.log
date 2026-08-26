@@ -1,0 +1,12 @@
+Obtained ci/Jenkinsfile.v2 from git https://<internal-git>/scm/~<user>/fidget-xiaoqin.git
+Checking out Revision 44b01d19ba7697eb68fc20a20467ea517cf5aa49 (master)
+Commit message: "Merge pull request #226 in FX/fxci-toolbox from ~<user>/fxci-toolbox:master to master"
+Checking out Revision 562d70b735eaff6824c9a5162d15b5ee84f8c71b (refs/remotes/origin/main)
+Commit message: "chore: 临时构造 Mongo 环境失败样本（受控，随后回退）"
+[Pipeline] { (Integration Tests)
++ bash ci/run-integration-tests.v2.sh
+FIDGET_INTEGRATION_V1 phase=preflight step=image_pull status=start image=mongo:4.2.999 run_id=npm-fxp-fidget-fidge-3497708604-25
+FIDGET_INTEGRATION_V1 phase=preflight step=image_pull status=failed exit=1 run_id=npm-fxp-fidget-fidge-3497708604-25
+FIDGET_INTEGRATION_V1 phase=summary status=failed total=8 passed=0 failed=0 not_started=8 run_id=npm-fxp-fidget-fidge-3497708604-25
+FIDGET_INTEGRATION_V1 phase=cleanup status=success run_id=npm-fxp-fidget-fidge-3497708604-25
+Finished: FAILURE

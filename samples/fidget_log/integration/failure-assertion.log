@@ -1,0 +1,50 @@
+Obtained ci/Jenkinsfile.v2 from git https://<internal-git>/scm/~<user>/fidget-xiaoqin.git
+Checking out Revision 44b01d19ba7697eb68fc20a20467ea517cf5aa49 (master)
+Commit message: "Merge pull request #226 in FX/fxci-toolbox from ~<user>/fxci-toolbox:master to master"
+Checking out Revision bb5df9703ef72ef17189c94184736d9147bd6133 (refs/remotes/origin/main)
+Commit message: "fix: runner 资源名加入完整 Job 名 hash，杜绝跨 Job 碰撞"
+[Pipeline] { (Integration Tests)
++ bash ci/run-integration-tests.v2.sh
+FIDGET_INTEGRATION_V1 phase=preflight step=image_pull status=start image=mongo:4.2 run_id=npm-fxp-fidget-fidge-3497708604-24
+FIDGET_INTEGRATION_V1 phase=preflight step=image_pull status=end exit=0 run_id=npm-fxp-fidget-fidge-3497708604-24
+FIDGET_INTEGRATION_V1 phase=preflight step=network_create status=start run_id=npm-fxp-fidget-fidge-3497708604-24
+FIDGET_INTEGRATION_V1 phase=preflight step=network_create status=end run_id=npm-fxp-fidget-fidge-3497708604-24
+FIDGET_INTEGRATION_V1 phase=preflight step=mongo_start status=start run_id=npm-fxp-fidget-fidge-3497708604-24
+FIDGET_INTEGRATION_V1 phase=preflight step=mongo_start status=end run_id=npm-fxp-fidget-fidge-3497708604-24
+FIDGET_INTEGRATION_V1 phase=preflight step=mongo_ready status=start run_id=npm-fxp-fidget-fidge-3497708604-24
+FIDGET_INTEGRATION_V1 phase=preflight step=mongo_ready status=end run_id=npm-fxp-fidget-fidge-3497708604-24
+FIDGET_INTEGRATION_V1 phase=config mongo_target=fidget-mongo-npm-fxp-fidget-fidge-3497708604-24 run_id=npm-fxp-fidget-fidge-3497708604-24
+FIDGET_INTEGRATION_V1 phase=suite suite=select-integration status=start run_id=npm-fxp-fidget-fidge-3497708604-24
+  ✖ F-1003: Group by main field + aggregate main field and nested field(select name, sum(score), sum(contact_info.contact_score) group by name) (36.18ms)
+  ✖ O-0503: CaseWhenProjection OID(select record and object OID branches when state <= 2), return string or null values (29.59ms)
+❯ F-聚合汇总主题测试 / F-1003: Group by main field + aggregate main field and nested field(select name, sum(score), sum(contact_info.contact_score) group by name)
+ℹ AssertionError: SharedPgObject(app:677415000000000000000025:form:677415000000000000000026): expected [ { name: 'Alice', …(1) }, …(5) ] to deeply equal [ { name: 'Alice', …(2) }, …(5) ]
+ ⁃ at Assert.deepEqual (/var/opt/build/node_modules/@japa/assert/build/index.js:85:19)
+ ⁃ at AssertUtils.assertUnorderedEqual (test/integration/assertion/AssertUtils.ts:43:16)
+ ❯ 43 ┃      }
+ ⁃ at AssertUtils.equalsRows (test/integration/assertion/AssertUtils.ts:30:18)
+ ⁃ at AssertUtils.equals (test/integration/assertion/AssertUtils.ts:19:14)
+❯ O-查询结果映射专题集成测试 / O-0503: CaseWhenProjection OID(select record and object OID branches when state <= 2), return string or null values
+ℹ AssertionError: SharedPgObject(app:679300000000000000000000:form:679300000000000000000024): expected [ { …(3) }, { …(3) }, { …(3) } ] to deeply equal [ { …(3) }, { …(3) }, { …(3) } ]
+ ⁃ at Assert.deepEqual (/var/opt/build/node_modules/@japa/assert/build/index.js:85:19)
+ ⁃ at AssertUtils.equalsRows (test/integration/assertion/AssertUtils.ts:33:20)
+ ❯ 33 ┃              });
+ ⁃ at AssertUtils.equals (test/integration/assertion/AssertUtils.ts:19:14)
+FIDGET_INTEGRATION_V1 phase=suite suite=select-integration status=end exit=1 run_id=npm-fxp-fidget-fidge-3497708604-24
+FIDGET_INTEGRATION_V1 phase=suite suite=stream-select-integration status=start run_id=npm-fxp-fidget-fidge-3497708604-24
+FIDGET_INTEGRATION_V1 phase=suite suite=stream-select-integration status=end exit=0 run_id=npm-fxp-fidget-fidge-3497708604-24
+FIDGET_INTEGRATION_V1 phase=suite suite=delete-integration status=start run_id=npm-fxp-fidget-fidge-3497708604-24
+FIDGET_INTEGRATION_V1 phase=suite suite=delete-integration status=end exit=0 run_id=npm-fxp-fidget-fidge-3497708604-24
+FIDGET_INTEGRATION_V1 phase=suite suite=insert-integration status=start run_id=npm-fxp-fidget-fidge-3497708604-24
+FIDGET_INTEGRATION_V1 phase=suite suite=insert-integration status=end exit=0 run_id=npm-fxp-fidget-fidge-3497708604-24
+FIDGET_INTEGRATION_V1 phase=suite suite=update-integration status=start run_id=npm-fxp-fidget-fidge-3497708604-24
+FIDGET_INTEGRATION_V1 phase=suite suite=update-integration status=end exit=0 run_id=npm-fxp-fidget-fidge-3497708604-24
+FIDGET_INTEGRATION_V1 phase=suite suite=upsert-integration status=start run_id=npm-fxp-fidget-fidge-3497708604-24
+FIDGET_INTEGRATION_V1 phase=suite suite=upsert-integration status=end exit=0 run_id=npm-fxp-fidget-fidge-3497708604-24
+FIDGET_INTEGRATION_V1 phase=suite suite=bulk-integration status=start run_id=npm-fxp-fidget-fidge-3497708604-24
+FIDGET_INTEGRATION_V1 phase=suite suite=bulk-integration status=end exit=0 run_id=npm-fxp-fidget-fidge-3497708604-24
+FIDGET_INTEGRATION_V1 phase=suite suite=shadow-integration status=start run_id=npm-fxp-fidget-fidge-3497708604-24
+FIDGET_INTEGRATION_V1 phase=suite suite=shadow-integration status=end exit=0 run_id=npm-fxp-fidget-fidge-3497708604-24
+FIDGET_INTEGRATION_V1 phase=summary status=failed total=8 passed=7 failed=1 not_started=0 run_id=npm-fxp-fidget-fidge-3497708604-24
+FIDGET_INTEGRATION_V1 phase=cleanup status=success run_id=npm-fxp-fidget-fidge-3497708604-24
+Finished: FAILURE
