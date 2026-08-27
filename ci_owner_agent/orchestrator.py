@@ -12,6 +12,7 @@ from ci_owner_agent.agents.factory import (
 from ci_owner_agent.agents.langchain_agent import LangChainResponsibilityAgent
 from ci_owner_agent.agents.responsibility_agent import AgentContext
 from ci_owner_agent.config import Settings, load_settings
+from ci_owner_agent.constants import NO_OWNER_NAME
 from ci_owner_agent.schemas import (
     BuildInfo,
     ChangedFile,
@@ -19,6 +20,7 @@ from ci_owner_agent.schemas import (
     CommitInfo,
     EvidenceItem,
     FailureFact,
+    Owner,
 )
 from ci_owner_agent.services.ai_history_search import (
     history_search_similar_failure_facts,
@@ -141,6 +143,145 @@ def _restore_authoritative_build_metadata(
         if not source_commit or source_commit_was_derived_from_wrong_head:
             item["sourceCommit"] = owner_commit or authoritative_head_commit
     return CiResponsibilityNotice.model_validate(payload)
+
+
+def _no_owner_owner() -> Owner:
+    return Owner(type="no_high_confidence_owner", name=NO_OWNER_NAME, email=None, commit=None, confidence=0.0)
+
+
+def enforce_owner_commit_in_range(
+    notice: CiResponsibilityNotice,
+    *,
+    repo: str,
+    git_client: GitClient,
+    investigation_scope: InvestigationScope,
+    base_commit: str | None,
+    head_commit: str | None,
+) -> CiResponsibilityNotice:
+    """删除模型给出的窗口外 owner，降级为 no_high_confidence_owner。
+
+    对每个 ``current_build_owner`` 校验 owner.commit 必须落在权威 fullRange
+    （``base..head``）内，即同时满足：
+
+    1. base 是 head 的祖先（窗口可信）；
+    2. base 是 owner 的祖先（owner 不在 base 之前）；
+    3. owner 是 head 的祖先（owner 不在从 base 分叉的旁支上）；
+    4. owner != base（``base..head`` 排除 base 本身）。
+
+    任一条件不满足、Git 检查失败、commit 为空或不存在时，一律降级为
+    canonical no-owner，不因模型找到更早的「疑似真凶」就扩大范围。
+    """
+    # authoritative fullRange 应来自 investigation_scope；传入的 base/head 与其冲突时 fail closed。
+    if investigation_scope and investigation_scope.full_base_commit and investigation_scope.full_head_commit:
+        authoritative_base = investigation_scope.full_base_commit
+        authoritative_head = investigation_scope.full_head_commit
+        if (base_commit and base_commit != authoritative_base) or (head_commit and head_commit != authoritative_head):
+            return _downgrade_all_current_build_owners(
+                notice,
+                "传入的 base/head 与 investigation_scope 的权威 fullRange 冲突，窗口不可信。",
+            )
+    if not base_commit or not head_commit:
+        return _downgrade_all_current_build_owners(notice, "缺少可信 base/head，无法验证 owner commit 是否在窗口内。")
+
+    def _is_ancestor(ancestor: str, descendant: str) -> bool:
+        result = git_client.check_ancestor(repo, ancestor, descendant)
+        return bool(result.get("ok") and result.get("isAncestor"))
+
+    if not _is_ancestor(base_commit, head_commit):
+        return _downgrade_all_current_build_owners(
+            notice,
+            f"base {base_commit[:8]} 不是 head {head_commit[:8]} 的祖先，窗口不可信，无法定责。",
+        )
+
+    downgraded = 0
+    for item in notice.responsibilityItems:
+        if item.responsibilityType != "current_build_owner":
+            continue
+        owner_commit = (item.owner.commit or "").strip()
+        if not owner_commit:
+            _downgrade_item_owner(item, "owner 缺少 commit，无法验证其在窗口内。")
+            downgraded += 1
+            continue
+        # sourceCommit 与 owner.commit 冲突时 fail closed（两者必须一致）。
+        source_commit = (item.sourceCommit or "").strip()
+        if source_commit and source_commit != owner_commit:
+            _downgrade_item_owner(
+                item,
+                f"sourceCommit {source_commit[:8]} 与 owner commit {owner_commit[:8]} 冲突，证据不一致，降级。",
+            )
+            downgraded += 1
+            continue
+        if owner_commit == base_commit:
+            _downgrade_item_owner(item, f"owner commit {owner_commit[:8]} 等于 base，base..head 不含 base，窗口外。")
+            downgraded += 1
+            continue
+        if owner_commit == head_commit:
+            continue
+        # 必须 base -> owner 且 owner -> head，缺一则降级（旁支/窗口外/commit 不存在）
+        if not _is_ancestor(base_commit, owner_commit) or not _is_ancestor(owner_commit, head_commit):
+            _downgrade_item_owner(
+                item,
+                f"owner commit {owner_commit[:8]} 不在 base..head 窗口内，删除模型产生的窗口外 owner。",
+            )
+            downgraded += 1
+    if downgraded:
+        recorder = current_metrics_recorder()
+        if recorder is not None:
+            recorder.warnings.append(f"downgraded {downgraded} current_build_owner item(s) outside base..head")
+    # 无论是否降级，都从校验后的责任项重新聚合顶层 owner，保证
+    # 顶层 owner / responsibilityItems / hasHighConfidenceOwner 三者一致。
+    return _revalidate_notice_owner(notice)
+
+
+def _downgrade_item_owner(item: Any, reason: str) -> None:
+    item.responsibilityType = "no_high_confidence_owner"
+    item.owner = _no_owner_owner()
+    item.sourceBuildNumber = None
+    item.sourceBuildUrl = None
+    item.sourceCommit = None
+    item.matchType = None
+    item.relationship = None
+    item.confidence = 0.0
+    item.reason = reason
+
+
+def _downgrade_all_current_build_owners(notice: CiResponsibilityNotice, reason: str) -> CiResponsibilityNotice:
+    for item in notice.responsibilityItems:
+        if item.responsibilityType == "current_build_owner":
+            _downgrade_item_owner(item, reason)
+    return _revalidate_notice_owner(notice)
+
+
+def _revalidate_notice_owner(notice: CiResponsibilityNotice) -> CiResponsibilityNotice:
+    """从校验后的责任项重算顶层 owner 与 hasHighConfidenceOwner，保证三者一致。
+
+    顶层 owner 只表达当前构建责任，因此只纳入 current_build_owner；
+    inherited_failure_owner 只能保留在 responsibilityItems 中。唯一当前责任身份
+    才可保留顶层 owner，多个不同当前身份或零当前身份都降级 no-owner。
+    """
+    responsible_items = [
+        item
+        for item in notice.responsibilityItems
+        if item.responsibilityType == "current_build_owner"
+        and item.owner.type in {"high_confidence", "medium_confidence"}
+        and item.owner.name
+        and item.owner.name != NO_OWNER_NAME
+    ]
+    identity_keys = {
+        (item.owner.name, item.owner.email, item.owner.commit)
+        for item in responsible_items
+    }
+    if len(identity_keys) != 1:
+        notice.owner = _no_owner_owner()
+        notice.hasHighConfidenceOwner = False
+        return notice
+    selected = next(
+        (item for item in responsible_items if item.owner.type == "high_confidence"),
+        responsible_items[0],
+    )
+    notice.owner = Owner.model_validate(selected.owner.model_dump())
+    notice.hasHighConfidenceOwner = selected.owner.type == "high_confidence"
+    return notice
 
 
 def success_notice(build_info: BuildInfo, base_commit: str | None = None, repo: str | None = None) -> CiResponsibilityNotice:
@@ -439,6 +580,14 @@ def analyze_failed_build(
         )
         if sync_warning is not None:
             notice.evidence.append(sync_warning)
+        notice = enforce_owner_commit_in_range(
+            notice,
+            repo=repo,
+            git_client=runtime_context.git_client,
+            investigation_scope=runtime_context.investigation_scope,
+            base_commit=base_commit,
+            head_commit=head_commit,
+        )
         notice = validate_notice(notice)
     notice = enrich_responsibility_item_signatures(
         notice,
@@ -768,6 +917,15 @@ def _save_history(
     with _metrics_stage("saveHistory"):
         store = history_store or get_history_store(settings)
         if store is None:
+            return
+        # 落库前 fail-closed：notice 含明文敏感值则拒绝写入历史。
+        from ci_owner_agent.services.failure_identity import _find_plaintext_secrets
+
+        residual = _find_plaintext_secrets(notice.model_dump(mode="json"))
+        if residual:
+            build_info.warnings.append(
+                f"history save blocked: notice contains plaintext secrets ({len(residual)} hit(s))"
+            )
             return
         try:
             summaries = failure_summaries

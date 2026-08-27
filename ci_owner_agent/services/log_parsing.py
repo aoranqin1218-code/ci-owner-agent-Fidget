@@ -788,8 +788,12 @@ def build_integration_failure_summaries(all_lines: list[str], *, max_chunks: int
     if not classifications:
         return []
     clean_lines = [_semantic_log_line(line) for line in all_lines]
+    xfail_indices = [i for i, l in enumerate(clean_lines) if XFAIL_BLOCK_RE.match(l)]
+    detail_starts: dict[int, int | None] = {
+        idx: _find_japa_error_detail_start(clean_lines, idx) for idx in xfail_indices
+    }
     chunks: list[dict] = []
-    for classification in classifications:
+    for pos, classification in enumerate(classifications):
         kind = classification["kind"]
         if kind == "unit":
             stage_name = "Unit Tests"
@@ -803,11 +807,20 @@ def build_integration_failure_summaries(all_lines: list[str], *, max_chunks: int
         idx = line_no - 1
         if idx < 0 or idx >= len(clean_lines) or not XFAIL_BLOCK_RE.match(clean_lines[idx]):
             continue
-        detail_start = _find_japa_error_detail_start(clean_lines, idx)
+        detail_start = detail_starts.get(idx)
         if detail_start is None:
             continue
         detail_end = _find_japa_error_detail_end(clean_lines, detail_start)
-        block_lines = clean_lines[idx:detail_end]
+        # 详情边界收在下一个已配对的 ❯ 起点之前，避免串入后续失败用例的断言/错误。
+        if pos + 1 < len(classifications):
+            next_line = classifications[pos + 1]["line"]
+            next_idx = next_line - 1
+            next_start = detail_starts.get(next_idx)
+            if next_start is not None:
+                detail_end = min(detail_end, next_start)
+        # block 由「当前 ✖ anchor + 当前匹配的 ❯ 详情」组成，不含中间的其它 ✖/✔ 行，
+        # 也不含前一个或后一个失败用例的 AssertionError。
+        block_lines = [clean_lines[idx]] + clean_lines[detail_start:detail_end]
         content, _ = _truncate_failure_block_text("\n".join(block_lines), 12000)
         signature = _extract_xfail_signature(content)
         chunks.append(
@@ -975,14 +988,19 @@ def _find_japa_error_detail_end(clean_lines: list[str], detail_start: int, *, ma
     end = min(len(clean_lines), detail_start + max(1, max_lines))
     for idx in range(detail_start + 1, end):
         line = clean_lines[idx]
+        # 注意：不能把 "FAILED"/"PASSED" 当作块终止符——Japa 的 AssertionError 和
+        # 业务堆栈在这两个标记之后才出现（见 samples/fidget_log/integration/ 真实行序：
+        # ❯ 头 -> diff -> FAILED -> ℹ AssertionError -> 堆栈 -> Tests 汇总）。
+        # 真正的块边界是 Tests 汇总行、runner marker、wrapper 或 stage 边界。
         if (
-            line == "FAILED"
-            or line == "PASSED"
-            or line.startswith("Tests  ")
+            line.startswith("Tests  ")
             or line.startswith("Time  ")
             or line.startswith("===")
             or line.startswith("npm error")
             or line.startswith("> nx run ")
+            or INTEGRATION_MARKER_RE.match(line)
+            or PIPELINE_STAGE_RE.match(line)
+            or PIPELINE_STAGE_END_RE.match(line)
         ):
             return idx
     return end

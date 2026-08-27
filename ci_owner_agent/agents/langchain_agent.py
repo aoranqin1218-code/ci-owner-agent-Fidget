@@ -11,6 +11,7 @@ from ci_owner_agent.agents.prompts import (
     CI_RESPONSIBILITY_NOTICE_JSON_SCHEMA_PROMPT,
     LANGCHAIN_RESPONSIBILITY_AGENT_SYSTEM_PROMPT,
 )
+from ci_owner_agent.services.failure_identity import redact_secrets_deep
 from ci_owner_agent.config import Settings, validate_model_settings
 from ci_owner_agent.schemas import CiResponsibilityNotice
 from ci_owner_agent.services.llm_client import build_chat_model
@@ -141,7 +142,7 @@ class LangChainResponsibilityAgent:
                 )
             except Exception as exc:
                 failure_summaries = {"chunks": [], "warning": f"failure summary extraction failed: {exc}"}
-        payload = build_initial_input_payload(self.context, failure_summaries)
+        payload = redact_secrets_deep(build_initial_input_payload(self.context, failure_summaries))
         return json.dumps(payload, ensure_ascii=False)
 
     def _metadata(self) -> dict[str, Any]:

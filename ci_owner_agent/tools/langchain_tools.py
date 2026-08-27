@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from ci_owner_agent.agents.context import AgentRuntimeContext
+from ci_owner_agent.services.failure_identity import redact_secrets_deep
 from ci_owner_agent.services.history_search import history_search_similar_failures as search_similar_failures
 from ci_owner_agent.tools.keyword_tools import repo_keyword_search as keyword_search
 from ci_owner_agent.tools.path_tools import repo_find_paths as find_paths
@@ -26,6 +27,8 @@ class SimpleTool:
 
 
 def _limit(data: dict, max_chars: int) -> dict:
+    # 统一模型输入边界：所有工具输出在进入模型前先递归脱敏（不只覆盖两个 git 工具）。
+    data = redact_secrets_deep(data)
     text = json.dumps(data, ensure_ascii=False, default=str)
     if len(text) <= max_chars:
         return data
@@ -292,14 +295,17 @@ def build_langchain_tools(context: AgentRuntimeContext) -> list[Any]:
         blocked = _guard_tool_call("ts_find_definitions", {"symbols": symbols})
         if blocked:
             return blocked
-        return find_definitions(
-            repo=context.repo,
-            commit=context.head_commit,
-            symbols=symbols,
-            repo_cache_dir=context.settings.repo_cache_dir,
-            analyzer_dir=context.settings.ts_analyzer_dir,
-            force_checkout=True,
-            max_output_chars=max_chars,
+        return _limit(
+            find_definitions(
+                repo=context.repo,
+                commit=context.head_commit,
+                symbols=symbols,
+                repo_cache_dir=context.settings.repo_cache_dir,
+                analyzer_dir=context.settings.ts_analyzer_dir,
+                force_checkout=True,
+                max_output_chars=max_chars,
+            ),
+            max_chars,
         )
 
     def ts_find_callers(symbol: str, definitionFile: str, maxResults: int = 50) -> dict:
@@ -307,16 +313,19 @@ def build_langchain_tools(context: AgentRuntimeContext) -> list[Any]:
         blocked = _guard_tool_call("ts_find_callers", {"symbol": symbol, "definitionFile": definitionFile, "maxResults": maxResults})
         if blocked:
             return blocked
-        return find_callers(
-            repo=context.repo,
-            commit=context.head_commit,
-            symbol=symbol,
-            definitionFile=definitionFile,
-            maxResults=maxResults,
-            repo_cache_dir=context.settings.repo_cache_dir,
-            analyzer_dir=context.settings.ts_analyzer_dir,
-            force_checkout=True,
-            max_output_chars=max_chars,
+        return _limit(
+            find_callers(
+                repo=context.repo,
+                commit=context.head_commit,
+                symbol=symbol,
+                definitionFile=definitionFile,
+                maxResults=maxResults,
+                repo_cache_dir=context.settings.repo_cache_dir,
+                analyzer_dir=context.settings.ts_analyzer_dir,
+                force_checkout=True,
+                max_output_chars=max_chars,
+            ),
+            max_chars,
         )
 
     def check_node_dependencies_for_analysis() -> dict:
@@ -324,7 +333,10 @@ def build_langchain_tools(context: AgentRuntimeContext) -> list[Any]:
         blocked = _guard_tool_call("check_node_dependencies_for_analysis", {})
         if blocked:
             return blocked
-        return check_ts_deps(context.repo, repo_cache_dir=context.settings.repo_cache_dir)
+        return _limit(
+            check_ts_deps(context.repo, repo_cache_dir=context.settings.repo_cache_dir),
+            max_chars,
+        )
 
     def history_search_similar_failures(maxCandidates: int = 5, lookbackBuilds: int = 20) -> dict:
         """Search MongoDB history for previous failed builds with similar normalized error chunks. Use this early to detect pre-existing failures."""

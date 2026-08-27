@@ -33,6 +33,72 @@ COVERAGE_METRIC_LABELS = {
 }
 
 
+WECOM_MAX_UTF8_BYTES = 4096
+
+
+def _utf8_bytes(text: str) -> int:
+    return len(text.encode("utf-8"))
+
+
+def _truncate_utf8(text: str, max_bytes: int) -> str:
+    """按 UTF-8 字节截断，不切断半个中文字符。"""
+    if _utf8_bytes(text) <= max_bytes:
+        return text
+    truncated = text
+    while _utf8_bytes(truncated) > max_bytes:
+        truncated = truncated[:-1]
+    return truncated
+
+
+def _finalize_within_budget(
+    parts: list[str],
+    protected_tail: list[str] | None = None,
+    protected_head: list[str] | None = None,
+) -> str:
+    """最终统一收口：拼接所有段落并强制 ≤4096 UTF-8 字节。
+
+    超限时只截断前部可变内容，保留尾部 Jenkins/反馈链接与省略提示；
+    按字符边界截断，保证不切断半个中文字符。
+    """
+    head = list(protected_head or [])
+    tail = list(protected_tail or [])
+    full = "\n".join(head + parts + tail)
+    if _utf8_bytes(full) <= WECOM_MAX_UTF8_BYTES:
+        return full
+    omission = "…消息过长已截断，请查看分析结果 JSON。"
+    head_text = "\n".join(head)
+    tail_text = "\n".join(tail)
+    protected_bytes = _utf8_bytes(head_text) + _utf8_bytes(tail_text)
+    separators = int(bool(head_text)) + int(bool(tail_text)) + 1
+    middle_budget = WECOM_MAX_UTF8_BYTES - _utf8_bytes(omission) - protected_bytes - separators
+    if middle_budget < 0:
+        # 极端情况下受保护字段本身已超预算：优先保留头部责任/@信息和省略提示。
+        head_budget = WECOM_MAX_UTF8_BYTES - _utf8_bytes(omission) - 1
+        return _truncate_utf8(head_text, max(0, head_budget)) + "\n" + omission
+    middle_text = _truncate_utf8("\n".join(parts), middle_budget)
+    output = list(head)
+    if middle_text:
+        output.append(middle_text)
+    output.append(omission)
+    output.extend(tail)
+    return "\n".join(output)
+
+
+def _append_within_budget(lines: list[str], tail_lines: list[str], addition: list[str]) -> bool:
+    """在不超过 4096 UTF-8 字节预算的前提下追加内容。
+
+    尾部（链接/反馈）始终保留；若追加 ``addition`` 会超预算，返回 False 且不追加。
+    按字符边界拼接，不截断半个中文字符。
+    """
+    current = "\n".join(lines)
+    tail = "\n".join(tail_lines)
+    candidate = current + ("\n" + "\n".join(addition) if addition else "")
+    if _utf8_bytes(candidate + ("\n" + tail if tail else "")) <= WECOM_MAX_UTF8_BYTES:
+        lines.extend(addition)
+        return True
+    return False
+
+
 def format_wecom_markdown_notice(
     notice: CiResponsibilityNotice,
     feedback_base_url: str | None = None,
@@ -46,12 +112,16 @@ def format_wecom_markdown_notice(
     repo: str | None = None,
     feedback_code: str | None = None,
 ) -> str:
-    title = f"### {result_icon(notice.result)} CI 单测{result_label(notice.result)} | {notice.job} #{notice.buildNumber}"
+    display_job = truncate_single_line(notice.job, 240)
+    job_truncated = display_job != str(notice.job or "")
+    title = f"### {result_icon(notice.result)} CI 单测{result_label(notice.result)} | {display_job} #{notice.buildNumber}"
     if str(notice.result or "").upper() == "SUCCESS":
-        lines = [title]
+        tail_lines: list[str] = []
+        if job_truncated:
+            tail_lines.extend(["", "…Job 名称过长已截断。"])
         if notice.buildUrl:
-            lines.extend(["", f"🏗️ [查看 Jenkins 构建]({notice.buildUrl})"])
-        return "\n".join(lines)
+            tail_lines.extend(["", f"🏗️ [查看 Jenkins 构建]({notice.buildUrl})"])
+        return _finalize_within_budget([], tail_lines, [title])
 
     mapper = user_mapper or WeComUserMapper([])
     owners = collect_responsible_owners(notice)
@@ -63,26 +133,52 @@ def format_wecom_markdown_notice(
     )
     pending_maintainers = _collect_pending_maintainers(maintainer_matches)
     evidence_by_id = {item.id: item for item in notice.evidence}
-    lines = [
+    protected_head = [
         title,
         "",
         f"👤 **责任人**：{format_responsible_mentions(owners, mapper, mention_mode)}",
     ]
     if any(match is not None for match in maintainer_matches):
-        lines.append(f"📣 **待确认维护人**：{format_test_maintainer_mentions(pending_maintainers, mention_mode) or '未配置'}")
-    lines.extend(
-        [
-            f"**原因**：{public_single_line(notice.failureReason, max_reason_chars)}",
-            responsibility_item_stats(notice),
-            "",
-            "#### 📌 责任项",
-            "",
-        ]
-    )
+        protected_head.append(f"📣 **待确认维护人**：{format_test_maintainer_mentions(pending_maintainers, mention_mode) or '未配置'}")
+    lines = protected_head + [
+        f"**原因**：{public_single_line(notice.failureReason, max_reason_chars)}",
+        responsibility_item_stats(notice),
+        "",
+        "#### 📌 责任项",
+        "",
+    ]
+
+    # 尾部（建议 + 链接 + 反馈）先构建，始终保留，不计入责任项的预算竞争。
+    tail_lines: list[str] = []
+    if job_truncated:
+        tail_lines.extend(["…Job 名称过长已截断。", ""])
+    suggestions = format_suggestions(notice.suggestions)
+    if suggestions:
+        tail_lines.extend(["#### 🛠️ 修复建议", ""])
+        tail_lines.extend(f"- {suggestion}" for suggestion in suggestions)
+        tail_lines.append("")
+    tail_lines.extend(["#### 🔗 相关链接", ""])
+    tail_lines.append(f"- 🏗️ [查看 Jenkins 构建]({notice.buildUrl})" if notice.buildUrl else "- 🏗️ Jenkins 构建：无")
+    feedback_url = build_feedback_url(feedback_base_url, notice, feedback_token)
+    tail_lines.append(f"- 📝 [提交反馈]({feedback_url})" if feedback_url else "- 📝 反馈：未配置")
+    if feedback_code:
+        tail_lines.extend(
+            [
+                "",
+                f"**反馈码：{feedback_code}**",
+                "",
+                "群内反馈：",
+                f"@机器人 {feedback_code} 1 判断正确",
+                f"@机器人 {feedback_code} 1 责任人改为 @某人",
+                f"@机器人 {feedback_code} 1 标记偶发",
+            ]
+        )
+
+    # 责任项逐个追加，逼近 4096 UTF-8 字节；超限项不静默丢弃，末尾标注省略。
+    shown = 0
     if notice.responsibilityItems:
         for idx, item in enumerate(notice.responsibilityItems, start=1):
             owner_name = format_item_owner(item.owner, mapper, mention_mode)
-            item_type = str(item.responsibilityType or "unknown")
             item_lines = [
                 f"{idx}. {responsibility_item_icon(item, notice)} {responsibility_item_label(item, notice)} | {format_item_title(item, 120)}",
                 f"   - 👤 {format_item_owner_label(item)}：{owner_name}",
@@ -103,33 +199,16 @@ def format_wecom_markdown_notice(
                 if match.used_fallback:
                     item_lines.append(f"   - ℹ️ 路由说明：{match.reason}")
             item_lines.append("")
-            lines.extend(item_lines)
+            if not _append_within_budget(lines, tail_lines, item_lines):
+                break
+            shown += 1
+        omitted = len(notice.responsibilityItems) - shown
+        if omitted > 0:
+            tail_lines[0:0] = ["", f"…本消息展示 {shown} 项，其余 {omitted} 项请查看分析结果 JSON。", ""]
     else:
         lines.extend(["1. ❓ unknown | 未识别到独立责任项", f"   - 👤 责任人：{NO_OWNER_NAME}", "   - 来源：-", "   - 🔎 证据：证据不足，详见分析结果 JSON。", ""])
 
-    suggestions = format_suggestions(notice.suggestions)
-    if suggestions:
-        lines.extend(["#### 🛠️ 修复建议", ""])
-        lines.extend(f"- {suggestion}" for suggestion in suggestions)
-        lines.append("")
-
-    lines.extend(["#### 🔗 相关链接", ""])
-    lines.append(f"- 🏗️ [查看 Jenkins 构建]({notice.buildUrl})" if notice.buildUrl else "- 🏗️ Jenkins 构建：无")
-    feedback_url = build_feedback_url(feedback_base_url, notice, feedback_token)
-    lines.append(f"- 📝 [提交反馈]({feedback_url})" if feedback_url else "- 📝 反馈：未配置")
-    if feedback_code:
-        lines.extend(
-            [
-                "",
-                f"**反馈码：{feedback_code}**",
-                "",
-                "群内反馈：",
-                f"@机器人 {feedback_code} 1 判断正确",
-                f"@机器人 {feedback_code} 1 责任人改为 @某人",
-                f"@机器人 {feedback_code} 1 标记偶发",
-            ]
-        )
-    return "\n".join(lines)
+    return _finalize_within_budget(lines[len(protected_head):], tail_lines, protected_head)
 
 
 def format_test_maintainer_mentions(maintainers: tuple[TestMaintainer, ...] | list[TestMaintainer], mention_mode: str) -> str:

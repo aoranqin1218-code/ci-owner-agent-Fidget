@@ -1218,3 +1218,56 @@ def test_notify_notice_invalid_mapping_warns_and_uses_fallback(tmp_path, monkeyp
 
     assert "invalid test maintainer mapping yaml" in captured.err
     assert "**待确认维护人**：<@fallback>" in result["markdown"]
+
+
+def test_many_items_render_within_4096_utf8_bytes():
+    """数百个责任项渲染后仍 ≤4096 UTF-8 字节，且显式标注省略数量。"""
+    items = [item(reason=f"历史持续失败，责任项 {i} 的较长中文描述以撑大消息体。") for i in range(300)]
+    notice = CiResponsibilityNotice.model_validate(notice_payload(items))
+    markdown = format_wecom_markdown_notice(notice, feedback_base_url="http://ci-agent.test/feedback")
+    n = len(markdown.encode("utf-8"))
+    assert n <= 4096, f"渲染结果 {n} 字节超预算"
+    assert "请查看分析结果" in markdown
+    assert "Jenkins" in markdown
+    assert "反馈" in markdown
+
+
+def test_many_connection_items_aggregated_render_within_budget():
+    """聚合后的环境 no-owner 责任项（每 suite 一条）渲染 ≤4096。"""
+    items = [
+        item(owner_type="no_high_confidence_owner", owner_name="无高可信责任人", responsibility_type="no_high_confidence_owner", reason="环境失败")
+        for _ in range(50)
+    ]
+    notice = CiResponsibilityNotice.model_validate(notice_payload(items))
+    markdown = format_wecom_markdown_notice(notice)
+    assert len(markdown.encode("utf-8")) <= 4096
+
+
+def test_long_job_and_success_always_within_4096_bytes():
+    """超长 job 的两种消息都必须守住预算，同时保留 Jenkins 链接和省略提示。"""
+    payload = notice_payload([item()])
+    payload["job"] = "services/fx-code-unittest/" * 300
+    failure = CiResponsibilityNotice.model_validate(payload)
+    md_failure = format_wecom_markdown_notice(failure)
+    assert len(md_failure.encode("utf-8")) <= 4096
+    assert "查看 Jenkins 构建" in md_failure
+    assert "Job 名称过长已截断" in md_failure
+    assert "**责任人**" in md_failure
+
+    success = CiResponsibilityNotice.model_validate({**payload, "result": "SUCCESS"})
+    md_success = format_wecom_markdown_notice(success)
+    assert len(md_success.encode("utf-8")) <= 4096
+    assert "查看 Jenkins 构建" in md_success
+    assert "Job 名称过长已截断" in md_success
+
+
+def test_omission_note_preserved_when_items_over_budget():
+    """省略提示必须保留，即使责任项极多。"""
+    items = [item(reason=f"历史持续失败，责任项 {i} 超长中文描述" + "很长" * 20) for i in range(500)]
+    notice = CiResponsibilityNotice.model_validate(notice_payload(items))
+    md = format_wecom_markdown_notice(notice)
+    assert len(md.encode("utf-8")) <= 4096
+    assert "请查看分析结果" in md
+    assert "Jenkins" in md
+    assert "本消息展示" in md
+    assert "其余" in md

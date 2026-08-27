@@ -14,6 +14,7 @@ from typing import Any
 from ci_owner_agent.constants import NO_OWNER_NAME
 from ci_owner_agent.schemas import CiResponsibilityNotice
 from ci_owner_agent.services.feedback_context_store import FeedbackContextStore
+from ci_owner_agent.services.failure_identity import _find_plaintext_secrets
 from ci_owner_agent.services.history_store import get_history_store
 from ci_owner_agent.services.metrics import current_metrics_recorder
 from ci_owner_agent.services.notification_formatter import format_wecom_markdown_notice
@@ -64,6 +65,19 @@ def notify_notice(
     stage = recorder.stage("notify") if recorder is not None else None
     with stage if stage is not None else nullcontext():
         store = get_history_store(settings)
+        # 敏感信息 fail-closed 必须放在任何 MongoDB/feedback context/Outbox 写入之前：
+        # 含明文敏感值的 notice 不得落库，否则「阻断通知但已落库」仍会复现泄漏。
+        # 注意：只扫 notice 内容（evidence/failureReason/责任项），不扫渲染后的
+        # markdown——渲染结果里的 feedback token 是有意注入的共享反馈 token，非泄漏。
+        residual = _find_plaintext_secrets(notice.model_dump(mode="json"))
+        if residual:
+            return {
+                "ok": False,
+                "status": "blocked",
+                "transport": settings.wecom_notify_transport,
+                "error": f"notice contains plaintext secrets: {len(residual)} hit(s)",
+                "markdown": "",
+            }
         mapper = build_wecom_notice_mapper(settings, store)
         maintainer_resolver = TestMaintainerResolver.from_yaml(settings.test_maintainer_mapping_file)
         for warning in maintainer_resolver.warnings:
@@ -94,6 +108,15 @@ def notify_notice(
             fallback_userids=settings.wecom_fallback_userids,
             mention_mode=settings.wecom_mention_mode,
         )
+        # 发送前最终字节硬检查：不能只信 formatter，超 4096 UTF-8 字节 fail closed。
+        if len(markdown.encode("utf-8")) > 4096:
+            return {
+                "ok": False,
+                "status": "blocked",
+                "transport": settings.wecom_notify_transport,
+                "error": f"rendered notice exceeds 4096 UTF-8 bytes ({len(markdown.encode('utf-8'))})",
+                "markdown": markdown,
+            }
         if dry_run:
             return {"ok": True, "status": "dry_run", "transport": settings.wecom_notify_transport, "markdown": markdown}
         if settings.wecom_notify_transport == "webhook":

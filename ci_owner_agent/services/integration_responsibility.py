@@ -89,26 +89,46 @@ def reconcile_integration_responsibilities(
         item for item in notice.responsibilityItems if not _is_integration_env_item(item)
     ]
 
-    # 2. 环境/未知失败事实 → canonical no-owner item
-    seen: set[str] = set()
+    # 2. 环境/未知失败事实 → canonical no-owner item。
+    # 按 (kind, suite) 聚合：同一 suite 的数百次 connection 只生成一条 canonical item，
+    # 行号不进入 signature，避免责任项随失败用例数爆炸。
+    grouped: dict[tuple[str, str], dict[str, Any]] = {}
+    order: list[tuple[str, str]] = []
     for classification in classifications:
         kind = classification.get("kind")
         if kind not in {"connection", "unknown"}:
             continue
-        suite = classification.get("suite")
+        suite = classification.get("suite") or "unresolved"
+        key = (kind, suite)
+        if key not in grouped:
+            grouped[key] = {
+                "kind": kind,
+                "suite": suite,
+                "occurrences": 0,
+                "first_line": classification.get("line"),
+                "last_line": classification.get("line"),
+            }
+            order.append(key)
+        group = grouped[key]
+        group["occurrences"] += 1
         line = classification.get("line")
-        detail = f"{suite or 'unresolved'}@L{line}"
-        signature = _env_signature(kind, detail)
-        if signature in seen:
-            continue
-        seen.add(signature)
+        if line is not None:
+            if group["first_line"] is None:
+                group["first_line"] = line
+            group["last_line"] = line
+
+    for key in order:
+        group = grouped[key]
+        kind = group["kind"]
+        suite = group["suite"]
+        signature = _env_signature(kind, suite)
         if kind == "connection":
-            title = f"集成测试外部库/数据库不可达（{suite or 'unresolved'}）"
+            title = f"集成测试外部库/数据库不可达（{suite}）"
             reason = "外部库/数据库连接失败（ECONNREFUSED/超时等），属环境/基础设施问题，无代码责任可归。"
         else:
-            title = f"集成测试失败分类不明确（{suite or 'unresolved'}）"
+            title = f"集成测试失败分类不明确（{suite}）"
             reason = "失败证据不足或冲突，无法确定代码责任，保守判为无高可信责任人。"
-        evidence_ids = _append_env_evidence(notice, signature, classification, kind)
+        evidence_ids = _append_env_evidence(notice, signature, group, kind)
         notice.responsibilityItems.append(
             _env_item(signature=signature, title=title, reason=reason, evidence_ids=evidence_ids)
         )
@@ -116,7 +136,7 @@ def reconcile_integration_responsibilities(
     # 3. 协议冲突 → 一个总体的 no-owner 事实（不针对具体 suite）
     if conflicts:
         signature = "integration_unknown|protocol_conflict"
-        evidence_id = f"integration-conflict-evidence"
+        evidence_id = "integration-conflict-evidence"
         if evidence_id not in {e.id for e in notice.evidence}:
             from ci_owner_agent.schemas import EvidenceItem
 
@@ -129,7 +149,8 @@ def reconcile_integration_responsibilities(
                     source="integration_protocol_index",
                 )
             )
-        if signature not in seen:
+        existing_sigs = {item.failureSignature for item in notice.responsibilityItems}
+        if signature not in existing_sigs:
             notice.responsibilityItems.append(
                 _env_item(
                     signature=signature,
@@ -146,7 +167,7 @@ def reconcile_integration_responsibilities(
 def _append_env_evidence(
     notice: CiResponsibilityNotice,
     signature: str,
-    classification: dict[str, Any],
+    group: dict[str, Any],
     kind: str,
 ) -> list[str]:
     from ci_owner_agent.schemas import EvidenceItem
@@ -154,12 +175,17 @@ def _append_env_evidence(
     suffix = hashlib.sha256(signature.encode("utf-8")).hexdigest()[:12]
     evidence_id = f"integration-env-{suffix}"
     if evidence_id not in {e.id for e in notice.evidence}:
+        suite = group.get("suite")
+        occurrences = group.get("occurrences")
+        first_line = group.get("first_line")
+        last_line = group.get("last_line")
+        line_desc = f"lines {first_line}-{last_line}" if first_line is not None else "n/a"
         notice.evidence.append(
             EvidenceItem(
                 id=evidence_id,
                 type="log",
-                summary=f"integration {kind} failure",
-                detail=f"line={classification.get('line')}, suite={classification.get('suite')}",
+                summary=f"integration {kind} failure ({suite})",
+                detail=f"suite={suite}, occurrences={occurrences}, {line_desc}",
                 source="integration_classifier",
             )
         )

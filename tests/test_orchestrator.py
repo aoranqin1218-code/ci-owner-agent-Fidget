@@ -158,7 +158,7 @@ def _analyze_agent_notice(monkeypatch, payload, *, history_store=None):
 def test_analyze_failed_build_restores_placeholder_metadata_and_derived_sources(monkeypatch):
     payload = _agent_notice_payload(
         item_metadata={"sourceBuildNumber": None, "sourceBuildUrl": None, "sourceCommit": None},
-        item_owner_metadata={"commit": None},
+        item_owner_metadata={"commit": "head-commit"},
         repo=None,
         job="unknown",
         buildNumber=0,
@@ -204,7 +204,7 @@ def test_analyze_failed_build_overwrites_plausible_but_wrong_metadata(monkeypatc
             "sourceBuildUrl": "https://wrong.example/job/9999/",
             "sourceCommit": "wrong-head",
         },
-        item_owner_metadata={"commit": None},
+        item_owner_metadata={"commit": "head-commit"},
         repo="another-repo",
         job="another-job",
         buildNumber=9999,
@@ -234,15 +234,15 @@ def test_analyze_failed_build_overwrites_plausible_but_wrong_metadata(monkeypatc
 
 def test_analyze_failed_build_preserves_explicit_current_build_source_commit(monkeypatch):
     payload = _agent_notice_payload(
-        item_metadata={"sourceCommit": "specific-culprit-commit"},
-        item_owner_metadata={"commit": None},
+        item_metadata={"sourceCommit": "head-commit"},
+        item_owner_metadata={"commit": "head-commit"},
         headCommit="wrong-model-head",
     )
 
     notice, _ = _analyze_agent_notice(monkeypatch, payload)
 
     assert notice.headCommit == "head-commit"
-    assert notice.responsibilityItems[0].sourceCommit == "specific-culprit-commit"
+    assert notice.responsibilityItems[0].sourceCommit == "head-commit"
 
 
 def test_analyze_failed_build_preserves_source_commit_equal_to_correct_head(monkeypatch):
@@ -252,7 +252,7 @@ def test_analyze_failed_build_preserves_source_commit_equal_to_correct_head(monk
             "sourceBuildUrl": "https://jenkins.example/job/services/job/fx-code-unittest/5221/",
             "sourceCommit": "head-commit",
         },
-        item_owner_metadata={"commit": "another-commit"},
+        item_owner_metadata={"commit": "head-commit"},
         headCommit="head-commit",
     )
 
@@ -269,7 +269,6 @@ def test_analyze_failed_build_preserves_source_commit_equal_to_correct_head(monk
     ("owner_commit", "expected_source_commit"),
     [
         ("specific-owner-commit", "specific-owner-commit"),
-        (None, "head-commit"),
     ],
 )
 def test_analyze_failed_build_derives_missing_current_build_source_commit(
@@ -291,7 +290,6 @@ def test_analyze_failed_build_derives_missing_current_build_source_commit(
     ("owner_commit", "expected_source_commit"),
     [
         ("real-culprit-commit", "real-culprit-commit"),
-        (None, "head-commit"),
     ],
 )
 def test_analyze_failed_build_rebuilds_source_commit_derived_from_wrong_model_head(
@@ -343,8 +341,9 @@ def test_analyze_failed_build_saves_restored_notice_to_history(monkeypatch):
         item_metadata={
             "sourceBuildNumber": 9999,
             "sourceBuildUrl": "https://wrong.example/job/9999/",
-            "sourceCommit": "specific-culprit-commit",
+            "sourceCommit": "head-commit",
         },
+        item_owner_metadata={"commit": "head-commit"},
         job="unknown",
         buildNumber=0,
         buildUrl="",
@@ -365,7 +364,7 @@ def test_analyze_failed_build_saves_restored_notice_to_history(monkeypatch):
     assert saved_item["sourceBuildUrl"] == (
         "https://jenkins.example/job/services/job/fx-code-unittest/5221/"
     )
-    assert saved_item["sourceCommit"] == "specific-culprit-commit"
+    assert saved_item["sourceCommit"] == "head-commit"
 
 
 def test_analyze_failed_build_keeps_matching_metadata_and_analysis(monkeypatch):
@@ -373,8 +372,9 @@ def test_analyze_failed_build_keeps_matching_metadata_and_analysis(monkeypatch):
         item_metadata={
             "sourceBuildNumber": 5221,
             "sourceBuildUrl": "https://jenkins.example/job/services/job/fx-code-unittest/5221/",
-            "sourceCommit": "specific-culprit-commit",
-        }
+            "sourceCommit": "head-commit",
+        },
+        item_owner_metadata={"commit": "head-commit"},
     )
     expected_signature = CiResponsibilityNotice.model_validate(payload).responsibilityItems[0].failureSignature
     recorder = AnalysisMetricsRecorder(enabled=True)
@@ -398,7 +398,7 @@ def test_analyze_failed_build_keeps_matching_metadata_and_analysis(monkeypatch):
     assert item.responsibilityType == "current_build_owner"
     assert item.sourceBuildNumber == 5221
     assert item.sourceBuildUrl == "https://jenkins.example/job/services/job/fx-code-unittest/5221/"
-    assert item.sourceCommit == "specific-culprit-commit"
+    assert item.sourceCommit == "head-commit"
     assert item.owner.name == "Zhang San"
     assert item.reason == "the changed code is directly related to the failures"
     assert item.evidenceIds == ["E1", "E2"]
@@ -1885,3 +1885,346 @@ def test_save_history_clears_existing_failure_facts_when_extraction_succeeds_wit
     )
 
     assert store.failure_facts.docs == []
+
+
+def _owner_guard_notice(context, owner_commit: str) -> CiResponsibilityNotice:
+    payload = high_confidence_payload(context)
+    payload["responsibilityItems"] = [
+        {
+            "failureId": "F1",
+            "failureTitle": "test failure",
+            "failureSignature": "sig-1",
+            "failureSummary": "AssertionError",
+            "owner": {
+                "type": "high_confidence",
+                "name": "Zhang San",
+                "email": "zhangsan@example.com",
+                "commit": owner_commit,
+                "confidence": 0.88,
+            },
+            "responsibilityType": "current_build_owner",
+            "sourceCommit": owner_commit,
+            "confidence": 0.88,
+            "reason": "diff 支撑。",
+            "evidenceIds": ["E1", "E2"],
+        }
+    ]
+    return CiResponsibilityNotice.model_validate(payload)
+
+
+def test_owner_commit_outside_window_is_downgraded(repo_cache, sample_repo, logs):
+    from ci_owner_agent.orchestrator import enforce_owner_commit_in_range
+    from ci_owner_agent.services.investigation_scope import InvestigationScope
+
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    # base 是窗口起点；owner commit 指到 base（窗口外，base..head 不含 base 本身）
+    outside = sample_repo["base"]
+    notice = _owner_guard_notice(context, outside)
+    scope = InvestigationScope(mode="full", full_base_commit=sample_repo["base"], full_head_commit=sample_repo["head"])
+
+    result = enforce_owner_commit_in_range(
+        notice,
+        repo=sample_repo["repo"],
+        git_client=GitClient(repo_cache),
+        investigation_scope=scope,
+        base_commit=sample_repo["base"],
+        head_commit=sample_repo["head"],
+    )
+    assert result.owner.type == "no_high_confidence_owner"
+    assert result.hasHighConfidenceOwner is False
+    assert all(item.responsibilityType == "no_high_confidence_owner" for item in result.responsibilityItems)
+
+
+def test_owner_commit_inside_window_is_preserved(repo_cache, sample_repo, logs):
+    from ci_owner_agent.orchestrator import enforce_owner_commit_in_range
+    from ci_owner_agent.services.investigation_scope import InvestigationScope
+
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    inside = sample_repo["head"]
+    notice = _owner_guard_notice(context, inside)
+    scope = InvestigationScope(mode="full", full_base_commit=sample_repo["base"], full_head_commit=sample_repo["head"])
+
+    result = enforce_owner_commit_in_range(
+        notice,
+        repo=sample_repo["repo"],
+        git_client=GitClient(repo_cache),
+        investigation_scope=scope,
+        base_commit=sample_repo["base"],
+        head_commit=sample_repo["head"],
+    )
+    assert result.owner.type == "high_confidence"
+    assert result.hasHighConfidenceOwner is True
+    assert result.responsibilityItems[0].responsibilityType == "current_build_owner"
+
+
+def test_owner_commit_with_non_ancestor_base_is_downgraded(repo_cache, sample_repo, logs):
+    from ci_owner_agent.orchestrator import enforce_owner_commit_in_range
+    from ci_owner_agent.services.investigation_scope import InvestigationScope
+
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    notice = _owner_guard_notice(context, sample_repo["head"])
+    # base 与 head 互换 → base 不是 head 祖先
+    scope = InvestigationScope(mode="full", full_base_commit=sample_repo["head"], full_head_commit=sample_repo["base"])
+
+    result = enforce_owner_commit_in_range(
+        notice,
+        repo=sample_repo["repo"],
+        git_client=GitClient(repo_cache),
+        investigation_scope=scope,
+        base_commit=sample_repo["head"],
+        head_commit=sample_repo["base"],
+    )
+    assert result.owner.type == "no_high_confidence_owner"
+    assert result.hasHighConfidenceOwner is False
+
+
+def test_owner_commit_missing_base_head_is_downgraded(repo_cache, sample_repo, logs):
+    from ci_owner_agent.orchestrator import enforce_owner_commit_in_range
+    from ci_owner_agent.services.investigation_scope import InvestigationScope
+
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    notice = _owner_guard_notice(context, sample_repo["head"])
+    scope = InvestigationScope(mode="full", full_base_commit=None, full_head_commit=None)
+
+    result = enforce_owner_commit_in_range(
+        notice,
+        repo=sample_repo["repo"],
+        git_client=GitClient(repo_cache),
+        investigation_scope=scope,
+        base_commit=None,
+        head_commit=None,
+    )
+    assert result.owner.type == "no_high_confidence_owner"
+    assert result.hasHighConfidenceOwner is False
+
+
+def _branch_commit(repo_cache, sample_repo, branch_name="side"):
+    """在 sample_repo 上从 base 分叉出一个旁支 commit，返回其 hash。"""
+    import subprocess
+    from pathlib import Path
+
+    repo = Path(sample_repo["path"])
+    subprocess.run(["git", "-C", str(repo), "checkout", "-q", sample_repo["base"]], check=True)
+    subprocess.run(["git", "-C", str(repo), "checkout", "-q", "-b", branch_name], check=True)
+    side_file = repo / "packages" / "fxp-ai" / "errors" / "side.ts"
+    side_file.write_text("export const side = 1;\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "side branch commit"], check=True)
+    side_hash = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
+    subprocess.run(["git", "-C", str(repo), "checkout", "-q", sample_repo["head"]], check=True)
+    return side_hash
+
+
+def test_owner_commit_on_side_branch_is_downgraded(repo_cache, sample_repo, logs):
+    from ci_owner_agent.orchestrator import enforce_owner_commit_in_range
+    from ci_owner_agent.services.investigation_scope import InvestigationScope
+
+    side = _branch_commit(repo_cache, sample_repo)
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    notice = _owner_guard_notice(context, side)
+    scope = InvestigationScope(mode="full", full_base_commit=sample_repo["base"], full_head_commit=sample_repo["head"])
+
+    result = enforce_owner_commit_in_range(
+        notice,
+        repo=sample_repo["repo"],
+        git_client=GitClient(repo_cache),
+        investigation_scope=scope,
+        base_commit=sample_repo["base"],
+        head_commit=sample_repo["head"],
+    )
+    assert result.owner.type == "no_high_confidence_owner"
+    assert result.hasHighConfidenceOwner is False
+
+
+def test_owner_commit_empty_is_downgraded(repo_cache, sample_repo, logs):
+    from ci_owner_agent.orchestrator import enforce_owner_commit_in_range
+    from ci_owner_agent.services.investigation_scope import InvestigationScope
+
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    notice = _owner_guard_notice(context, "")
+    scope = InvestigationScope(mode="full", full_base_commit=sample_repo["base"], full_head_commit=sample_repo["head"])
+
+    result = enforce_owner_commit_in_range(
+        notice,
+        repo=sample_repo["repo"],
+        git_client=GitClient(repo_cache),
+        investigation_scope=scope,
+        base_commit=sample_repo["base"],
+        head_commit=sample_repo["head"],
+    )
+    assert result.owner.type == "no_high_confidence_owner"
+    assert result.hasHighConfidenceOwner is False
+
+
+def test_owner_commit_nonexistent_is_downgraded(repo_cache, sample_repo, logs):
+    from ci_owner_agent.orchestrator import enforce_owner_commit_in_range
+    from ci_owner_agent.services.investigation_scope import InvestigationScope
+
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    notice = _owner_guard_notice(context, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
+    scope = InvestigationScope(mode="full", full_base_commit=sample_repo["base"], full_head_commit=sample_repo["head"])
+
+    result = enforce_owner_commit_in_range(
+        notice,
+        repo=sample_repo["repo"],
+        git_client=GitClient(repo_cache),
+        investigation_scope=scope,
+        base_commit=sample_repo["base"],
+        head_commit=sample_repo["head"],
+    )
+    assert result.owner.type == "no_high_confidence_owner"
+    assert result.hasHighConfidenceOwner is False
+
+
+def test_owner_commit_before_base_is_downgraded(repo_cache, sample_repo_with_newer_commit, logs):
+    from ci_owner_agent.orchestrator import enforce_owner_commit_in_range
+    from ci_owner_agent.services.investigation_scope import InvestigationScope
+
+    # sample_repo_with_newer_commit 有 base -> head -> newer 三段；窗口取 head..newer，
+    # owner=base 即「base 之前」。
+    sr = sample_repo_with_newer_commit
+    context = make_lc_context(repo_cache, sr, logs)
+    notice = _owner_guard_notice(context, sr["base"])
+    scope = InvestigationScope(mode="full", full_base_commit=sr["head"], full_head_commit=sr["newer"])
+
+    result = enforce_owner_commit_in_range(
+        notice,
+        repo=sr["repo"],
+        git_client=GitClient(repo_cache),
+        investigation_scope=scope,
+        base_commit=sr["head"],
+        head_commit=sr["newer"],
+    )
+    assert result.owner.type == "no_high_confidence_owner"
+    assert result.hasHighConfidenceOwner is False
+
+
+def test_owner_commit_scope_conflict_is_downgraded(repo_cache, sample_repo, logs):
+    from ci_owner_agent.orchestrator import enforce_owner_commit_in_range
+    from ci_owner_agent.services.investigation_scope import InvestigationScope
+
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    notice = _owner_guard_notice(context, sample_repo["head"])
+    # 传入 base/head 与 investigation_scope 的 fullRange 冲突
+    scope = InvestigationScope(mode="full", full_base_commit=sample_repo["base"], full_head_commit=sample_repo["head"])
+
+    result = enforce_owner_commit_in_range(
+        notice,
+        repo=sample_repo["repo"],
+        git_client=GitClient(repo_cache),
+        investigation_scope=scope,
+        base_commit="other-base",
+        head_commit=sample_repo["head"],
+    )
+    assert result.owner.type == "no_high_confidence_owner"
+    assert result.hasHighConfidenceOwner is False
+
+
+def test_owner_commit_source_commit_mismatch_is_downgraded(repo_cache, sample_repo, logs):
+    """sourceCommit 与 owner.commit 冲突时 fail closed。"""
+    from ci_owner_agent.orchestrator import enforce_owner_commit_in_range
+    from ci_owner_agent.services.investigation_scope import InvestigationScope
+
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    notice = _owner_guard_notice(context, sample_repo["head"])
+    # 人为制造 sourceCommit 与 owner.commit 不一致
+    notice.responsibilityItems[0].sourceCommit = sample_repo["base"]
+    scope = InvestigationScope(mode="full", full_base_commit=sample_repo["base"], full_head_commit=sample_repo["head"])
+
+    result = enforce_owner_commit_in_range(
+        notice,
+        repo=sample_repo["repo"],
+        git_client=GitClient(repo_cache),
+        investigation_scope=scope,
+        base_commit=sample_repo["base"],
+        head_commit=sample_repo["head"],
+    )
+    assert result.owner.type == "no_high_confidence_owner"
+    assert result.hasHighConfidenceOwner is False
+    assert result.responsibilityItems[0].responsibilityType == "no_high_confidence_owner"
+
+
+def test_owner_guard_reaggregates_top_owner_from_items(repo_cache, sample_repo, logs):
+    """即使没有 item 被降级，也要从校验后的责任项重算顶层 owner，保证一致。"""
+    from ci_owner_agent.orchestrator import enforce_owner_commit_in_range
+    from ci_owner_agent.services.investigation_scope import InvestigationScope
+
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    notice = _owner_guard_notice(context, sample_repo["head"])
+    # 顶层 owner 与责任项 owner 故意不一致（顶层指向另一个合法名字）
+    notice.owner = notice.owner.model_copy(update={"name": "Wrong Top Owner"})
+    scope = InvestigationScope(mode="full", full_base_commit=sample_repo["base"], full_head_commit=sample_repo["head"])
+
+    result = enforce_owner_commit_in_range(
+        notice,
+        repo=sample_repo["repo"],
+        git_client=GitClient(repo_cache),
+        investigation_scope=scope,
+        base_commit=sample_repo["base"],
+        head_commit=sample_repo["head"],
+    )
+    # 顶层 owner 应被重算为责任项的 owner（Zhang San），而非保留 "Wrong Top Owner"
+    assert result.owner.name == "Zhang San"
+    assert result.hasHighConfidenceOwner is True
+
+
+def test_owner_guard_never_promotes_inherited_owner_to_top_level(repo_cache, sample_repo, logs):
+    from ci_owner_agent.orchestrator import _no_owner_owner, enforce_owner_commit_in_range
+    from ci_owner_agent.services.investigation_scope import InvestigationScope
+
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    notice = _owner_guard_notice(context, sample_repo["head"])
+    item = notice.responsibilityItems[0]
+    item.responsibilityType = "inherited_failure_owner"
+    item.owner = item.owner.model_copy(update={"type": "inherited_failure_owner"})
+    item.sourceBuildNumber = 5001
+    item.sourceBuildUrl = "https://jenkins.example/job/test/5001/"
+    notice.owner = _no_owner_owner()
+    notice.hasHighConfidenceOwner = False
+    scope = InvestigationScope(mode="full", full_base_commit=sample_repo["base"], full_head_commit=sample_repo["head"])
+
+    result = enforce_owner_commit_in_range(
+        notice,
+        repo=sample_repo["repo"],
+        git_client=GitClient(repo_cache),
+        investigation_scope=scope,
+        base_commit=sample_repo["base"],
+        head_commit=sample_repo["head"],
+    )
+
+    assert result.responsibilityItems[0].responsibilityType == "inherited_failure_owner"
+    assert result.owner.type == "no_high_confidence_owner"
+    assert result.hasHighConfidenceOwner is False
+
+
+def test_owner_guard_current_owner_is_not_cancelled_by_inherited_item(repo_cache, sample_repo, logs):
+    from ci_owner_agent.orchestrator import enforce_owner_commit_in_range
+    from ci_owner_agent.services.investigation_scope import InvestigationScope
+
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    notice = _owner_guard_notice(context, sample_repo["head"])
+    inherited = notice.responsibilityItems[0].model_copy(deep=True)
+    inherited.failureId = "F2"
+    inherited.responsibilityType = "inherited_failure_owner"
+    inherited.owner = inherited.owner.model_copy(
+        update={"type": "inherited_failure_owner", "name": "Historical Owner", "commit": sample_repo["base"]}
+    )
+    inherited.sourceCommit = sample_repo["base"]
+    inherited.sourceBuildNumber = 5001
+    inherited.sourceBuildUrl = "https://jenkins.example/job/test/5001/"
+    notice.responsibilityItems.append(inherited)
+    scope = InvestigationScope(mode="full", full_base_commit=sample_repo["base"], full_head_commit=sample_repo["head"])
+
+    result = enforce_owner_commit_in_range(
+        notice,
+        repo=sample_repo["repo"],
+        git_client=GitClient(repo_cache),
+        investigation_scope=scope,
+        base_commit=sample_repo["base"],
+        head_commit=sample_repo["head"],
+    )
+
+    assert result.owner.type == "high_confidence"
+    assert result.owner.name == "Zhang San"
+    assert result.hasHighConfidenceOwner is True
+    assert result.responsibilityItems[1].responsibilityType == "inherited_failure_owner"

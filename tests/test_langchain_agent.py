@@ -1334,3 +1334,75 @@ def test_aborted_short_circuits_before_agent_factory(monkeypatch, repo_cache, sa
         git_client=GitClient(repo_cache),
     )
     assert notice.result == "ABORTED"
+
+
+def test_redact_tool_output_redacts_secrets_in_string_fields():
+    from ci_owner_agent.tools.langchain_tools import _limit
+
+    data = {
+        "ok": True,
+        "diff": "- password: jsonb\n+ password: SYNTHETIC_TEST_SECRET_9x7\n+ user: fake_test_user",
+        "path": "packages/fidget-sdk/test/conf/config.default.yaml",
+        "authors": [{"name": "AoranQin-秦奥然"}],
+    }
+    redacted = _limit(data, 100000)
+    assert "SYNTHETIC_TEST_SECRET_9x7" not in redacted["diff"]
+    assert "password: <secret>" in redacted["diff"]
+    # 非字符串字段原样保留
+    assert redacted["authors"] == data["authors"]
+    assert redacted["path"] == data["path"]
+
+
+def test_redact_tool_output_redacts_connection_uris():
+    from ci_owner_agent.tools.langchain_tools import _limit
+
+    data = {
+        "ok": True,
+        "content": "mongodb://fake_test_user:SYNTHETIC_TEST_SECRET_9x7@shared-host:27017",
+    }
+    redacted = _limit(data, 100000)
+    assert "SYNTHETIC_TEST_SECRET_9x7" not in redacted["content"]
+    assert "<secret>" in redacted["content"]
+
+
+def test_initial_model_input_is_recursively_redacted(repo_cache, sample_repo, logs):
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    secret = "SYNTHETIC_INITIAL_SECRET_4p2"
+    context = replace(
+        context,
+        failure_summaries={
+            "chunks": [
+                {
+                    "chunkIndex": 0,
+                    "content": f"DB_PASSWORD={secret} DB_HOST=db.internal.invalid DB_USER=demo DB_NAME=sample",
+                }
+            ]
+        },
+    )
+
+    raw = LangChainResponsibilityAgent(context.settings, context, [])._initial_input()
+
+    assert secret not in raw
+    assert "db.internal.invalid" not in raw
+    assert "DB_PASSWORD=<secret>" in raw
+    assert "DB_HOST=<host>" in raw
+
+
+def test_typescript_tool_outputs_use_common_redaction_boundary(monkeypatch, repo_cache, sample_repo, logs):
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    secret = "SYNTHETIC_TS_SECRET_4p2"
+    payload = {"ok": True, "content": f"PG_PASSWORD={secret} PG_HOST=db.internal.invalid"}
+    monkeypatch.setattr("ci_owner_agent.tools.langchain_tools.find_definitions", lambda **kwargs: payload)
+    monkeypatch.setattr("ci_owner_agent.tools.langchain_tools.find_callers", lambda **kwargs: payload)
+    monkeypatch.setattr("ci_owner_agent.tools.langchain_tools.check_ts_deps", lambda *args, **kwargs: payload)
+    tools = {tool.name: tool for tool in build_langchain_tools(context)}
+
+    results = [
+        tools["ts_find_definitions"].invoke({"symbols": ["example"]}),
+        tools["ts_find_callers"].invoke({"symbol": "example", "definitionFile": "src/example.ts"}),
+        tools["check_node_dependencies_for_analysis"].invoke({}),
+    ]
+
+    assert all(secret not in json.dumps(result) for result in results)
+    assert all("db.internal.invalid" not in json.dumps(result) for result in results)
+    assert all("<secret>" in result["content"] and "<host>" in result["content"] for result in results)

@@ -472,3 +472,161 @@ def test_reconcile_integration_writes_canonical_no_owner():
     assert len(env_items) == 1
     assert env_items[0].owner.type == "no_high_confidence_owner"
     assert reconciled.hasHighConfidenceOwner is False
+
+
+def test_last_suite_failure_keeps_assertion_after_failed_marker():
+    """最后一个失败块的 AssertionError 在 FAILED 之后，不得被 FAILED 截断误判 unknown。
+
+    真实 Japa 行序：❯ 头 -> diff(Expected/Received) -> FAILED -> ℹ AssertionError -> 堆栈 -> Tests 汇总。
+    """
+    from ci_owner_agent.services.log_parsing import classify_all_japa_failures
+
+    lines = _complete_preflight()
+    lines += ["FIDGET_INTEGRATION_V1 phase=suite suite=select-integration status=start run_id=r1"]
+    lines += [
+        "  ✖ O-0503: CaseWhenProjection OID(select record and object OID branches when state <= 2), return string or null values (29.59ms)",
+        "❯ O-查询结果映射专题集成测试 / O-0503: CaseWhenProjection OID(select record and object OID branches when state <= 2), return string or null values",
+        "- Expected  - 2",
+        "+ Received  + 2",
+        "FAILED",
+        "ℹ AssertionError: SharedPgObject(app:6793:form:6793): expected [ …(3) ] to deeply equal [ …(3) ]",
+        "  ⁃ at Assert.deepEqual",
+        "Tests  1659 passed, 2 failed (1661)",
+    ]
+    lines.append("FIDGET_INTEGRATION_V1 phase=suite suite=select-integration status=end exit=1 run_id=r1")
+    for suite in _ALL_SUITES[1:]:
+        lines.append(f"FIDGET_INTEGRATION_V1 phase=suite suite={suite} status=start run_id=r1")
+        lines.append(f"FIDGET_INTEGRATION_V1 phase=suite suite={suite} status=end exit=0 run_id=r1")
+    lines += _summary_cleanup(run_id="r1", failed=1)
+
+    classifications = classify_all_japa_failures(lines)
+    kinds = [c["kind"] for c in classifications]
+    assert kinds == ["assertion"], f"最后一个失败块应判 assertion，实际 {kinds}"
+
+    result = _provider_from_lines(lines)
+    assert len(result["chunks"]) == 1, f"应产出 1 个 code chunk，实际 {len(result['chunks'])}"
+    assert result["totals"]["integrationEnv"] == 0
+
+
+def test_two_failures_both_assertion_when_last_has_trailing_assertion():
+    """同 suite 两个失败，最后一个的 AssertionError 在 FAILED 之后，两个都应判 assertion。"""
+    from ci_owner_agent.services.log_parsing import classify_all_japa_failures
+
+    lines = _complete_preflight()
+    lines += ["FIDGET_INTEGRATION_V1 phase=suite suite=select-integration status=start run_id=r1"]
+    lines += [
+        "  ✖ F-1003: group by main field (36.18ms)",
+        "❯ F-聚合汇总主题测试 / F-1003: group by main field",
+        "FAILED",
+        "ℹ AssertionError: SharedPgObject expected [ …(5) ] to deeply equal [ …(5) ]",
+        "Tests  1659 passed, 2 failed (1661)",
+        "  ✖ O-0503: CaseWhenProjection OID (29.59ms)",
+        "❯ O-查询结果映射专题集成测试 / O-0503: CaseWhenProjection OID",
+        "- Expected",
+        "+ Received",
+        "FAILED",
+        "ℹ AssertionError: SharedPgObject expected [ …(3) ] to deeply equal [ …(3) ]",
+        "Tests  1659 passed, 2 failed (1661)",
+    ]
+    lines.append("FIDGET_INTEGRATION_V1 phase=suite suite=select-integration status=end exit=1 run_id=r1")
+    for suite in _ALL_SUITES[1:]:
+        lines.append(f"FIDGET_INTEGRATION_V1 phase=suite suite={suite} status=start run_id=r1")
+        lines.append(f"FIDGET_INTEGRATION_V1 phase=suite suite={suite} status=end exit=0 run_id=r1")
+    lines += _summary_cleanup(run_id="r1", failed=1)
+
+    classifications = classify_all_japa_failures(lines)
+    kinds = [c["kind"] for c in classifications]
+    assert kinds == ["assertion", "assertion"], f"两个失败都应判 assertion，实际 {kinds}"
+
+
+def test_two_assertions_have_independent_signatures_not_cross_contaminated():
+    """F-1003/O-0503 两个断言失败，signature 必须独立，不能串入对方的 AssertionError。"""
+    from ci_owner_agent.services.log_parsing import build_integration_failure_summaries
+
+    lines = _complete_preflight()
+    lines += ["FIDGET_INTEGRATION_V1 phase=suite suite=select-integration status=start run_id=r1"]
+    lines += [
+        "  ✖ F-1003: group by main field (36.18ms)",
+        "  ✖ O-0503: CaseWhenProjection OID (29.59ms)",
+        "❯ F-聚合汇总主题测试 / F-1003: group by main field",
+        "ℹ AssertionError: F-specific expected [ { name: 'alice' } ]",
+        "❯ O-查询结果映射专题集成测试 / O-0503: CaseWhenProjection OID",
+        "ℹ AssertionError: O-specific case_record_oid",
+        "Tests  1659 passed, 2 failed (1661)",
+    ]
+    lines.append("FIDGET_INTEGRATION_V1 phase=suite suite=select-integration status=end exit=1 run_id=r1")
+    for suite in _ALL_SUITES[1:]:
+        lines.append(f"FIDGET_INTEGRATION_V1 phase=suite suite={suite} status=start run_id=r1")
+        lines.append(f"FIDGET_INTEGRATION_V1 phase=suite suite={suite} status=end exit=0 run_id=r1")
+    lines += _summary_cleanup(run_id="r1", failed=1)
+
+    chunks = build_integration_failure_summaries(lines)
+    assert len(chunks) == 2, f"应产出 2 个独立 chunk，实际 {len(chunks)}"
+    f_chunk = next(c for c in chunks if "F-1003" in c["content"])
+    o_chunk = next(c for c in chunks if "O-0503" in c["content"])
+    # F 不包含 O 的 AssertionError，O 不包含 F 的
+    assert "F-specific" in f_chunk["content"]
+    assert "O-specific" not in f_chunk["content"]
+    assert "O-specific" in o_chunk["content"]
+    assert "F-specific" not in o_chunk["content"]
+    # signatureKey 必须不同
+    assert f_chunk["signatureHash"] != o_chunk["signatureHash"]
+
+
+def test_connection_items_aggregate_per_suite():
+    """同 suite 数百次 connection 只生成一条 canonical no-owner，signature 不含行号。"""
+    from ci_owner_agent.schemas import CiResponsibilityNotice, Owner
+    from ci_owner_agent.services.integration_responsibility import reconcile_integration_responsibilities
+
+    classifications = []
+    for i in range(100):
+        classifications.append({"kind": "connection", "suite": "select-integration", "line": 1000 + i})
+    for i in range(50):
+        classifications.append({"kind": "connection", "suite": "delete-integration", "line": 2000 + i})
+    summaries = {"integrationClassifications": classifications, "integrationConflicts": []}
+
+    notice = CiResponsibilityNotice(
+        repo="fidget-xiaoqin",
+        job="j",
+        buildNumber=1,
+        buildUrl="u",
+        result="FAILURE",
+        branch="main",
+        headCommit="h",
+        baseCommit="b",
+        owner=Owner(type="no_high_confidence_owner", name="无高可信责任人", confidence=0.0),
+        failureReason="env",
+        responsibilityItems=[],
+        hasHighConfidenceOwner=False,
+    )
+    result = reconcile_integration_responsibilities(notice, failure_summaries=summaries)
+    sigs = [item.failureSignature for item in result.responsibilityItems]
+    assert len(sigs) == 2, f"应聚合为 2 条（每 suite 一条），实际 {len(sigs)}"
+    assert "integration_connection|select-integration" in sigs
+    assert "integration_connection|delete-integration" in sigs
+    # signature 不含 @L 行号
+    assert all("@L" not in sig for sig in sigs)
+
+
+def test_connection_and_unknown_not_merged():
+    """connection 与 unknown 不合并，各自独立签名。"""
+    from ci_owner_agent.schemas import CiResponsibilityNotice, Owner
+    from ci_owner_agent.services.integration_responsibility import reconcile_integration_responsibilities
+
+    summaries = {
+        "integrationClassifications": [
+            {"kind": "connection", "suite": "select-integration", "line": 10},
+            {"kind": "unknown", "suite": "select-integration", "line": 20},
+        ],
+        "integrationConflicts": [],
+    }
+    notice = CiResponsibilityNotice(
+        repo="r", job="j", buildNumber=1, buildUrl="u", result="FAILURE", branch="main",
+        headCommit="h", baseCommit="b",
+        owner=Owner(type="no_high_confidence_owner", name="无高可信责任人", confidence=0.0),
+        failureReason="env", responsibilityItems=[], hasHighConfidenceOwner=False,
+    )
+    result = reconcile_integration_responsibilities(notice, failure_summaries=summaries)
+    sigs = sorted(item.failureSignature for item in result.responsibilityItems)
+    assert "integration_connection|select-integration" in sigs
+    assert "integration_unknown|select-integration" in sigs

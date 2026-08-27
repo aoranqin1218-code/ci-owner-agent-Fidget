@@ -11,6 +11,7 @@ from ci_owner_agent.services.failure_identity import (
     canonicalize_failure_message,
     canonicalize_failure_signature,
     has_meaningful_failure_identity,
+    redact_secrets,
 )
 
 
@@ -74,6 +75,10 @@ def test_object_id_forms_are_canonicalized(value):
         ("requestId=abcdef123456", "<requestid>"),
         ("traceId=abcdef123456", "<traceid>"),
         ("sessionId=abcdef123456", "<sessionid>"),
+        ("password=SYNTHETIC_TEST_SECRET_9x7", "<secret>"),
+        ('password="SYNTHETIC_TEST_SECRET_9x7"', "<secret>"),
+        ("api_key=sk-abc123XYZ", "<secret>"),
+        ("user=fake_test_user password=SYNTHETIC_TEST_SECRET_9x7 db=fake_test_db", "<secret>"),
     ],
 )
 def test_dynamic_values_are_canonicalized(value, placeholder):
@@ -127,6 +132,47 @@ def test_canonicalizer_is_idempotent_and_empty_safe():
     assert canonicalize_failure_signature(canonical) == canonical
     assert canonicalize_failure_signature(None) == ""
     assert canonicalize_failure_message(None) == ""
+
+
+@pytest.mark.parametrize(
+    ("value", "must_not_contain"),
+    [
+        ("mongodb://fake_test_user:SYNTHETIC_TEST_SECRET_9x7@shared-host:27017", "SYNTHETIC_TEST_SECRET_9x7"),
+        ("mongodb+srv://admin:s3cret@cluster.example.com/db", "s3cret"),
+        ("postgres://user:pgpass@ep.example.privatelink:5432", "pgpass"),
+        ("postgresql://fake_test_user:SYNTHETIC_TEST_SECRET_9x7@localhost/db", "SYNTHETIC_TEST_SECRET_9x7"),
+    ],
+)
+def test_connection_uri_credentials_are_redacted(value, must_not_contain):
+    redacted = redact_secrets(value)
+    assert must_not_contain not in redacted
+    assert "<secret>" in redacted
+
+
+def test_redact_secrets_preserves_structure_and_leaves_non_secrets():
+    value = "proton.host=db.internal.example.invalid user=fake_test_user password=SYNTHETIC_TEST_SECRET_9x7 db=fake_test_db"
+    redacted = redact_secrets(value)
+    assert "SYNTHETIC_TEST_SECRET_9x7" not in redacted
+    assert "fake_test_user" not in redacted  # 数据库用户名一并脱敏
+    assert "<user>" in redacted
+    assert "db.internal.example.invalid" not in redacted  # 主机一并脱敏
+    assert "<host>" in redacted
+
+
+def test_redact_db_user_without_false_positive():
+    assert redact_secrets("user=integration_test") == "user=<user>"
+    assert redact_secrets("user: integration_test") == "user: <user>"
+    # user_mapper / userId 不是数据库连接用户名，不得误伤
+    assert redact_secrets("user_mapper=abc") == "user_mapper=abc"
+    assert redact_secrets("userId=123") == "userId=123"
+
+
+def test_redact_db_host_and_name_without_false_positive():
+    assert redact_secrets("host=ep-xxx.aliyuncs.com db=integration_test") == "host=<host> db=<db>"
+    assert redact_secrets("host: localhost") == "host: <host>"
+    # dbName / hostname 不是连接配置键，不得误伤
+    assert redact_secrets("dbName=ci_owner_agent") == "dbName=ci_owner_agent"
+    assert redact_secrets("hostname=node01") == "hostname=node01"
 
 
 def test_failure_fact_rebuilds_dynamic_model_signature_and_id():
@@ -578,3 +624,77 @@ def test_dict_builder_drops_unsupported_absolute_path():
     }
 
     assert build_failure_fact_signature(fact) == "unknown_failure"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "mongodb://fake_test_user:SYNTHETIC_TEST_SECRET_9x7@shared-host:27017",  # URI
+        "user=integration_test host=ep-xxx.aliyuncs.com db=integration_test",  # host/user/db
+        '"password": "SYNTHETIC_TEST_SECRET_9x7", "host": "db.invalid", "user": "demo", "db": "sample"',  # JSON
+        "PASSWORD=SYNTHETIC_TEST_SECRET_9x7",  # dotenv
+        "DB_PASSWORD=SYNTHETIC_TEST_SECRET_9x7",  # prefixed dotenv
+        "PG_HOST=db.invalid PG_USER=demo PG_DATABASE=sample",  # database env fields
+        "DATABASE_URL=postgres://demo:pass@db.invalid:5432/sample",  # connection env URI
+        "password: SYNTHETIC_TEST_SECRET_9x7",  # YAML
+        "token=abc123",  # 赋值
+    ],
+)
+def test_scanner_catches_all_redactor_formats(value):
+    """scanner 与 redactor 共用规则：凡 redactor 能脱敏的格式，scanner 都能命中。"""
+    from ci_owner_agent.services.failure_identity import _find_plaintext_secrets
+
+    hits = _find_plaintext_secrets(value)
+    assert hits, f"scanner 应命中 {value!r}"
+
+
+def test_scanner_clean_after_redaction():
+    """脱敏后再扫描应零命中（占位符不被误报为明文）。"""
+    from ci_owner_agent.services.failure_identity import _find_plaintext_secrets, redact_secrets
+
+    for value in [
+        "mongodb://fake_test_user:SYNTHETIC_TEST_SECRET_9x7@shared-host:27017/sample",
+        "user=integration_test password=SYNTHETIC_TEST_SECRET_9x7 host=ep-xxx db=integration_test",
+        '"password": "SYNTHETIC_TEST_SECRET_9x7", "host": "db.invalid", "user": "demo", "db": "sample"',
+        "PASSWORD=SYNTHETIC_TEST_SECRET_9x7",
+        "DB_PASSWORD=SYNTHETIC_TEST_SECRET_9x7 DB_HOST=db.invalid DB_USER=demo DB_NAME=sample",
+        "PG_PASSWORD=SYNTHETIC_TEST_SECRET_9x7 PG_HOST=db.invalid PG_USER=demo PG_DATABASE=sample",
+        "DATABASE_URL=postgres://demo:SYNTHETIC_TEST_SECRET_9x7@db.invalid:5432/sample",
+    ]:
+        redacted = redact_secrets(value)
+        assert _find_plaintext_secrets(redacted) == [], f"脱敏后仍命中：{redacted!r}"
+        for plaintext in (
+            "SYNTHETIC_TEST_SECRET_9x7",
+            "fake_test_user",
+            "shared-host",
+            "db.invalid",
+            "integration_test",
+            "demo",
+            "sample",
+        ):
+            assert plaintext not in redacted
+
+
+def test_recursive_redaction_uses_sensitive_dict_keys():
+    from ci_owner_agent.services.failure_identity import _find_plaintext_secrets, redact_secrets_deep
+
+    raw = {
+        "database": {
+            "DB_PASSWORD": "SYNTHETIC_DICT_SECRET_4p2",
+            "host": "db.internal.invalid",
+            "user": "demo",
+            "db": "sample",
+        },
+        "safe": {"authorName": "Example Author"},
+    }
+
+    assert _find_plaintext_secrets(raw)
+    redacted = redact_secrets_deep(raw)
+    assert redacted["database"] == {
+        "DB_PASSWORD": "<secret>",
+        "host": "<host>",
+        "user": "<user>",
+        "db": "<db>",
+    }
+    assert redacted["safe"] == raw["safe"]
+    assert _find_plaintext_secrets(redacted) == []

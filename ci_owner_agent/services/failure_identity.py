@@ -23,6 +23,65 @@ TEMP_PATH_RE = re.compile(
     r"(?i)(?:[A-Za-z]:)?(?:[/\\](?:users[/\\][^/\\\s]+[/\\]appdata[/\\]local[/\\]temp|tmp|var[/\\]tmp))[/\\][^\s'\"]+"
 )
 HASH_RE = re.compile(r"(?<![A-Za-z0-9])[0-9a-f]{7,64}(?![A-Za-z0-9])", re.I)
+_SECRET_KEY = (
+    r"(?:[a-z0-9]+[_-])*(?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|"
+    r"private[_-]?key|webhook[_-]?url|bot[_-]?secret|database[_-]?url|db[_-]?url|"
+    r"mongo(?:db)?[_-]?(?:uri|url)|postgres(?:ql)?[_-]?(?:uri|url))"
+)
+_DB_PREFIX = r"(?:db|database|pg|postgres(?:ql)?|mongo(?:db)?|mysql|redis)[_-]"
+SECRET_ASSIGNMENT_RE = re.compile(
+    rf"(?i)(\b{_SECRET_KEY}\s*[:=]\s*)['\"]?[^'\",\s}}]+['\"]?"
+)
+# dotenv / 纯赋值形式：KEY=value，KEY 属敏感键
+DOTENV_SECRET_RE = re.compile(
+    rf"(?i)(\b{_SECRET_KEY}\s*=\s*)[^\s]+"
+)
+# JSON 形式："key": "value"
+JSON_SECRET_RE = re.compile(
+    rf'(?i)("{_SECRET_KEY}"\s*:\s*")[^"]+(")'
+)
+CONNECTION_URI_RE = re.compile(
+    r"(?i)\b(?P<scheme>mongodb(?:\+srv)?|postgres(?:ql)?|mysql|redis|amqp)s?://"
+    r"(?P<user>[^/\s:@]+):(?P<password>[^@\s/]+)@(?P<host>[^:/\s?#]+)"
+    r"(?::(?P<port>\d{2,5}))?(?:/(?P<database>[^?\s#]*))?"
+)
+# 数据库连接配置里的用户名键（YAML `user: x` / `user= x` / `"user": "x"`），
+# 与 password 同属凭据上下文，脱敏为 <user>。用 \buser\b 精确边界，避免误伤 user_mapper/userId 等。
+DB_USER_RE = re.compile(
+    rf"(?i)((?<![A-Za-z0-9_])['\"]?(?:(?:{_DB_PREFIX})?(?:user|username))['\"]?(?![A-Za-z0-9_])\s*[:=]\s*['\"]?)[^'\",\s}}]+(['\"]?)"
+)
+# 数据库主机/endpoint 键（YAML `host: x`），脱敏为 <host>。\bhost\b 不会误伤 localhost。
+DB_HOST_RE = re.compile(
+    rf"(?i)((?<![A-Za-z0-9_])['\"]?(?:(?:{_DB_PREFIX})?host)['\"]?(?![A-Za-z0-9_])\s*[:=]\s*['\"]?)[^'\",\s}}]+(['\"]?)"
+)
+# 数据库名键（YAML `db: x` / `db= x`），脱敏为 <db>。\bdb\b 不会误伤 dbName/mongo_db。
+DB_NAME_RE = re.compile(
+    rf"(?i)((?<![A-Za-z0-9_])['\"]?(?:(?:{_DB_PREFIX})(?:db|database|name)|db|database)['\"]?(?![A-Za-z0-9_])\s*[:=]\s*['\"]?)[^'\",\s}}]+(['\"]?)"
+)
+
+
+def _redact_connection_uri(match: re.Match[str]) -> str:
+    port = ":<port>" if match.group("port") else ""
+    database = "/<db>" if match.group("database") is not None else ""
+    return f"{match.group('scheme')}://<user>:<secret>@<host>{port}{database}"
+
+# 脱敏规则统一表：redactor 与 scanner 共用同一套 (regex, replacement)。
+# 顺序即应用顺序（JSON 先，避免被 assignment 部分匹配）。
+_SECRET_RULES: tuple[tuple[re.Pattern[str], Any], ...] = (
+    (JSON_SECRET_RE, r"\1<secret>\2"),
+    (SECRET_ASSIGNMENT_RE, r"\1<secret>"),
+    (DOTENV_SECRET_RE, r"\1<secret>"),
+    (CONNECTION_URI_RE, _redact_connection_uri),
+    (DB_USER_RE, r"\1<user>\2"),
+    (DB_HOST_RE, r"\1<host>\2"),
+    (DB_NAME_RE, r"\1<db>\2"),
+)
+# scanner 判定「已脱敏」的占位符标记：匹配文本含任一标记即视为已安全脱敏。
+_SECRET_PLACEHOLDER_MARKERS = ("<secret>", "<user>", "<host>", "<db>")
+_SECRET_KEY_RE = re.compile(rf"(?i)^{_SECRET_KEY}$")
+_DB_USER_KEY_RE = re.compile(rf"(?i)^(?:(?:{_DB_PREFIX})?(?:user|username))$")
+_DB_HOST_KEY_RE = re.compile(rf"(?i)^(?:(?:{_DB_PREFIX})?host)$")
+_DB_NAME_KEY_RE = re.compile(rf"(?i)^(?:(?:{_DB_PREFIX})(?:db|database|name)|db|database)$")
 
 DYNAMIC_PLACEHOLDER_RE = re.compile(
     r"(?:(?:request|trace|session|correlation)id[=:_-]*)?"
@@ -169,10 +228,87 @@ def sanitize_failure_message(value: str | None) -> str:
     return _normalize_failure_message(value, lowercase=False)
 
 
+def redact_secrets(value: str | None) -> str:
+    """把凭据赋值（password/token/secret/api_key 等）后的值替换为 ``<secret>``。
+
+    支持 YAML（``password: value``）、JSON（``"password": "value"``）、
+    dotenv（``PASSWORD=value``）、普通赋值（``token=...``）、连接串 URI
+    （``mongodb://user:pass@host``）与数据库键（``user``/``host``/``db``）等格式。
+    只做 secret 脱敏，不规范化大小写/空白，保持文本结构不变；
+    供 notice 输出侧与 Agent 模型输入侧复用。
+    """
+    text = str(value or "")
+    for pattern, replacement in _SECRET_RULES:
+        text = pattern.sub(replacement, text)
+    return text
+
+
+def redact_secrets_deep(value: Any) -> Any:
+    """递归脱敏 str/dict/list/tuple，覆盖 Pydantic ``model_dump()`` 后的嵌套结构。
+
+    供 Agent 模型输入侧（工具返回）、notice 输出侧与落库/发送前门禁复用。
+    """
+    if isinstance(value, str):
+        return redact_secrets(value)
+    if isinstance(value, dict):
+        redacted: dict[Any, Any] = {}
+        for key, item in value.items():
+            placeholder = _placeholder_for_sensitive_key(key)
+            is_container = isinstance(item, (Mapping, list, tuple))
+            redacted[key] = placeholder if placeholder and not is_container else redact_secrets_deep(item)
+        return redacted
+    if isinstance(value, (list, tuple)):
+        return [redact_secrets_deep(item) for item in value]
+    return value
+
+
+def _find_plaintext_secrets(value: Any) -> list[str]:
+    """递归找出仍未脱敏的敏感值（落库/发送前 fail-closed 扫描用）。
+
+    与 ``redact_secrets`` 共用同一套 ``_SECRET_RULES``，保证「能脱敏的都能被扫描到」。
+    只报敏感键后的明文值，不报 ``<secret>`` 等占位符；返回定位信息，不返回明文值本身。
+    """
+    hits: list[str] = []
+    if isinstance(value, str):
+        for pattern, _ in _SECRET_RULES:
+            for match in pattern.finditer(value):
+                candidate = match.group(0)
+                if not any(marker in candidate for marker in _SECRET_PLACEHOLDER_MARKERS):
+                    key_hint = candidate.split("=")[0].split(":")[0].split("//")[0].strip()[:24]
+                    hits.append(f"{key_hint}")
+        return hits
+    if isinstance(value, dict):
+        for key, item in value.items():
+            placeholder = _placeholder_for_sensitive_key(key)
+            is_container = isinstance(item, (Mapping, list, tuple))
+            if placeholder and not is_container and str(item) != placeholder:
+                hits.append(str(key)[:24])
+            else:
+                hits.extend(_find_plaintext_secrets(item))
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            hits.extend(_find_plaintext_secrets(item))
+    return hits
+
+
+def _placeholder_for_sensitive_key(key: Any) -> str | None:
+    normalized = str(key or "").strip()
+    if _SECRET_KEY_RE.fullmatch(normalized):
+        return "<secret>"
+    if _DB_USER_KEY_RE.fullmatch(normalized):
+        return "<user>"
+    if _DB_HOST_KEY_RE.fullmatch(normalized):
+        return "<host>"
+    if _DB_NAME_KEY_RE.fullmatch(normalized):
+        return "<db>"
+    return None
+
+
 def _normalize_failure_message(value: str | None, *, lowercase: bool) -> str:
     text = ANSI_RE.sub("", str(value or ""))
     if not text.strip():
         return ""
+    text = redact_secrets(text)
     text = OBJECT_ID_WRAPPER_RE.sub("<object_id>", text)
     text = OBJECT_ID_RE.sub("<object_id>", text)
     text = UUID_RE.sub("<uuid>", text)
