@@ -198,6 +198,7 @@ def test_mixed_budget_keeps_coverage_and_records_omitted_counts():
     assert result["totals"] == {
         "japa": 5,
         "coverage": 1,
+        "integrationEnv": 0,
         "omittedJapa": 1,
         "omittedCoverage": 0,
     }

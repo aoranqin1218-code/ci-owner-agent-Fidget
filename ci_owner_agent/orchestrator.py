@@ -25,6 +25,7 @@ from ci_owner_agent.services.ai_history_search import (
 )
 from ci_owner_agent.services.branch_normalization import normalize_branch_name
 from ci_owner_agent.services.coverage_responsibility import reconcile_coverage_responsibilities
+from ci_owner_agent.services.integration_responsibility import reconcile_integration_responsibilities
 from ci_owner_agent.services.failure_fact_ai import extract_failure_facts_with_ai
 from ci_owner_agent.services.git_client import GitClient
 from ci_owner_agent.services.history_no_owner import (
@@ -76,6 +77,22 @@ def _is_coverage_only_failures(failure_summaries: dict | None) -> bool:
         isinstance(c, dict) and c.get("anchorType") != "coverage_failure_block" for c in chunks
     )
     return has_coverage and not has_other
+
+
+def _is_integration_env_only_failures(failure_summaries: dict | None) -> bool:
+    """failure_summaries 是否只含集成环境失败或协议冲突（无代码/断言失败可定责）。
+
+    判据：totals.integrationEnv > 0（存在环境失败事实）或存在协议冲突，且没有任何
+    Japa/coverage chunk（即没有可交给历史/Agent 的代码失败）。环境失败/协议冲突是
+    no-owner、history ineligible，应确定性短路为 no-owner，不调责任 Agent。
+    """
+    if not isinstance(failure_summaries, dict):
+        return False
+    totals = failure_summaries.get("totals") if isinstance(failure_summaries.get("totals"), dict) else {}
+    integration_env = totals.get("integrationEnv") or 0
+    has_conflict = bool(failure_summaries.get("integrationConflicts"))
+    chunks = failure_summaries.get("chunks") or []
+    return (integration_env > 0 or has_conflict) and not chunks
 
 
 def _restore_authoritative_build_metadata(
@@ -335,6 +352,10 @@ def analyze_failed_build(
             git_client=runtime_context.git_client,
             investigation_scope=runtime_context.investigation_scope,
         )
+        notice = reconcile_integration_responsibilities(
+            notice,
+            failure_summaries=runtime_context.failure_summaries,
+        )
         # 历史 no-owner item 会保留来源构建用于审计；再次 model_validate 会按公共
         # schema 的普通 no-owner 归一规则清空这些历史字段，因此此分支不重复校验。
         _save_history(
@@ -350,9 +371,39 @@ def analyze_failed_build(
             history_store=history_store,
         )
         return notice
+    # 集成测试环境失败（preflight/cleanup/外部库连接失败）：确定性 no-owner，不调责任 Agent。
+    # 环境/数据库/基础设施故障不可归责代码提交者，也不进入 owner 历史继承。
+    if _is_integration_env_only_failures(runtime_context.failure_summaries):
+        env_count = (runtime_context.failure_summaries.get("totals") or {}).get("integrationEnv") or 0
+        notice = CiResponsibilityNotice(
+            repo=repo,
+            job=build_info.job,
+            buildNumber=build_info.buildNumber,
+            buildUrl=build_info.buildUrl,
+            result=build_info.result,
+            branch=build_info.branch,
+            headCommit=head_commit,
+            baseCommit=base_commit,
+            owner=no_owner(),
+            failureReason=f"构建失败：集成测试环境/基础设施失败（共 {env_count} 项），无代码责任可归。",
+            evidence=[
+                EvidenceItem(
+                    id="E_INTEGRATION_ENV",
+                    type="build_info",
+                    summary="集成测试环境失败（preflight/清理/外部数据库连接），非代码责任",
+                    detail=f"integrationEnv failures: {env_count}",
+                    source="integration_env_classifier",
+                )
+            ],
+            suggestions=[
+                "优先检查集成测试的数据库/基础设施环境（Mongo readiness、Protonbase 连接、镜像拉取）。",
+                "环境失败不进入 owner 历史，如需复现请确认构建环境的数据库可达性与镜像可用性。",
+            ],
+            hasHighConfidenceOwner=False,
+        )
     # Fidget 二期（方案 X）：仅存在覆盖率门槛失败（无 Japa 测试失败）时，跳过责任分析
     # Agent，直接走确定性 coverage reconciler 生成 notice。
-    if _is_coverage_only_failures(runtime_context.failure_summaries):
+    elif _is_coverage_only_failures(runtime_context.failure_summaries):
         # coverage-only：coverage 责任项完全由确定性 reconciler 生成，不调 LLM。
         notice = CiResponsibilityNotice(
             repo=repo,
@@ -409,6 +460,11 @@ def analyze_failed_build(
         head_commit=head_commit,
         git_client=runtime_context.git_client,
         investigation_scope=runtime_context.investigation_scope,
+    )
+    # 集成测试环境/未知失败：确定性写 canonical no-owner，移除 Agent 意外生成的环境 owner。
+    notice = reconcile_integration_responsibilities(
+        notice,
+        failure_summaries=runtime_context.failure_summaries,
     )
     notice = validate_notice(notice)
     _save_history(
@@ -611,7 +667,28 @@ def _with_precomputed_failure_context(
     except Exception as exc:
         failure_summaries = {"chunks": [], "warning": f"failure summary extraction failed: {exc}"}
     enriched = replace(context, failure_summaries=failure_summaries)
-    if not (failure_summaries.get("chunks") if isinstance(failure_summaries, dict) else None) and context.settings.ai_failure_facts_enabled:
+    # 集成环境失败（integrationEnv > 0 且无代码 chunk）或协议不完整
+    # （Integration stage 存在但缺 V1 marker）不提取 AI failure facts：
+    # 环境/基础设施失败无代码责任，若让 AI 提取连接错误事实，模型可能误判为
+    # 可继承内层事实而写入历史。确定性分类优先于 AI facts。
+    integration_conflicts = (
+        failure_summaries.get("integrationConflicts")
+        if isinstance(failure_summaries, dict)
+        else None
+    )
+    integration_env_only = bool(
+        isinstance(failure_summaries, dict)
+        and (
+            (failure_summaries.get("totals") or {}).get("integrationEnv", 0) > 0
+            or bool(integration_conflicts)
+        )
+        and not failure_summaries.get("chunks")
+    )
+    if (
+        not (failure_summaries.get("chunks") if isinstance(failure_summaries, dict) else None)
+        and not integration_env_only
+        and context.settings.ai_failure_facts_enabled
+    ):
         try:
             with _metrics_stage("failureFacts"):
                 focused = context.log_provider.find_focused_failure_chunks(

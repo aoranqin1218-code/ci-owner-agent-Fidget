@@ -119,6 +119,11 @@ def _build_prompt(
         '  "warning": null\n'
         "}\n"
         "如果只能看到外层 Docker/Jenkins wrapper，请输出 historyEligible=false, "
-        "isGenericWrapper=true, failureKind=generic_wrapper, confidence<=0.5。\n\n"
+        "isGenericWrapper=true, failureKind=generic_wrapper, confidence<=0.5。\n"
+        "如果看到集成测试的数据库/基础设施失败（ECONNREFUSED、ETIMEDOUT、MongoServerError、"
+        "connection timeout、Protonbase/外部数据库不可达、镜像拉取失败、readiness 失败），"
+        "必须输出 historyEligible=false, failureKind=environment 或 infrastructure, "
+        "confidence<=0.5，且不得建议任何代码 owner。这类失败属于环境/基础设施，"
+        "不可归责代码提交者，也不可进入历史继承。\n\n"
         f"输入：\n{json.dumps(payload, ensure_ascii=False)}"
     )

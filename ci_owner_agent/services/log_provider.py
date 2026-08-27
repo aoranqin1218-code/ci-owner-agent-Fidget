@@ -16,7 +16,10 @@ from ci_owner_agent.services.log_parsing import (
     FinalStatus,
     FinalStatusResolution,
     build_coverage_failure_summaries,
+    build_integration_failure_summaries,
+    build_integration_protocol_index,
     build_test_failure_summaries,
+    classify_all_japa_failures,
     count_japa_failure_blocks,
     detect_checkout_revision_from_console_log,
     find_error_chunks,
@@ -108,26 +111,53 @@ class TextLogProvider(LogProvider):
     def find_test_failure_summaries(self, tail_lines: int = 500, max_chunks: int = 5) -> dict:
         all_lines = self._lines()
         limit = max(0, max_chunks)
-        focused = self.find_focused_failure_chunks(tail_lines=tail_lines, max_chunks=max(1, limit))
-        summaries = build_test_failure_summaries(focused, max_chunks=max(1, limit))
-        japa_chunks = list(summaries.get("chunks") or [])
         coverage_chunks = build_coverage_failure_summaries(all_lines, max_chunks=None)
+
+        # 集成协议 index + 全量分类（一次解析所有 Japa 失败块，逐块判定 kind）。
+        protocol_index = build_integration_protocol_index(all_lines)
+        preflight_failures = protocol_index["preflight_failures"]
+        classifications = classify_all_japa_failures(all_lines)
+
+        # 集成日志：code chunks 由 build_integration_failure_summaries 直接按行号
+        # 生成，与 classifications 一一对应，不经过 build_test_failure_summaries
+        # （后者在大量相邻 ✖ + 交错 ❯ 下会膨胀出重复 chunk）。
+        # 非集成日志：走原有 build_test_failure_summaries，所有 Japa 块照常展示。
+        summary_warning: str | None = None
+        if protocol_index["is_integration"]:
+            code_chunks = build_integration_failure_summaries(all_lines, max_chunks=None)
+        else:
+            focused = self.find_focused_failure_chunks(tail_lines=tail_lines, max_chunks=max(1, limit))
+            summaries = build_test_failure_summaries(focused, max_chunks=max(1, limit))
+            code_chunks = list(summaries.get("chunks") or [])
+            summary_warning = summaries.get("warning")
+
+        # 全量分类计数：assertion（代码）、connection（环境）、unknown（证据不足，no-owner）。
+        connection_count = sum(1 for c in classifications if c["kind"] == "connection")
+        unknown_count = sum(1 for c in classifications if c["kind"] == "unknown")
 
         # 统一预算：混合失败时优先保留尽可能多的 Japa，但 coverage 至少占 1 个展示位。
         if coverage_chunks and limit:
-            displayed_japa = japa_chunks[: max(0, limit - 1)]
+            displayed_japa = code_chunks[: max(0, limit - 1)]
             displayed_coverage = coverage_chunks[: limit - len(displayed_japa)]
         else:
-            displayed_japa = japa_chunks[:limit]
+            displayed_japa = code_chunks[:limit]
             displayed_coverage = []
         merged = [*displayed_japa, *displayed_coverage]
         for index, chunk in enumerate(merged):
             chunk["chunkIndex"] = index
 
         japa_total = count_japa_failure_blocks(all_lines)
+        # 环境/unknown 失败事实全部 no-owner、history ineligible，不进 chunks，只进 totals 记账。
+        integration_env_total = (
+            len(preflight_failures)
+            + connection_count
+            + unknown_count
+            + (1 if protocol_index["cleanup_failed"] else 0)
+        )
         totals = {
             "japa": japa_total,
             "coverage": len(coverage_chunks),
+            "integrationEnv": integration_env_total,
             "omittedJapa": max(0, japa_total - len(displayed_japa)),
             "omittedCoverage": max(0, len(coverage_chunks) - len(displayed_coverage)),
         }
@@ -141,9 +171,15 @@ class TextLogProvider(LogProvider):
             }
             for chunk in coverage_chunks
         ]
-        result = {"chunks": merged, "totals": totals, "coverageFiles": coverage_files}
-        if not merged and summaries.get("warning"):
-            result["warning"] = summaries["warning"]
+        result = {
+            "chunks": merged,
+            "totals": totals,
+            "coverageFiles": coverage_files,
+            "integrationClassifications": classifications,
+            "integrationConflicts": protocol_index["conflicts"],
+        }
+        if not merged and summary_warning:
+            result["warning"] = summary_warning
         return result
 
     def detect_final_status(self) -> FinalStatus:

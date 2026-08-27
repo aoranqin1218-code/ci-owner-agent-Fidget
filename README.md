@@ -87,10 +87,11 @@ Agent 应先调查 `focusRange`。只有证据不足或窄范围读取失败时�
 1. **可信构建信息**：状态、逻辑分支、构建号、构建链接和 checkout SHA。
 2. **Git 上下文**：commit 区间、changed files、文件 diff 和作者信息。
 3. **确定性失败摘要**：在清洗后日志中定位结构化失败块——Japa `✖` 失败行——并生成稳定指纹；同时识别 c8 覆盖率门槛失败（`Coverage for ... does not meet ...`）；Make / Docker 测试失败、TypeScript 编译错误等聚焦片段。
-4. **AI failure facts**：确定性摘要不足时，从非结构化日志提取真实内层失败事实。
-5. **历史失败查询**：按签名、结构和可选 AI semantic comparison 查找历史相似失败。
-6. **人工反馈**：确认、修正、标记偶发或标记无责任人的 active feedback。
-7. **本地校验**：验证责任项证据、责任类型、来源构建和 owner 一致性。
+4. **集成测试分类**：对 `FIDGET_INTEGRATION_V1` runner marker 日志做协议解析与逐块分类——代码断言失败（含 AssertionError）进入定责；数据库/基础设施失败（preflight/cleanup 失败、ECONNREFUSED 等连接错误）与 unknown 确定性 no-owner、不进历史；协议冲突 fail-closed。详见 `samples/fidget_log/integration/PROTOCOL.md`。
+5. **AI failure facts**：确定性摘要不足时，从非结构化日志提取真实内层失败事实。
+6. **历史失败查询**：按签名、结构和可选 AI semantic comparison 查找历史相似失败。
+7. **人工反馈**：确认、修正、标记偶发或标记无责任人的 active feedback。
+8. **本地校验**：验证责任项证据、责任类型、来源构建和 owner 一致性。
 
 ### 1.6 责任类型
 
@@ -169,6 +170,7 @@ pyproject.toml                    # Python 依赖和可选 extras
 | `services/history_no_owner.py`          | 历史无责任人结论的选择、信任校验、强证据回退与严格 notice 构造。              |
 | `services/log_parsing.py`              | 失败定位与摘要提取：清洗 BuildKit/ANSI 前缀后按 Japa `✖` 识别失败块，并识别 c8 覆盖率门槛失败，均生成指纹。 |
 | `services/coverage_responsibility.py`  | Fidget 二期：覆盖率门槛失败的确定性定责——包名归属（Nx 块 / 候选包唯一消歧）→ 可信 diff 内找唯一作者 → 中等置信或无责任人；reconciler 为 coverage 责任项的唯一生产者。 |
+| `services/integration_responsibility.py` | Fidget 二期：集成测试环境/unknown 失败的责任保护 guard——写 canonical no-owner、移除 Agent 误生成的环境 owner，环境失败不进历史继承。 |
 | `agents/initial_input.py`              | 构造发给 LangChain Agent 的纯首轮输入 payload。                                |
 | `agents/notice_parser.py`              | 对模型输出进行严格、无副作用的 notice 解析与修复。                             |
 | `services/wecom_notice_service.py`      | CI notice 的格式化、去重、投递与通知失败隔离。                                 |
@@ -543,6 +545,14 @@ python -m ci_owner_agent analyze-local `
 | `--output-file`                            | 否   | 原子写入 UTF-8 notice 文件。                                                   |
 
 `analyze-local` 会从日志中解析可信 checkout 行，并校验其 SHA 与 `--head-commit`。不一致时默认返回输入错误，防止对错误 commit 定责。
+
+**集成测试 fixture 离线回放**：`samples/fidget_log/integration/` 下有三份脱敏真实样本（`failure-assertion.log`、`failure-pipeline-image-pull.log`、`failure-protonbase-unavailable.log`），配套 `manifest.json`（含 sha256）与 `PROTOCOL.md`。样本完整性由默认测试发现并校验：
+
+```powershell
+python -m pytest -q tests/test_fidget_integration_log_fixtures.py tests/test_fidget_integration_log_parsing.py tests/test_fidget_integration_responsibility.py
+```
+
+三份样本的预期分类：断言样本走代码定责；image-pull / Protonbase 样本走环境 no-owner、不进历史。协议冲突、缺失 preflight/config、suite exit 非整数等非法日志会 fail-closed 为 no-owner。
 
 ### 5.3 Jenkins 在线分析：`analyze`
 

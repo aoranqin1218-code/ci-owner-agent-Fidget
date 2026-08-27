@@ -50,7 +50,7 @@
 - 本期实现和验收聚焦 Fidget 单元测试失败。质量检查 `npm run typecheck`、`npm run lint`、`npm run lint:test` 仍是 CI 背景；日志命中这些阶段时要与单元测试失败区分，不能误标为测试用例责任，但本期不要求建设完整的 TypeScript/Lint 通用分析器。
 - 单元测试使用 Japa，覆盖率使用 c8。单元测试位于 `packages/*/test/**/*Test.ts`，入口包括 `npm run test`、`npm run test:coverage` 和 `npm run lint:test`。
 - 单元测试要求 6 个 package 全部通过；100% 覆盖率目标适用于 `fidget-core`、`fidget-lake`、`fidget-mongo`、`fidget-postgres`、`fidget-sql`，需求文档未把 `fidget-sdk` 列入该覆盖率集合。不要擅自扩大或缩小口径。
-- Connection 测试和 `packages/fidget-sdk/test/integration` 集成测试属于需求文档背景，不在当前两项交付范围内；只有后续用户明确扩展范围时才接入。日志若包含外部数据库不可用、版本不兼容或连接失败证据，优先判断为环境/基础设施问题，不得直接归责代码提交者。
+- Connection 测试仍不在交付范围。`packages/fidget-sdk/test/integration` 集成测试失败分析已接入（Fidget 二期）：集成日志以 `FIDGET_INTEGRATION_V1` runner marker 为协议锚点，Japa 失败块按行号关联 Jenkins stage 与 suite；环境/基础设施失败（preflight/cleanup marker 失败、外部库 ECONNREFUSED 等连接错误）确定性 no-owner 且不进历史继承，代码/断言失败（含 AssertionError）继续走可信 Git 定责。混合失败时两类各自独立，环境项不得清空代码责任。日志若包含外部数据库不可用、版本不兼容或连接失败证据，优先判断为环境/基础设施问题，不得直接归责代码提交者。
 - 本地参考环境为 MongoDB 4.2+、PostgreSQL 18+，但需求文档明确提示 SELECT 集成测试可能报错；测试环境使用 MongoDB 4.2+ 和 Protonbase。连接信息属于外部凭据，只能从授权配置或技术支持获取，不得写入仓库、日志或提示词。
 
 ### Fidget 二期当前代码基线与本地验证资料
@@ -64,6 +64,7 @@
 - coverage 包定位采用受约束 B+C：B 只使用能确认边界且 Nx task 包头与 npm lifecycle 包名一致的已有日志块；B 不可靠或缺失时，C 在可信 `headCommit` 上批量校验 5 个 gating 包的完整候选路径，只有唯一命中才接受。B/C 冲突、零命中、多命中、路径不存在或日志疑似交错时必须 fail closed；不得修改 Fidget 生产代码只为给日志补包名。
 - coverage deterministic owner 的上限是 `medium_confidence`：完整文件路径存在、可信 `base..head` 责任窗口有效、相关 diff 非空且只有一个作者时才可建 `current_build_owner`；多作者、无 diff、范围无效或 Git 校验失败都输出 `no_high_confidence_owner`。禁止选择最后、最近或提交最多的作者；若未来需要 high，必须另建受确定性校验的证据增强阶段，不能恢复 Agent 与 reconciler 双写。
 - Japa 与 coverage 可以在同一构建中同时失败，日志服务必须合并两类摘要，不能因已有 Japa chunk 丢掉 coverage；即使达到 chunk 预算，也必须通过完整 totals/coverage 文件记账保证 coverage 事实不被静默丢失。coverage 不进入 Japa 确定性历史继承，也不写入 `ci_test_file_failures`；feedback 可使用 `failureFilePath`，无 owner 的维护人路由应读取 `testFilePath or failureFilePath`，但不得把 Maintainer 写成 causal owner。
+- 集成测试（`FIDGET_INTEGRATION_V1` 协议）失败分类是纯函数、可离线回放：`build_integration_protocol_index` 严格解析 marker 并校验 run_id 一致/格式、phase 枚举、preflight step 枚举、suite 成对、summary/cleanup 缺失重复、状态机顺序、summary 与 suite 结果一致性，冲突/残缺 fail-closed 记入 `conflicts`；协议完整性校验仅在日志含 V1 marker 时执行（避免普通 Unit 日志被伪造协议冲突）。`classify_all_japa_failures` 全量逐块判 assertion（有 AssertionError）/connection（连接错误）/unknown，不受展示预算限制，且逐块 stage 门控——仅 Integration Tests stage 或 suite range 内的块做集成分类，Unit stage 块标 `unit` 保持 Unit 语义。connection/unknown 类块从 `chunks` 隔离（不进历史白名单、不进 Agent 输入、不写 `ci_test_file_failures`），计入 `totals.integrationEnv`；preflight/cleanup marker 失败同样 no-owner。集成日志的 code chunk 由 `build_integration_failure_summaries` 直接按行号生成，与分类一一对应，不经过 `build_test_failure_summaries`（后者在大量相邻 ✖ + 交错 ❯ 下会膨胀重复 chunk）。`_is_integration_env_only_failures` 在「有环境失败或协议冲突、且无代码 chunk」时确定性短路为 no-owner notice、不调责任 Agent，且短路前跳过 AI failure facts 提取（防环境事实误入历史）；`failure_fact_ai` prompt 强制数据库/基础设施事实 historyEligible=false。混合构建进 Agent 后由 `reconcile_integration_responsibilities` 写 canonical no-owner 并移除 Agent 误生成的环境 owner。X/Y 数据库错误业务 Topic 的失败含 AssertionError，不会被判环境。
 - Fidget 二期长期回归测试必须命名为 `test_*.py`，确保当前 `pyproject.toml` 的默认 `python -m pytest -q` 能发现；仅显式运行成功的 `stage2_*.py` 不算进入标准门禁。归档任务可从 `.trellis/tasks/archive/2026-08/08-21-fidget-coverage-gap-recognition/` 查设计背景，但 `task.json.status=completed`、聊天总结或 commit message 都不能替代 `task.py validate`、默认测试发现、源码逐项验收和真实日志回放。
 
 ### 二期责任路由与治理原则
@@ -81,8 +82,8 @@
 - 飞书最终效果原则上与企微一致，包括分析结果展示、责任人/维护人触达、消息长度控制、去重、失败降级、反馈提交与历史修正闭环。飞书 API 能力与企微不完全一致时，追求业务结果一致，不强求卡片外观或交互形式逐像素一致。
 - 飞书发送、用户身份映射与 @、互动消息/卡片、反馈回写、幂等和测试覆盖完成并经过真实环境验证前，不得宣称已经达到企微同等效果。
 - 二期生产模型必须使用获准的国产模型服务，例如火山方舟或通义千问等；保持 OpenAI-compatible/模型客户端边界，不把供应商密钥、模型名或 URL 硬编码进业务逻辑。
-- 验证顺序收敛为：Fidget 日志样本离线回放 -> 本地 Fidget 单元测试日志 -> Jenkins 单构建在线分析（不通知）-> 飞书 dry-run -> 测试群真实发送与 @ 验证 -> 飞书反馈闭环验证 -> 目标群/生产配置评审。Connection/集成测试不再作为本期上线前置门禁。
-- 最终交付包括精简方案、Fidget 日志分析测试/验收证据、实际 Jenkins 接入、飞书测试群与目标群投递证据，以及必要的部署/回退说明。文档中的“两到三周”只是原需求节奏参考，不应转化为代码中的硬期限。
+- 当前集成测试父任务的验证顺序收敛为：Fidget 日志样本离线回放 -> 本地 Fidget 单元测试日志 -> Jenkins 单构建在线分析并向已确认的企业微信测试群直接发送（D-011），至此由 4 个子任务收口。飞书 dry-run、飞书测试群真实发送与 @、反馈闭环和目标群/生产配置评审按 D-012 后续另建独立 Trellis 任务，本次不创建。Connection 测试仍不在交付范围。
+- 二期项目最终交付仍包括精简方案、Fidget 日志分析测试/验收证据、实际 Jenkins 接入、飞书测试群与目标群投递证据，以及必要的部署/回退说明；其中飞书能力按 D-012 由后续独立 Trellis 任务承接，不属于当前四子任务父任务。文档中的“两到三周”只是原需求节奏参考，不应转化为代码中的硬期限。
 
 ## 不可破坏的业务不变量
 
@@ -154,7 +155,7 @@
   ```
 - 仅文档变更可不跑全量测试，但必须检查链接、命令、文件名与当前源码一致，并审阅 `git diff --check` 和目标文件 diff。
 - 改动 `ts-analyzer/` 时至少对变更的 JS 执行 `node --check`；依赖验证使用锁文件与 `npm ci`，不要无故重写 `package-lock.json`。
-- 外部集成验证遵循：fake/local -> 真实模型但不通知 -> Jenkins 单构建 -> MongoDB/周报 dry-run -> 通知 dry-run -> 测试群真实发送 -> 定时任务/生产链路。
+- 外部集成验证一般遵循：fake/local -> 真实模型但不通知 -> Jenkins 单构建 -> MongoDB/周报 dry-run -> 通知 dry-run -> 测试群真实发送 -> 定时任务/生产链路。Fidget 集成子任务 4 是已记录例外：按 D-011 在 Jenkins 在线分析阶段直接发送企业微信测试群；正式群、飞书、反馈和生产链路仍按逐级验证执行。
 - 为当前任务临时新增的测试或验证脚本，在验证成功后立即删除，并同步移除 `package.json` 中仅为该脚本新增的命令。保留项目原有测试、用户明确要求长期保留的自动化测试，以及仍需继续定位失败的脚本。
 
 ## 文档同步

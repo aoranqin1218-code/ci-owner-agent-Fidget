@@ -53,6 +53,41 @@ FOOTER_TERMS = [
     "------", "Dockerfile:", "ERROR: process", "ERROR: failed to solve:", "exit status 1", "make: ***",
     "[Pipeline] }", "[Pipeline] // stage",
 ]
+# Fidget 集成测试 runner marker（V1 协议，见 samples/fidget_log/integration/PROTOCOL.md）。
+# 单行 key=value，前缀固定；phase/step/status/exit 是受控枚举，不含自由文本或秘密。
+INTEGRATION_MARKER_RE = re.compile(r"FIDGET_INTEGRATION_V1\b")
+# Jenkins declarative pipeline 的 stage 边界行：``[Pipeline] { (StageName)``。
+PIPELINE_STAGE_RE = re.compile(r"^\s*\[Pipeline\]\s+\{\s+\((?P<stage>.+)\)\s*$")
+PIPELINE_STAGE_END_RE = re.compile(r"^\s*\[Pipeline\]\s+//\s+stage\s*$")
+# 集成测试里「外部库/数据库不可达」的连接层错误信号（窄于 STRONG_INNER_FAILURE_RE，
+# 不含 assertionerror/typeerror 等代码断言，避免把 X/Y 数据库错误 Topic 误判环境）。
+INTEGRATION_CONNECTION_ERROR_RE = re.compile(
+    r"(?ix)\b(?:econnrefused|econnreset|etimedout|enotfound|eai_again|getaddrinfo|"
+    r"connect\s+(?:econnrefused|etimedout)|mongoservererror|"
+    r"mongo.*server.*selection.*timed\s*out|protonbase|connection\s+timeout)\b"
+)
+# V1 协议的受控枚举与必填字段，用于 fail-closed 校验。
+_INTEGRATION_PHASES = {"preflight", "config", "suite", "summary", "cleanup"}
+# preflight 内部 step 顺序（正常路径必须依次完整完成，缺一不可）。
+_INTEGRATION_PREFLIGHT_STEPS = ("image_pull", "network_create", "mongo_start", "mongo_ready")
+# phase 状态机顺序：preflight -> config -> suite(0..8) -> summary -> cleanup
+_INTEGRATION_PHASE_ORDER = {"preflight": 1, "config": 2, "suite": 3, "summary": 4, "cleanup": 5}
+# preflight/suite 的合法 status（start/end/failed；suite 无 failed）。
+_INTEGRATION_STATUSES = {"start", "end", "failed"}
+# summary/cleanup 的合法 status（仅这两个终态 phase 有严格枚举）。
+_INTEGRATION_FINAL_STATUSES = {"success", "failed"}
+# run_id 规范化字符集（与 runner 的 tr 规则一致：小写字母/数字/点/连字符）
+_INTEGRATION_RUN_ID_RE = re.compile(r"^[a-z0-9.-]+$")
+_INTEGRATION_SUITE_NAMES = {
+    "select-integration",
+    "stream-select-integration",
+    "delete-integration",
+    "insert-integration",
+    "update-integration",
+    "upsert-integration",
+    "bulk-integration",
+    "shadow-integration",
+}
 
 
 @dataclass(frozen=True)
@@ -228,6 +263,365 @@ def count_japa_failure_blocks(all_lines: list[str]) -> int:
     return sum(1 for line in all_lines if XFAIL_BLOCK_RE.match(_semantic_log_line(line)))
 
 
+def parse_integration_marker(line: str) -> dict[str, str]:
+    """把单行 FIDGET_INTEGRATION_V1 marker 解析为 key=value 字典。
+
+    前缀后是空格分隔的 ``key=value`` 对，值只允许受控枚举、整数、规范化 run id。
+    不匹配时返回空 dict（fail-closed）。
+    """
+    clean = _semantic_log_line(line)
+    if not INTEGRATION_MARKER_RE.match(clean):
+        return {}
+    fields: dict[str, str] = {}
+    for token in clean.split()[1:]:
+        if "=" not in token:
+            continue
+        key, value = token.split("=", 1)
+        fields[key] = value
+    return fields
+
+
+def build_integration_protocol_index(all_lines: list[str]) -> dict:
+    """严格解析 V1 marker 与 Jenkins stage，建立协议只读 index。
+
+    一次遍历产出：stage/suite 行号范围、run_id 一致性、preflight/cleanup 失败、
+    summary、以及 fail-closed 的冲突列表。校验覆盖：未知 phase、run_id 缺失/格式、
+    preflight step 枚举、状态机顺序、summary/cleanup 缺失重复、suite 状态、
+    summary 与实际 suite 结果一致性。任何违反都记入 ``conflicts``，
+    调用方据此降级 unknown/incomplete，不得据此判定 no-owner 或 code-owner。
+
+    通用性：只按受控枚举与行号范围判定，不写死任何具体 suite 名或失败实例。
+    """
+    clean_lines = [_semantic_log_line(line) for line in all_lines]
+    index: dict = {
+        "is_integration": False,
+        "has_marker": False,          # 是否出现 V1 marker（区别于仅 Integration stage）
+        "run_id": None,
+        "conflicts": [],
+        "stage_ranges": [],          # {"name", "start_line", "end_line"}
+        "suite_ranges": [],          # {"name", "start_line", "end_line", "exit"}
+        "preflight_failures": [],    # {"line", "step"}
+        "cleanup_failed": False,
+        "summary": None,             # {"total","passed","failed","not_started"}
+    }
+    run_ids: list[str] = []
+    current_stage: dict | None = None
+    open_suites: dict[str, int] = {}   # suite name -> start_line(0-based)
+    seen_suite_starts: set[str] = set()
+    seen_phase_orders: set[int] = set()
+    seen_summary = False
+    seen_cleanup = False
+    # preflight 状态机：下一期望步骤 + 当前打开的步骤 + 已完成集合。
+    preflight_next_index: int = 0          # 下一个应 start 的 step 序号（0-based）
+    preflight_open_step: str | None = None  # 当前已 start 未 end/failed 的 step
+    preflight_completed: set[str] = set()   # 已完整 end 的 step
+    preflight_failed: bool = False
+    config_seen: bool = False
+    config_has_target: bool = False
+
+    for idx, clean in enumerate(clean_lines):
+        # Jenkins stage 边界
+        stage_match = PIPELINE_STAGE_RE.match(clean)
+        if stage_match:
+            if current_stage is not None:
+                index["stage_ranges"].append(current_stage)
+            stage_name = stage_match.group("stage").strip()
+            if stage_name == "Integration Tests":
+                index["is_integration"] = True  # has_marker 仍 False，表示协议不完整
+            current_stage = {"name": stage_name, "start_line": idx + 1, "end_line": None}
+            continue
+        if PIPELINE_STAGE_END_RE.match(clean):
+            if current_stage is not None:
+                current_stage["end_line"] = idx + 1
+                index["stage_ranges"].append(current_stage)
+                current_stage = None
+            continue
+
+        fields = parse_integration_marker(clean)
+        if not fields:
+            continue
+        index["is_integration"] = True
+        index["has_marker"] = True
+
+        phase = fields.get("phase")
+        # 未知 phase：fail-closed
+        if phase not in _INTEGRATION_PHASES:
+            index["conflicts"].append(f"未知 phase={phase!r} at line {idx+1}")
+            continue
+
+        # run_id：必填 + 格式校验
+        run_id = fields.get("run_id")
+        if not run_id:
+            index["conflicts"].append(f"marker 缺 run_id at line {idx+1}")
+        elif not _INTEGRATION_RUN_ID_RE.match(run_id):
+            index["conflicts"].append(f"run_id 格式非法 {run_id!r} at line {idx+1}")
+        else:
+            run_ids.append(run_id)
+
+        # 状态机顺序：phase 不得回退（preflight 有多个 step、suite 有 8 个，均允许重复；
+        # summary/cleanup 只允许一次）。
+        order = _INTEGRATION_PHASE_ORDER[phase]
+        if phase in {"summary", "cleanup"}:
+            if order in seen_phase_orders:
+                index["conflicts"].append(f"phase {phase} 重复 at line {idx+1}")
+        if order < max(seen_phase_orders, default=0):
+            index["conflicts"].append(f"phase {phase} 顺序回退 at line {idx+1}")
+        seen_phase_orders.add(order)
+
+        if phase == "preflight":
+            step = fields.get("step")
+            status = fields.get("status")
+            if step not in _INTEGRATION_PREFLIGHT_STEPS:
+                index["conflicts"].append(f"preflight step 非法 {step!r} at line {idx+1}")
+            if status not in _INTEGRATION_STATUSES:
+                index["conflicts"].append(f"preflight marker 非法 status={status!r} at line {idx+1}")
+
+            if status == "start":
+                # 已失败后不得再 start 任何 preflight step。
+                if preflight_failed:
+                    index["conflicts"].append(f"preflight failed 后不得 start {step} at line {idx+1}")
+                    continue
+                # 必须等于下一期望步骤，且当前无打开步骤。
+                if preflight_next_index >= len(_INTEGRATION_PREFLIGHT_STEPS):
+                    index["conflicts"].append(f"preflight 已全部完成，不得再 start {step} at line {idx+1}")
+                elif step != _INTEGRATION_PREFLIGHT_STEPS[preflight_next_index]:
+                    expected = _INTEGRATION_PREFLIGHT_STEPS[preflight_next_index]
+                    index["conflicts"].append(f"preflight step {step} start 不按顺序，期望 {expected} at line {idx+1}")
+                if preflight_open_step is not None:
+                    index["conflicts"].append(f"preflight step {step} start 时仍有未关闭步骤 {preflight_open_step} at line {idx+1}")
+                if step in preflight_completed:
+                    index["conflicts"].append(f"preflight step {step} 已完成后重复 start at line {idx+1}")
+                preflight_open_step = step
+            elif status == "end":
+                # end 必须对应当前打开的步骤。
+                if step != preflight_open_step:
+                    index["conflicts"].append(f"preflight step {step} end 无对应 start（当前打开 {preflight_open_step}）at line {idx+1}")
+                else:
+                    preflight_completed.add(step)
+                    preflight_open_step = None
+                    preflight_next_index += 1
+                # exit 是可选字段（仅 image_pull 等有命令退出码的 step 携带）；有则校验整数。
+                exit_val = fields.get("exit")
+                if exit_val is not None and not re.fullmatch(r"-?\d+", str(exit_val)):
+                    index["conflicts"].append(f"preflight step {step} exit 非法 {exit_val!r} at line {idx+1}")
+            elif status == "failed":
+                if not step:
+                    index["conflicts"].append(f"preflight status=failed 缺 step at line {idx+1}")
+                # failed 必须对应当前打开的步骤（start -> failed 合法；无 start 的 failed 非法）。
+                if step != preflight_open_step:
+                    index["conflicts"].append(f"preflight step {step} failed 无对应 start at line {idx+1}")
+                else:
+                    preflight_open_step = None
+                index["preflight_failures"].append({"line": idx + 1, "step": step})
+                preflight_failed = True
+        elif phase == "config":
+            # config 必须恰好一次，且只能出现在完整 preflight（4 步全部 end）之后。
+            if config_seen:
+                index["conflicts"].append(f"config 重复 at line {idx+1}")
+            if preflight_failed:
+                index["conflicts"].append(f"preflight failed 后不得出现 config at line {idx+1}")
+            elif preflight_next_index < len(_INTEGRATION_PREFLIGHT_STEPS):
+                index["conflicts"].append(f"config 出现在 preflight 未完成（期望 {_INTEGRATION_PREFLIGHT_STEPS[preflight_next_index]}）at line {idx+1}")
+            config_seen = True
+            config_has_target = bool(fields.get("mongo_target"))
+            if not config_has_target:
+                index["conflicts"].append(f"config marker 缺 mongo_target at line {idx+1}")
+        elif phase == "suite":
+            name = fields.get("suite")
+            status = fields.get("status")
+            if name not in _INTEGRATION_SUITE_NAMES:
+                index["conflicts"].append(f"suite marker 非法 suite={name!r} at line {idx+1}")
+                continue
+            if status == "start":
+                if name in seen_suite_starts:
+                    index["conflicts"].append(f"suite {name} 重复 start at line {idx+1}")
+                seen_suite_starts.add(name)
+                open_suites[name] = idx
+            elif status == "end":
+                if name not in open_suites:
+                    index["conflicts"].append(f"suite {name} end 无对应 start at line {idx+1}")
+                    continue
+                start_idx = open_suites.pop(name)
+                exit_val = fields.get("exit")
+                if exit_val is None:
+                    index["conflicts"].append(f"suite {name} end 缺 exit at line {idx+1}")
+                elif not re.fullmatch(r"-?\d+", str(exit_val)):
+                    index["conflicts"].append(f"suite {name} exit 非法 {exit_val!r} at line {idx+1}")
+                index["suite_ranges"].append(
+                    {"name": name, "start_line": start_idx + 1, "end_line": idx + 1, "exit": exit_val}
+                )
+            else:
+                index["conflicts"].append(f"suite marker 非法 status={status!r} at line {idx+1}")
+        elif phase == "cleanup":
+            seen_cleanup = True
+            status = fields.get("status")
+            if status == "failed":
+                index["cleanup_failed"] = True
+            elif status not in _INTEGRATION_FINAL_STATUSES:
+                index["conflicts"].append(f"cleanup marker 非法 status={status!r} at line {idx+1}")
+        elif phase == "summary":
+            seen_summary = True
+            status = fields.get("status")
+            if status not in _INTEGRATION_FINAL_STATUSES:
+                index["conflicts"].append(f"summary marker 非法 status={status!r} at line {idx+1}")
+            m = re.search(r"total=(\d+) passed=(\d+) failed=(\d+) not_started=(\d+)", clean)
+            if m:
+                total, passed, failed, not_started = map(int, m.groups())
+                index["summary"] = {"total": total, "passed": passed, "failed": failed, "not_started": not_started}
+                if total != 8:
+                    index["conflicts"].append(f"summary total={total} 应为 8 at line {idx+1}")
+                if passed + failed + not_started != total:
+                    index["conflicts"].append(f"summary 计数不自洽 at line {idx+1}")
+            else:
+                index["conflicts"].append(f"summary marker 缺 totals at line {idx+1}")
+
+    if current_stage is not None:
+        index["stage_ranges"].append(current_stage)
+    for name in open_suites:
+        index["conflicts"].append(f"suite {name} start 无 end")
+    if preflight_open_step is not None:
+        index["conflicts"].append(f"preflight step {preflight_open_step} start 无 end")
+
+    # run_id 一致性与唯一性
+    if run_ids:
+        if len(set(run_ids)) != 1:
+            index["conflicts"].append(f"run_id 不一致: {sorted(set(run_ids))}")
+        index["run_id"] = run_ids[0]
+
+    # 协议完整性校验只在日志含 V1 marker 时执行（有 marker 才期待完整 summary/cleanup），
+    # 否则普通 Unit 日志或「仅 Integration stage 无 marker」不会被伪造出协议冲突。
+    if index["has_marker"]:
+        # 正常路径：无论有无 suite marker，只要未前置失败，就必须完成全部 4 个
+        # preflight step + 恰好一次合法 config。无 suite marker 不能绕过此校验。
+        if not preflight_failed:
+            if len(preflight_completed) != len(_INTEGRATION_PREFLIGHT_STEPS):
+                index["conflicts"].append("正常路径缺 preflight（未依次完成全部 4 步）")
+            if not config_seen:
+                index["conflicts"].append("正常路径缺 config marker")
+            elif not config_has_target:
+                index["conflicts"].append("config 缺 mongo_target")
+        # 前置失败：preflight failed 后不得出现 config/suite，summary 应 not_started=8。
+        if preflight_failed:
+            if config_seen or index["suite_ranges"]:
+                index["conflicts"].append("preflight failed 后不得出现 config/suite")
+            if index["summary"] is not None and index["summary"]["not_started"] != 8:
+                index["conflicts"].append(f"preflight failed 但 summary not_started={index['summary']['not_started']} 应为 8")
+
+        if not seen_summary:
+            index["conflicts"].append("缺 summary marker")
+        if not seen_cleanup:
+            index["conflicts"].append("缺 cleanup marker")
+
+        # summary 与实际 suite 结果一致性
+        if index["summary"] is not None and not preflight_failed:
+            passed_suites = sum(1 for r in index["suite_ranges"] if str(r.get("exit")) == "0")
+            failed_suites = sum(1 for r in index["suite_ranges"] if str(r.get("exit")) not in {"", "0", "None"})
+            not_started_suites = 8 - len(index["suite_ranges"])
+            if failed_suites != index["summary"]["failed"]:
+                index["conflicts"].append(
+                    f"summary failed={index['summary']['failed']} 与 suite 非零退出数 {failed_suites} 不一致"
+                )
+            if passed_suites != index["summary"]["passed"]:
+                index["conflicts"].append(
+                    f"summary passed={index['summary']['passed']} 与 suite 零退出数 {passed_suites} 不一致"
+                )
+            if not_started_suites != index["summary"]["not_started"]:
+                index["conflicts"].append(
+                    f"summary not_started={index['summary']['not_started']} 与未执行 suite 数 {not_started_suites} 不一致"
+                )
+    elif index["is_integration"]:
+        # 仅有 Integration stage 但无 V1 marker：协议不完整，标记为冲突。
+        index["conflicts"].append("Integration stage 存在但缺 V1 marker")
+    return index
+
+
+def classify_japa_block(detail_lines: list[str]) -> str:
+    """对单个 Japa 失败块的详情分类：assertion / connection / unknown。
+
+    有 AssertionError → assertion（已进入测试 body，代码/断言候选）。
+    无断言但有连接层错误 → connection（setup/连接阶段，环境候选）。
+    否则 unknown。
+    逐块判定，不做全局扫描，混合失败各自独立分类。
+    """
+    detail = "\n".join(detail_lines)
+    if "AssertionError" in detail:
+        return "assertion"
+    if INTEGRATION_CONNECTION_ERROR_RE.search(detail):
+        return "connection"
+    return "unknown"
+
+
+def _stage_name_at_line(stage_ranges: list[dict], line_number: int) -> str | None:
+    """返回给定行号（1-based）所属的 Jenkins stage 名；不在任何范围则 None。"""
+    for stage in stage_ranges:
+        start = stage.get("start_line")
+        end = stage.get("end_line")
+        if start is None:
+            continue
+        if end is None:
+            end = 1 << 30
+        if start <= line_number <= end:
+            return stage.get("name")
+    return None
+
+
+def _suite_name_at_line(suite_ranges: list[dict], line_number: int) -> str | None:
+    """返回给定行号（1-based）所属的 suite 名；不在任何范围则 None。"""
+    for suite in suite_ranges:
+        if suite.get("start_line") <= line_number <= suite.get("end_line"):
+            return suite.get("name")
+    return None
+
+
+def classify_all_japa_failures(all_lines: list[str]) -> list[dict]:
+    """全量分类所有 Japa 失败块，不受展示预算限制。
+
+    返回按出现顺序排列的列表，每项：``{line, kind, stage, suite}``。
+    kind ∈ {assertion, connection, unknown, unit}。逐块判定，第 N 个之后同样被分类，
+    用于完整的 totals/omitted 记账，不因展示预算丢事实。
+
+    逐块 stage 门控：仅当块落在 Integration Tests stage 范围或 V1 suite range 内
+    才做集成分类；落在 Unit stage 且不在 suite range 的块标为 ``unit``（保持 Unit
+    语义，不计入 integrationEnv）。非集成日志（无 marker/stage）返回空列表。
+    """
+    clean_lines = [_semantic_log_line(line) for line in all_lines]
+    index = build_integration_protocol_index(all_lines)
+    if not index["is_integration"]:
+        return []
+    stage_ranges = index["stage_ranges"]
+    suite_ranges = index["suite_ranges"]
+    results: list[dict] = []
+    xfail_indices = [i for i, l in enumerate(clean_lines) if XFAIL_BLOCK_RE.match(l)]
+    # 先为每个 ✖ 找到其配对的 ❯ 详情起点（标题匹配，处理 Japa 交错输出）。
+    detail_starts: dict[int, int | None] = {}
+    for idx in xfail_indices:
+        detail_starts[idx] = _find_japa_error_detail_start(clean_lines, idx)
+    for pos, idx in enumerate(xfail_indices):
+        stage = _stage_name_at_line(stage_ranges, idx + 1)
+        suite = _suite_name_at_line(suite_ranges, idx + 1)
+        # 逐块 stage 门控：Unit stage 且不在 suite range → unit，不做集成分类。
+        if stage is not None and stage != "Integration Tests" and suite is None:
+            results.append({"line": idx + 1, "kind": "unit", "stage": stage, "suite": suite})
+            continue
+        detail_start = detail_starts[idx]
+        if detail_start is None:
+            kind = "unknown"
+        else:
+            detail_end = _find_japa_error_detail_end(clean_lines, detail_start)
+            # 详情边界收在下一个块的 ❯ 起点之前，避免把后续块的断言/连接错误串进来。
+            if pos + 1 < len(xfail_indices):
+                next_start = detail_starts[xfail_indices[pos + 1]]
+                if next_start is not None:
+                    detail_end = min(detail_end, next_start)
+            kind = classify_japa_block(clean_lines[detail_start:detail_end])
+        # 游离断言：判为 assertion 但无 suite 归属且不在 Integration stage 内，
+        # 无法确认属于哪个 suite，降级 unknown/no-owner，不进入代码定责。
+        if kind == "assertion" and suite is None and stage != "Integration Tests":
+            kind = "unknown"
+        results.append({"line": idx + 1, "kind": kind, "stage": stage, "suite": suite})
+    return results
+
+
 def find_focused_failure_chunks(
     all_lines: list[str],
     *,
@@ -238,6 +632,14 @@ def find_focused_failure_chunks(
     if not all_lines:
         return {"chunks": [], "warning": "log is empty"}
     count = max(50, tail_lines)
+    # Japa 失败所属 stage：按行号落到 Jenkins stage 范围，而非整份日志二选一。
+    # Unit 与 Integration 并存时各自正确；冲突/无范围时保留 None 由调用方降级。
+    index = build_integration_protocol_index(all_lines)
+    stage_ranges = index["stage_ranges"]
+    if not index["is_integration"]:
+        default_stage = "Unit Tests"
+    else:
+        default_stage = "Integration Tests"
 
     # Fidget/Japa 失败定位：直接在清洗后的日志中收集 Japa `✖` 失败行。
     # 每行先剥 BuildKit `#N 时间戳` 前缀与 ANSI 色码，再用 Japa 失败正则命中 `✖ 标题`。
@@ -263,7 +665,7 @@ def find_focused_failure_chunks(
                     tail_lines=count,
                     max_output_chars=max_output_chars,
                     chunk_source="japa_failure_block",
-                    stage_name="Unit Tests",
+                    stage_name=_stage_name_at_line(stage_ranges, start + 1) or default_stage,
                     step_name="test_runner",
                     anchor_type="japa_failure_block",
                     prior_truncated=True,
@@ -284,7 +686,7 @@ def find_focused_failure_chunks(
                     count,
                     max_output_chars=max_output_chars,
                     chunk_source="japa_failure_block",
-                    stage_name="Unit Tests",
+                    stage_name=_stage_name_at_line(stage_ranges, start + 1) or default_stage,
                     step_name="test_runner",
                     anchor_type="japa_failure_block",
                 )
@@ -365,6 +767,69 @@ def build_test_failure_summaries(focused: dict, *, max_chunks: int = 5) -> dict:
     # stable enough for deterministic historical inheritance.  They remain
     # current-build evidence and must be handled by the Agent when needed.
     return {"chunks": [], "warning": "test failure summaries unavailable; no Japa failure block found; history similarity skipped"}
+
+
+def build_integration_failure_summaries(all_lines: list[str], *, max_chunks: int | None = None) -> list[dict]:
+    """为集成测试日志的代码失败块生成 canonical summary chunk。
+
+    直接按 ``classify_all_japa_failures`` 的行号逐个提取，与分类结果一一对应，
+    避免 ``build_test_failure_summaries`` 在大量相邻 ✖ + 交错 ❯ 下膨胀出重复 chunk。
+
+    产出规则：
+    - ``unit`` 块（Unit stage，不在 suite range）→ 保留为 Unit code chunk（stageName="Unit Tests"）；
+    - ``assertion`` 块 → 仅当协议无冲突时产出 Integration code chunk；
+      协议冲突时该块降级为 no-owner，不产出 chunk（不可信断言不得进历史/Agent）；
+    - ``connection``/``unknown`` → 不产出 chunk（provider 计为环境 no-owner）。
+    ``max_chunks=None`` 返回完整事实，供 provider 做展示预算。
+    """
+    index = build_integration_protocol_index(all_lines)
+    has_conflict = bool(index["conflicts"])
+    classifications = classify_all_japa_failures(all_lines)
+    if not classifications:
+        return []
+    clean_lines = [_semantic_log_line(line) for line in all_lines]
+    chunks: list[dict] = []
+    for classification in classifications:
+        kind = classification["kind"]
+        if kind == "unit":
+            stage_name = "Unit Tests"
+        elif kind == "assertion":
+            if has_conflict:
+                continue  # 协议不可信，断言降级 no-owner，不产出 code chunk
+            stage_name = classification.get("stage") or "Integration Tests"
+        else:
+            continue  # connection/unknown 不进 code chunk
+        line_no = classification["line"]
+        idx = line_no - 1
+        if idx < 0 or idx >= len(clean_lines) or not XFAIL_BLOCK_RE.match(clean_lines[idx]):
+            continue
+        detail_start = _find_japa_error_detail_start(clean_lines, idx)
+        if detail_start is None:
+            continue
+        detail_end = _find_japa_error_detail_end(clean_lines, detail_start)
+        block_lines = clean_lines[idx:detail_end]
+        content, _ = _truncate_failure_block_text("\n".join(block_lines), 12000)
+        signature = _extract_xfail_signature(content)
+        chunks.append(
+            {
+                "chunkIndex": len(chunks),
+                "schemaVersion": 3,
+                "chunkSource": "local_test_failure_summary",
+                "stageName": stage_name,
+                "stepName": "test_runner",
+                "anchorType": "japa_failure_block",
+                "startLine": line_no,
+                "endLine": detail_end,
+                "score": 0.9,
+                "content": content,
+                "truncated": False,
+                "signature": signature,
+                "signatureHash": _signature_hash(signature),
+            }
+        )
+        if max_chunks is not None and len(chunks) >= max(0, max_chunks):
+            break
+    return chunks
 
 
 def build_coverage_failure_summaries(
