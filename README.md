@@ -149,7 +149,9 @@ config/
   test-maintainers.example.yml    # 测试文件维护人路由示例
 
 ts-analyzer/                      # TypeScript 静态分析 Node.js 脚本
-tests/                            # pytest 单元、集成和真实子进程测试
+tests/
+  fx_code_test/                   # 一期（company/企业微信版）测试：单元 + 真实子进程集成，扁平
+  fidget_test/                    # 二期（Fidget）测试：unit / integration / coverage 分类
 samples/                          # 可存放脱敏日志样例
 .github/workflows/ci.yml          # GitHub Actions 测试工作流
 .env.example                      # 配置模板
@@ -549,10 +551,12 @@ python -m ci_owner_agent analyze-local `
 **集成测试 fixture 离线回放**：`samples/fidget_log/integration/` 下有三份脱敏真实样本（`failure-assertion.log`、`failure-pipeline-image-pull.log`、`failure-protonbase-unavailable.log`），配套 `manifest.json`（含 sha256）与 `PROTOCOL.md`。样本完整性由默认测试发现并校验：
 
 ```powershell
-python -m pytest -q tests/test_fidget_integration_log_fixtures.py tests/test_fidget_integration_log_parsing.py tests/test_fidget_integration_responsibility.py
+python -m pytest -q tests/fidget_test/integration/test_fidget_integration_log_fixtures.py tests/fidget_test/integration/test_fidget_integration_log_parsing.py tests/fidget_test/integration/test_fidget_integration_responsibility.py
 ```
 
 三份样本的预期分类：断言样本走代码定责；image-pull / Protonbase 样本走环境 no-owner、不进历史。协议冲突、缺失 preflight/config、suite exit 非整数等非法日志会 fail-closed 为 no-owner。
+
+**Fidget 集成责任基线**：对协议完整、只含 Integration assertion 的失败，系统先按失败项所属 suite 查询同一 job、分支和非敏感环境别名下最近一次可信通过提交；该提交必须仍是当前 Jenkins checkout 的祖先。没有 suite 历史或历史库不可用时，才从 Agent 专用 Git cache 中解析 `fidget-sdk` 的上一稳定 minor 作为保守兜底。版本和 suite 检查点只限定调查范围，不能单独证明责任；每个 owner 仍必须有失败日志与相关 diff 证据，并通过自己 suite 的 `baseline..head` 范围校验。协议可信的运行会把受控的 suite 退出状态写入 `ci_builds.integrationRun`，不会写入数据库连接信息或凭据。
 
 ### 5.3 Jenkins 在线分析：`analyze`
 
@@ -1167,14 +1171,14 @@ python -m compileall ci_owner_agent scripts tests
 ### 8.3 常用聚焦测试
 
 ```powershell
-python -m pytest tests/test_batch_analyze_company_logs.py -q
-python -m pytest tests/test_batch_analyze_jenkins_builds.py -q
-python -m pytest tests/test_rerun_analyze_local.py -q
-python -m pytest tests/test_script_runtime.py -q
-python -m pytest tests/test_history_store.py -q
-python -m pytest tests/test_weekly_test_report_service.py -q
-python -m pytest tests/test_wecom_bot_cli.py -q
-python -m pytest tests/integration -q
+python -m pytest tests/fx_code_test/test_batch_analyze_company_logs.py -q
+python -m pytest tests/fx_code_test/test_batch_analyze_jenkins_builds.py -q
+python -m pytest tests/fx_code_test/test_rerun_analyze_local.py -q
+python -m pytest tests/fx_code_test/test_script_runtime.py -q
+python -m pytest tests/fx_code_test/test_history_store.py -q
+python -m pytest tests/fx_code_test/test_weekly_test_report_service.py -q
+python -m pytest tests/fx_code_test/test_wecom_bot_cli.py -q
+python -m pytest tests/fx_code_test/test_batch_script_runtime.py tests/fx_code_test/test_company_batch_e2e.py -q
 ```
 
 ### 8.4 GitHub Actions

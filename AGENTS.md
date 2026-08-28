@@ -114,7 +114,7 @@
 - `ci_owner_agent/services/` 其余模块：失败身份与继承、反馈、企业微信 Bot、统计、周报和 metrics 等确定性领域服务。
 - `scripts/`：轮询、批处理、重复运行、回填、导入导出和周报等运维入口；共享路径、timeout、原子 marker 和 Windows 进程树终止语义集中在 `_runtime.py`，批处理环境/产物/序列化集中在 `_batch_common.py`，LangSmith root run 查询、trace 落盘和统计集中在 `_langsmith_trace.py`。
 - `ts-analyzer/`：基于 TypeScript compiler API 的静态分析辅助工具，由 Python tool 层调用。
-- `tests/`：pytest 单元与集成测试；新增行为应优先在对应同名测试文件中覆盖，跨进程行为放在 `tests/integration/`。
+- `tests/`：pytest 单元与集成测试；一期（company/企业微信版）测试在 `tests/fx_code_test/` 扁平存放（含真实子进程集成测试），二期（Fidget）测试在 `tests/fidget_test/` 按 `unit/`、`integration/`、`coverage/` 分类；新增行为应优先在对应同名测试文件中覆盖，跨进程行为放在 `tests/fx_code_test/`。
 - `config/`：周报阈值和测试维护者映射；`deploy/systemd/`：生产调度模板；`.env.example`：公开配置契约。
 
 ## 实现约定
