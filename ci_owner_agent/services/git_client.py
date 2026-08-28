@@ -254,6 +254,107 @@ class GitClient:
         content, truncated = truncate_text(content, self.max_output_chars)
         return {"ok": True, "path": path, "startLine": start, "endLine": end, "content": content, "truncated": truncated}
 
+    def get_file_commit_history(self, repo: str, head_commit: str, path: str) -> dict:
+        """Return every trusted ancestor that changed ``path``, newest first.
+
+        Version-baseline resolution deliberately reads this history from the
+        Agent repository cache.  A bounded or malformed Git response is not
+        enough evidence to pick a baseline, so it is reported as a failure
+        rather than silently using the visible prefix.
+        """
+        error = validate_commit_ref(head_commit) or validate_git_path(path)
+        if error:
+            return {"ok": False, "error": error, "commits": []}
+        result, repo_error = self._run_git(repo, ["log", "--format=%H", head_commit, "--", path])
+        if repo_error:
+            return {"ok": False, "error": repo_error, "commits": []}
+        if result is None or not result.ok:
+            return {
+                "ok": False,
+                "error": result.error if result else "git command failed",
+                "command": result.to_dict() if result else None,
+                "commits": [],
+            }
+        if result.truncated:
+            return {
+                "ok": False,
+                "error": "git file history output was truncated",
+                "command": result.to_dict(),
+                "commits": [],
+            }
+        commits = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        if any(validate_commit_ref(commit) for commit in commits):
+            return {"ok": False, "error": "git file history contained an invalid commit", "commits": []}
+        return {"ok": True, "commits": commits}
+
+    def list_tags(self, repo: str) -> dict:
+        """List tag names without assuming normal repository sync fetched tags."""
+        result, repo_error = self._run_git(repo, ["for-each-ref", "--format=%(refname:short)", "refs/tags"])
+        if repo_error:
+            return {"ok": False, "error": repo_error, "tags": []}
+        if result is None or not result.ok:
+            return {
+                "ok": False,
+                "error": result.error if result else "git command failed",
+                "command": result.to_dict() if result else None,
+                "tags": [],
+            }
+        if result.truncated:
+            return {
+                "ok": False,
+                "error": "git tag list output was truncated",
+                "command": result.to_dict(),
+                "tags": [],
+            }
+        return {"ok": True, "tags": [line.strip() for line in result.stdout.splitlines() if line.strip()]}
+
+    def peel_tag_to_commit(self, repo: str, tag: str) -> dict:
+        """Resolve an existing tag to its commit, including annotated tags."""
+        if not tag or "\x00" in tag or tag.startswith("-"):
+            return {"ok": False, "error": "invalid git tag name", "commit": None}
+        result, repo_error = self._run_git(repo, ["rev-parse", "--verify", f"refs/tags/{tag}^{{commit}}"])
+        if repo_error:
+            return {"ok": False, "error": repo_error, "commit": None}
+        if result is None or not result.ok or result.truncated:
+            return {
+                "ok": False,
+                "error": (
+                    "git tag resolution output was truncated"
+                    if result is not None and result.truncated
+                    else result.error if result else "git command failed"
+                ),
+                "command": result.to_dict() if result else None,
+                "commit": None,
+            }
+        commit = result.stdout.strip()
+        if validate_commit_ref(commit):
+            return {"ok": False, "error": "tag did not resolve to a valid commit", "commit": None}
+        return {"ok": True, "tag": tag, "commit": commit}
+
+    def get_merge_base(self, repo: str, left_commit: str, right_commit: str) -> dict:
+        """Return one merge-base only when Git produced a complete commit SHA."""
+        error = validate_commit_ref(left_commit) or validate_commit_ref(right_commit)
+        if error:
+            return {"ok": False, "error": error, "commit": None}
+        result, repo_error = self._run_git(repo, ["merge-base", left_commit, right_commit])
+        if repo_error:
+            return {"ok": False, "error": repo_error, "commit": None}
+        if result is None or not result.ok or result.truncated:
+            return {
+                "ok": False,
+                "error": (
+                    "git merge-base output was truncated"
+                    if result is not None and result.truncated
+                    else result.error if result else "git command failed"
+                ),
+                "command": result.to_dict() if result else None,
+                "commit": None,
+            }
+        commit = result.stdout.strip()
+        if validate_commit_ref(commit):
+            return {"ok": False, "error": "git merge-base returned an invalid commit", "commit": None}
+        return {"ok": True, "commit": commit}
+
     def list_paths(self, repo: str, commit: str, paths: list[str] | None = None) -> dict:
         error = validate_commit_ref(commit)
         if error:

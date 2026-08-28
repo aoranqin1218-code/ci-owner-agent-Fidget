@@ -204,6 +204,7 @@ class MongoHistoryStore:
         last_successful_build_number: int | None,
         last_successful_commit: str | None,
         error_chunks: list[dict],
+        integration_run: dict[str, Any] | None = None,
     ) -> dict:
         now = dt.datetime.now(dt.timezone.utc)
         build_timestamp = _utc_datetime(build_info.timestamp)
@@ -224,6 +225,7 @@ class MongoHistoryStore:
                     "lastSuccessfulCommit": last_successful_commit,
                     "buildUrl": build_info.buildUrl,
                     "buildTimestamp": build_timestamp,
+                    "integrationRun": integration_run,
                     "analyzedAt": now,
                     "updatedAt": now,
                 },
@@ -440,6 +442,37 @@ class MongoHistoryStore:
         query["branch"] = branch
         docs = list(self.builds.find(query).sort("buildNumber", -1).limit(1))
         return docs[0] if docs else None
+
+    def find_trusted_integration_suite_checkpoints(
+        self,
+        *,
+        repo: str,
+        job: str,
+        branch: str | None,
+        environment_profile: str,
+        current_build_number: int,
+        lookback_builds: int = 100,
+    ) -> list[dict]:
+        """Return recent persisted candidates for a per-suite checkpoint.
+
+        The caller still validates each suite record and Git ancestry.  Keeping
+        this method as a broad identity query preserves compatibility with old
+        documents that simply have no ``integrationRun`` field.
+        """
+        branch = normalize_branch_name(branch)
+        query: dict[str, Any] = {
+            "repo": repo,
+            "job": job,
+            "branch": branch,
+            "buildNumber": {"$lt": current_build_number},
+        }
+        docs = list(self.builds.find(query).sort("buildNumber", -1).limit(max(1, lookback_builds)))
+        return [
+            item
+            for item in docs
+            if isinstance(item.get("integrationRun"), dict)
+            and item["integrationRun"].get("environmentProfile") == environment_profile
+        ]
 
     def find_historical_failure_facts(
         self,

@@ -1,0 +1,11 @@
+{
+  "name": "ci-owner-agent-dev-shortcuts",
+  "private": true,
+  "scripts": {
+    "analyze:help": ".venv\\Scripts\\python.exe scripts\\manual_analyze.py --help",
+    "analyze:jenkins": ".venv\\Scripts\\python.exe scripts\\manual_analyze.py jenkins",
+    "analyze:jenkins:notify": ".venv\\Scripts\\python.exe scripts\\manual_analyze.py jenkins --notify",
+    "analyze:local": ".venv\\Scripts\\python.exe scripts\\manual_analyze.py local",
+    "notice:preview": ".venv\\Scripts\\python.exe scripts\\manual_analyze.py preview"
+  }
+}

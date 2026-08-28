@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from ci_owner_agent.schemas import BuildInfo, FailureFact
+from ci_owner_agent.schemas import BuildInfo, CiResponsibilityNotice, FailureFact
 from ci_owner_agent.services.history_store import MongoHistoryStore, notice_hash
+from ci_owner_agent.services.integration_baseline import FIDGET_INTEGRATION_ENVIRONMENT_PROFILE
 from ci_owner_agent.services.history_inheritance import is_no_owner_decision_item
 from ci_owner_agent.services.history_inheritance import find_feedback_override_for_failure_signature
 from ci_owner_agent.services.failure_identity import build_failure_summary_signature
@@ -144,6 +145,51 @@ def _matches(doc, query):
 
 def make_store():
     return MongoHistoryStore("mongodb://fake", "ci_owner_agent_test", client=FakeClient())
+
+
+def test_save_analysis_persists_queryable_integration_suite_checkpoint(repo_cache, sample_repo, logs):
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    store = make_store()
+    notice = CiResponsibilityNotice.model_validate(high_confidence_payload(context))
+    build_info = BuildInfo(
+        job=context.job,
+        buildNumber=5075,
+        result="SUCCESS",
+        buildUrl="https://jenkins.example/jenkins/job/fidget/5075/",
+        branch=context.branch,
+        commit=context.base_commit,
+    )
+    run = {
+        "protocol": "FIDGET_INTEGRATION_V1",
+        "protocolValid": True,
+        "environmentProfile": FIDGET_INTEGRATION_ENVIRONMENT_PROFILE,
+        "cleanupStatus": "success",
+        "suites": [
+            {"name": "select-integration", "status": "passed", "exitCode": 0},
+            {"name": "delete-integration", "status": "failed", "exitCode": 1},
+        ],
+    }
+    store.save_analysis(
+        build_info,
+        notice,
+        context.base_commit,
+        context.base_commit,
+        None,
+        None,
+        [],
+        integration_run=run,
+    )
+
+    candidates = store.find_trusted_integration_suite_checkpoints(
+        repo=context.repo,
+        job=context.job,
+        branch=context.branch,
+        environment_profile=FIDGET_INTEGRATION_ENVIRONMENT_PROFILE,
+        current_build_number=5076,
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0]["integrationRun"] == run
 
 
 def focused_chunk(text: str, source: str = "local_test_failure_summary", signature: dict | None = None) -> dict:

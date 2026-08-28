@@ -24,6 +24,8 @@ def build_initial_input_payload(
         "baseCommit": context.base_commit,
         "headCommit": context.head_commit,
         "lastSuccessfulBuildNumber": context.last_successful_build_number,
+        "integrationBaseline": context.integration_baseline,
+        "integrationSuiteBaselines": context.integration_suite_baselines,
         "investigationScope": compact_investigation_scope(context),
         "initialDiffScope": initial_scope,
         "changedFilesScope": initial_scope,
@@ -77,6 +79,7 @@ def compact_failure_summaries(summaries: dict[str, Any] | None) -> list[dict[str
                 "startLine": chunk.get("startLine"),
                 "endLine": chunk.get("endLine"),
                 "signature": chunk.get("signature") or {},
+                "integrationSuite": chunk.get("integrationSuite"),
                 "content": truncate_summary_content(content),
             }
         )

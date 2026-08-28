@@ -27,6 +27,13 @@ from ci_owner_agent.services.ai_history_search import (
 )
 from ci_owner_agent.services.branch_normalization import normalize_branch_name
 from ci_owner_agent.services.coverage_responsibility import reconcile_coverage_responsibilities
+from ci_owner_agent.services.integration_baseline import (
+    FIDGET_INTEGRATION_ENVIRONMENT_PROFILE,
+    IntegrationBaselineResolution,
+    build_trusted_integration_run_facts,
+    resolve_integration_baseline,
+    trusted_integration_assertion_suites,
+)
 from ci_owner_agent.services.integration_responsibility import reconcile_integration_responsibilities
 from ci_owner_agent.services.failure_fact_ai import extract_failure_facts_with_ai
 from ci_owner_agent.services.git_client import GitClient
@@ -95,6 +102,200 @@ def _is_integration_env_only_failures(failure_summaries: dict | None) -> bool:
     has_conflict = bool(failure_summaries.get("integrationConflicts"))
     chunks = failure_summaries.get("chunks") or []
     return (integration_env > 0 or has_conflict) and not chunks
+
+
+def _trusted_integration_assertion_suites(log_provider: LogProvider) -> tuple[dict | None, tuple[str, ...]]:
+    """Read a protocol-validated Integration assertion summary once.
+
+    A non-eligible result deliberately falls back to the existing build-level
+    baseline path.  This keeps Unit, coverage, environment and malformed V1
+    logs out of the version resolver.
+    """
+    try:
+        summaries = log_provider.find_test_failure_summaries(tail_lines=500, max_chunks=5)
+    except Exception:
+        return None, ()
+    suites = trusted_integration_assertion_suites(summaries)
+    return summaries, suites
+
+
+def _integration_baseline_evidence(resolution: IntegrationBaselineResolution) -> EvidenceItem:
+    return EvidenceItem(
+        id="E_INTEGRATION_BASELINE",
+        type="build_info",
+        summary="集成 assertion 使用可信 suite/版本检查点限定调查范围",
+        detail=(
+            f"type={resolution.baseline_type}; baseline={resolution.baseline_commit}; currentVersion={resolution.current_version}; "
+            f"targetVersion={resolution.target_version}; suites={','.join(resolution.suites)}; "
+            f"sourceBuildNumber={resolution.source_build_number}; "
+            f"reason={resolution.reason}"
+        ),
+        source="integration_baseline",
+    )
+
+
+def _resolve_integration_suite_baselines(
+    *,
+    repo: str,
+    build_info: BuildInfo,
+    head_commit: str,
+    git_client: GitClient,
+    history_store: MongoHistoryStore | None,
+    suites: tuple[str, ...],
+) -> tuple[dict[str, IntegrationBaselineResolution], str | None]:
+    """Resolve each failing assertion suite independently, fail-closed."""
+    checkpoint_candidates: list[dict] = []
+    if history_store is not None:
+        try:
+            checkpoint_candidates = history_store.find_trusted_integration_suite_checkpoints(
+                repo=repo,
+                job=build_info.job,
+                branch=build_info.branch,
+                environment_profile=FIDGET_INTEGRATION_ENVIRONMENT_PROFILE,
+                current_build_number=build_info.buildNumber,
+            )
+        except Exception as exc:
+            # MongoDB history is an optimisation; version baseline remains a
+            # safe fallback when the store is unavailable.
+            build_info.warnings.append(f"integration suite checkpoint lookup failed: {exc}")
+    resolutions: dict[str, IntegrationBaselineResolution] = {}
+    for suite in suites:
+        resolution = resolve_integration_baseline(
+            git_client=git_client,
+            repo=repo,
+            head_commit=head_commit,
+            suite=suite,
+            checkpoint_candidates=checkpoint_candidates,
+            current_build_number=build_info.buildNumber,
+        )
+        if not resolution.ok or not resolution.baseline_commit:
+            return {}, f"suite {suite} 未能解析可信检查点：{resolution.reason}"
+        resolutions[suite] = resolution
+    return resolutions, None
+
+
+def _select_earliest_suite_baseline(
+    *,
+    git_client: GitClient,
+    repo: str,
+    resolutions: dict[str, IntegrationBaselineResolution],
+) -> tuple[str | None, str | None]:
+    """Return one ancestor that keeps every suite's full range visible."""
+    candidates = sorted({item.baseline_commit for item in resolutions.values() if item.baseline_commit})
+    if not candidates:
+        return None, "没有可用的 suite baseline commit"
+    earliest: list[str] = []
+    for candidate in candidates:
+        is_earliest = True
+        for other in candidates:
+            if candidate == other:
+                continue
+            ancestry = git_client.check_ancestor(repo, candidate, other)
+            if not ancestry.get("ok"):
+                return None, f"无法校验 suite baseline 之间的 ancestry：{ancestry.get('error')}"
+            if not ancestry.get("isAncestor"):
+                is_earliest = False
+                break
+        if is_earliest:
+            earliest.append(candidate)
+    if len(earliest) != 1:
+        return None, "多个 suite baseline 不存在唯一最早祖先，不能安全合并构建级责任窗口"
+    return earliest[0], None
+
+
+def _combined_integration_baseline(
+    resolutions: dict[str, IntegrationBaselineResolution],
+    build_base_commit: str,
+) -> IntegrationBaselineResolution:
+    """Build-level audit evidence; per-suite data remains in Agent context."""
+    ordered = [resolutions[suite] for suite in sorted(resolutions)]
+    if len(ordered) == 1:
+        return ordered[0]
+    types = ",".join(f"{suite}:{resolutions[suite].baseline_type}" for suite in sorted(resolutions))
+    return IntegrationBaselineResolution(
+        ok=True,
+        baseline_commit=build_base_commit,
+        baseline_type="suite_group",
+        suites=tuple(sorted(resolutions)),
+        candidate_sources=("per_suite",),
+        reason=f"per-suite baselines resolved ({types}); build fullRange starts at their unique earliest ancestor",
+    )
+
+
+def enforce_integration_suite_owner_ranges(
+    notice: CiResponsibilityNotice,
+    *,
+    repo: str,
+    git_client: GitClient,
+    head_commit: str,
+    failure_summaries: dict | None,
+    suite_baselines: dict[str, IntegrationBaselineResolution],
+) -> CiResponsibilityNotice:
+    """Apply the narrower per-suite range guard after the Agent returns items."""
+    if not suite_baselines or not isinstance(failure_summaries, dict):
+        return notice
+    from ci_owner_agent.services.failure_identity import build_failure_summary_signature
+
+    suites_by_signature: dict[str, set[str]] = {}
+    for chunk in failure_summaries.get("chunks") or []:
+        if not isinstance(chunk, dict) or not isinstance(chunk.get("integrationSuite"), str):
+            continue
+        signature = build_failure_summary_signature(dict(chunk.get("signature") or {}))
+        if signature:
+            suites_by_signature.setdefault(signature, set()).add(chunk["integrationSuite"])
+
+    downgraded = 0
+    for item in notice.responsibilityItems:
+        suites = suites_by_signature.get(item.failureSignature or "", set())
+        if len(suites) != 1:
+            continue
+        suite = next(iter(suites))
+        baseline = suite_baselines.get(suite)
+        if baseline is None or not baseline.baseline_commit:
+            continue
+        evidence_id = "E_INTEGRATION_SUITE_" + suite.replace("-", "_").upper()
+        if evidence_id not in {e.id for e in notice.evidence}:
+            notice.evidence.append(
+                EvidenceItem(
+                    id=evidence_id,
+                    type="build_info",
+                    summary=f"集成 suite {suite} 的可信责任窗口",
+                    detail=(
+                        f"suite={suite}; baseline={baseline.baseline_commit}; "
+                        f"type={baseline.baseline_type}; sourceBuildNumber={baseline.source_build_number}; "
+                        f"reason={baseline.reason}"
+                    ),
+                    source="integration_suite_baseline",
+                )
+            )
+        if item.responsibilityType != "current_build_owner":
+            continue
+        owner_commit = (item.owner.commit or "").strip()
+        source_commit = (item.sourceCommit or "").strip()
+        if not owner_commit:
+            _downgrade_item_owner(item, f"suite {suite} owner 缺少 commit，无法验证其在 suite 窗口内。")
+            downgraded += 1
+            continue
+        if source_commit and source_commit != owner_commit:
+            _downgrade_item_owner(item, f"suite {suite} 的 sourceCommit 与 owner commit 冲突，证据不一致。")
+            downgraded += 1
+            continue
+        if owner_commit == baseline.baseline_commit:
+            _downgrade_item_owner(item, f"suite {suite} owner commit 等于 baseline，baseline..head 不含 baseline。")
+            downgraded += 1
+            continue
+        if owner_commit == head_commit:
+            continue
+        left = git_client.check_ancestor(repo, baseline.baseline_commit, owner_commit)
+        right = git_client.check_ancestor(repo, owner_commit, head_commit)
+        if not (left.get("ok") and left.get("isAncestor") and right.get("ok") and right.get("isAncestor")):
+            _downgrade_item_owner(item, f"owner commit 不在 suite {suite} 的 baseline..head 窗口内，按保守规则降级。")
+            downgraded += 1
+    if downgraded:
+        recorder = current_metrics_recorder()
+        if recorder is not None:
+            recorder.warnings.append(f"downgraded {downgraded} item(s) outside their integration suite range")
+    return _revalidate_notice_owner(notice)
 
 
 def _restore_authoritative_build_metadata(
@@ -370,7 +571,7 @@ def failure_without_context(
 def analyze_failed_build(
     repo: str,
     build_info: BuildInfo,
-    base_commit: str,
+    base_commit: str | None,
     head_commit: str,
     log_provider: LogProvider,
     git_client: GitClient,
@@ -380,6 +581,7 @@ def analyze_failed_build(
     history_store: MongoHistoryStore | None = None,
     previous_build_number: int | None = None,
     previous_commit: str | None = None,
+    precomputed_failure_summaries: dict | None = None,
 ) -> CiResponsibilityNotice:
     settings = settings or load_settings()
     if history_store is None and settings.history_enabled:
@@ -399,6 +601,56 @@ def analyze_failed_build(
             detail=message,
             source="repo_sync",
         )
+    integration_baseline: IntegrationBaselineResolution | None = None
+    integration_suite_baselines: dict[str, IntegrationBaselineResolution] = {}
+    failure_summaries = precomputed_failure_summaries
+    if failure_summaries is None:
+        integration_summaries, suites = _trusted_integration_assertion_suites(log_provider)
+        # Keep legacy callers and their lightweight test doubles compatible:
+        # only pass a precomputed summary downstream when this Integration
+        # branch actually consumed it to select a version baseline.
+        if suites:
+            failure_summaries = integration_summaries
+    else:
+        suites = trusted_integration_assertion_suites(failure_summaries)
+    if suites:
+        integration_suite_baselines, baseline_error = _resolve_integration_suite_baselines(
+            repo=repo,
+            build_info=build_info,
+            head_commit=head_commit,
+            git_client=git_client,
+            history_store=history_store,
+            suites=suites,
+        )
+        if baseline_error:
+            return failure_without_context(
+                build_info,
+                None,
+                "集成 assertion 未能解析可信 suite/版本检查点，按保守规则不输出高可信责任人："
+                f"{baseline_error}",
+                repo=repo,
+            )
+        base_commit, merge_error = _select_earliest_suite_baseline(
+            git_client=git_client,
+            repo=repo,
+            resolutions=integration_suite_baselines,
+        )
+        if merge_error or not base_commit:
+            return failure_without_context(
+                build_info,
+                None,
+                "集成 assertion 的各 suite 检查点无法安全合并为完整责任窗口，"
+                f"按保守规则不输出高可信责任人：{merge_error}",
+                repo=repo,
+            )
+        integration_baseline = _combined_integration_baseline(integration_suite_baselines, base_commit)
+    if not base_commit:
+        return failure_without_context(
+            build_info,
+            None,
+            "缺少可信 Git 调查基线，无法执行 Git diff，因此不能输出高可信责任人。",
+            repo=repo,
+        )
     ancestry = git_client.check_ancestor(repo, base_commit, head_commit)
     if not ancestry.get("ok"):
         return failure_without_context(build_info, base_commit, f"Git ancestry 校验失败，不能输出高可信责任人：{ancestry.get('error')}", repo=repo)
@@ -413,6 +665,11 @@ def analyze_failed_build(
         previous_build_number=previous_build_number,
         previous_commit=previous_commit,
     )
+    if integration_baseline is not None:
+        investigation_scope = replace(
+            investigation_scope,
+            reason=f"{integration_baseline.reason}; {investigation_scope.reason}",
+        )
     commits_result, diff_result = _read_investigation_range(
         git_client=git_client,
         repo=repo,
@@ -437,8 +694,20 @@ def analyze_failed_build(
         investigation_scope=investigation_scope,
         commits_result=commits_result,
         diff_result=diff_result,
+        integration_baseline=integration_baseline.to_dict() if integration_baseline is not None else None,
+        integration_suite_baselines={
+            suite: resolution.to_dict() for suite, resolution in integration_suite_baselines.items()
+        }
+        or None,
     )
-    runtime_context = _with_precomputed_failure_context(runtime_context, history_store=history_store)
+    if failure_summaries is None:
+        runtime_context = _with_precomputed_failure_context(runtime_context, history_store=history_store)
+    else:
+        runtime_context = _with_precomputed_failure_context(
+            runtime_context,
+            history_store=history_store,
+            precomputed_failure_summaries=failure_summaries,
+        )
     with _metrics_stage("historyNoOwnerDecision"):
         no_owner_decision = select_build_level_no_owner_decision(
             runtime_context.history_precheck,
@@ -483,6 +752,8 @@ def analyze_failed_build(
             runtime_context.failure_facts,
             repo=repo,
         )
+        if integration_baseline is not None:
+            notice.evidence.append(_integration_baseline_evidence(integration_baseline))
         # 防御性接线：即使历史 no-owner 规则允许短路，当前构建里的 coverage
         # 事实仍必须经过唯一 reconciler，不能直接沿用旧 notice 后返回。
         notice = reconcile_coverage_responsibilities(
@@ -589,10 +860,20 @@ def analyze_failed_build(
             head_commit=head_commit,
         )
         notice = validate_notice(notice)
+    if integration_baseline is not None:
+        notice.evidence.append(_integration_baseline_evidence(integration_baseline))
     notice = enrich_responsibility_item_signatures(
         notice,
         runtime_context.failure_summaries,
         runtime_context.failure_facts,
+    )
+    notice = enforce_integration_suite_owner_ranges(
+        notice,
+        repo=repo,
+        git_client=runtime_context.git_client,
+        head_commit=head_commit,
+        failure_summaries=runtime_context.failure_summaries,
+        suite_baselines=integration_suite_baselines,
     )
     notice = enrich_responsibility_item_paths(
         notice,
@@ -694,6 +975,8 @@ def _build_analysis_contexts(
     investigation_scope: InvestigationScope,
     commits_result: dict,
     diff_result: dict,
+    integration_baseline: dict | None = None,
+    integration_suite_baselines: dict[str, dict] | None = None,
 ) -> tuple[AgentContext, AgentRuntimeContext, list[ChangedFile]]:
     """Build the legacy and runtime Agent contexts from an already validated Git range."""
     commits = [CommitInfo.model_validate(item) for item in commits_result.get("commits", [])]
@@ -724,6 +1007,8 @@ def _build_analysis_contexts(
         settings=settings,
         last_successful_build_number=last_successful_build_number,
         investigation_scope=investigation_scope,
+        integration_baseline=integration_baseline,
+        integration_suite_baselines=integration_suite_baselines,
     )
     return context, runtime_context, changed_files
 
@@ -806,15 +1091,19 @@ def _resolve_investigation_scope(
 def _with_precomputed_failure_context(
     context: AgentRuntimeContext,
     history_store: MongoHistoryStore | None = None,
+    precomputed_failure_summaries: dict | None = None,
 ) -> AgentRuntimeContext:
-    try:
-        with _metrics_stage("failureSummary"):
-            failure_summaries = context.log_provider.find_test_failure_summaries(
-                tail_lines=context.settings.failure_chunk_tail_lines,
-                max_chunks=5,
-            )
-    except Exception as exc:
-        failure_summaries = {"chunks": [], "warning": f"failure summary extraction failed: {exc}"}
+    if precomputed_failure_summaries is not None:
+        failure_summaries = precomputed_failure_summaries
+    else:
+        try:
+            with _metrics_stage("failureSummary"):
+                failure_summaries = context.log_provider.find_test_failure_summaries(
+                    tail_lines=context.settings.failure_chunk_tail_lines,
+                    max_chunks=5,
+                )
+        except Exception as exc:
+            failure_summaries = {"chunks": [], "warning": f"failure summary extraction failed: {exc}"}
     enriched = replace(context, failure_summaries=failure_summaries)
     # 集成环境失败（integrationEnv > 0 且无代码 chunk）或协议不完整
     # （Integration stage 存在但缺 V1 marker）不提取 AI failure facts：
@@ -935,6 +1224,10 @@ def _save_history(
                     max_chunks=5,
                 )
             chunks = summaries.get("chunks", [])
+            integration_run = build_trusted_integration_run_facts(
+                summaries.get("integrationProtocolIndex"),
+                build_info,
+            )
             store.save_analysis(
                 build_info=build_info,
                 notice=notice,
@@ -943,6 +1236,7 @@ def _save_history(
                 last_successful_build_number=last_successful_build_number,
                 last_successful_commit=base_commit,
                 error_chunks=chunks,
+                integration_run=integration_run,
             )
             failure_facts_ok = isinstance(failure_facts, dict) and failure_facts.get("ok") is True
             if failure_facts_ok:
@@ -1091,6 +1385,26 @@ def analyze_jenkins(
             repo=repo,
         )
 
+    log_provider = JenkinsLogProvider(jenkins_client, job, build_info.buildNumber)
+    integration_summaries, integration_suites = _trusted_integration_assertion_suites(log_provider)
+    if integration_suites:
+        # A Fidget Integration assertion is not allowed to fall back to an
+        # unrelated whole-job SUCCESS: such a SUCCESS may have skipped the
+        # Integration stage.  The failed-build path synchronizes only the
+        # Agent cache, resolves the previous-version checkpoint, and otherwise
+        # returns a conservative no-owner notice.
+        return analyze_failed_build(
+            repo,
+            build_info,
+            None,
+            build_info.commit,
+            log_provider,
+            git_client,
+            allow_sync_failure=False,
+            settings=settings,
+            precomputed_failure_summaries=integration_summaries,
+        )
+
     with _metrics_stage("jenkinsFetch"):
         last_success_result = jenkins_client.get_last_successful_build_info(
             job,
@@ -1156,7 +1470,6 @@ def analyze_jenkins(
             repo=repo,
         )
 
-    log_provider = JenkinsLogProvider(jenkins_client, job, build_info.buildNumber)
     return analyze_failed_build(
         repo,
         build_info,

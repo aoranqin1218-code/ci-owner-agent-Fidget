@@ -302,6 +302,7 @@ def build_integration_protocol_index(all_lines: list[str]) -> dict:
         "suite_ranges": [],          # {"name", "start_line", "end_line", "exit"}
         "preflight_failures": [],    # {"line", "step"}
         "cleanup_failed": False,
+        "cleanup_status": None,
         "summary": None,             # {"total","passed","failed","not_started"}
     }
     run_ids: list[str] = []
@@ -455,6 +456,7 @@ def build_integration_protocol_index(all_lines: list[str]) -> dict:
         elif phase == "cleanup":
             seen_cleanup = True
             status = fields.get("status")
+            index["cleanup_status"] = status
             if status == "failed":
                 index["cleanup_failed"] = True
             elif status not in _INTEGRATION_FINAL_STATUSES:
@@ -836,6 +838,10 @@ def build_integration_failure_summaries(all_lines: list[str], *, max_chunks: int
                 "score": 0.9,
                 "content": content,
                 "truncated": False,
+                # The runner protocol, not free-form test text, associates this
+                # failure with a suite.  Keep it out of the stable failure
+                # signature so a suite rename cannot silently inherit history.
+                "integrationSuite": classification.get("suite"),
                 "signature": signature,
                 "signatureHash": _signature_hash(signature),
             }

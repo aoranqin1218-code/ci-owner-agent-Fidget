@@ -493,6 +493,38 @@ CI_AGENT_WECOM_BOT_NOTIFY_CHAT_ID=***
 
 ## 5. 启动与命令说明
 
+### 5.0 Fidget 手工测试快捷命令
+
+仓库根目录的 `package.json` 只把常用参数转发给现有 Python CLI，不会把本项目变成 Node.js / TypeScript 项目，也不需要执行 `npm install`。Windows 开发环境会直接使用项目的 `.venv\Scripts\python.exe`。
+
+真实 Jenkins 分析默认不传 `--notify`，因此不会发送通知；模型调用和历史 MongoDB 读写仍以当前 `.env` 配置为准：
+
+```powershell
+npm run analyze:jenkins -- 31
+```
+
+结果默认保存到 `runs/manual/jenkins-build-31.notice.json`。确认构建号、notice 内容、目标测试群、@ 人和敏感信息检查均无误后，才使用真实通知入口：
+
+```powershell
+npm run analyze:jenkins:notify -- 31
+```
+
+本地日志分析使用短位置参数 `<日志> <构建号> <base commit> <head commit>`：
+
+```powershell
+npm run analyze:local -- .\path\to\console.log 31 <base-commit> <head-commit>
+```
+
+`base/head commit` 仍须显式输入，因为它们定义可信责任窗口，快捷脚本不会从不可信日志或当前分支猜测。结果默认保存到 `runs/manual/local-build-31.notice.json`。
+
+在终端预览已经生成的 notice，不产生通知副作用：
+
+```powershell
+npm run notice:preview -- .\runs\manual\jenkins-build-31.notice.json
+```
+
+查看全部可选参数可运行 `npm run analyze:help`，或在具体命令后追加 `--help`。这些命令固定使用个人 Fidget 验证 Job `npm/fxp-fidget/fidget-xiaoqin-pipeline`、repo cache `fidget-xiaoqin` 和 `main` 分支；需要临时覆盖时可传 `--job`、`--repo` 或 `--branch`。底层稳定入口仍是 `python -m ci_owner_agent`。
+
 ### 5.1 命令总览
 
 | 命令                    | 作用                          |

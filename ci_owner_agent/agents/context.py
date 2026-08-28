@@ -29,6 +29,8 @@ class AgentRuntimeContext:
     last_successful_build_number: int | None = None
     investigation_scope: InvestigationScope | None = None
     failure_summaries: dict[str, Any] | None = None
+    integration_baseline: dict[str, Any] | None = None
+    integration_suite_baselines: dict[str, dict[str, Any]] | None = None
     failure_facts: dict[str, Any] | None = None
     history_precheck: dict[str, Any] | None = None
     ai_history_precheck: dict[str, Any] | None = None

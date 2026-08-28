@@ -177,6 +177,10 @@ class TextLogProvider(LogProvider):
             "coverageFiles": coverage_files,
             "integrationClassifications": classifications,
             "integrationConflicts": protocol_index["conflicts"],
+            # Persisting trusted suite checkpoints needs the protocol facts, not
+            # only the display-oriented chunks.  The index contains no database
+            # URI, credentials, or other runtime secrets.
+            "integrationProtocolIndex": protocol_index,
         }
         if not merged and summary_warning:
             result["warning"] = summary_warning
