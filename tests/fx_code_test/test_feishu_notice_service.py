@@ -100,7 +100,7 @@ def test_maybe_notify_notice_sends_when_enabled_and_not_dry_run(monkeypatch):
     calls = _ok_send(monkeypatch)
     feishu_notice_service.maybe_notify_notice(_notice(), _settings())
     assert len(calls) == 1
-    assert calls[0][1]["msg_type"] == "post"
+    assert calls[0][1]["msg_type"] == "interactive"
 
 
 def test_notify_notice_dry_run_has_no_network_and_no_store_write(monkeypatch):
@@ -197,4 +197,4 @@ def test_saved_notification_preview_redacts_open_ids(tmp_path, monkeypatch):
     assert result["summary"]["atOpenIdCount"] == 1
     preview = store.notifications.find_one({"channel": "feishu"})["messagePreview"]
     assert "ou_owner123" not in preview
-    assert '"user_id": "***"' in preview
+    assert "<at id=***></at>" in preview

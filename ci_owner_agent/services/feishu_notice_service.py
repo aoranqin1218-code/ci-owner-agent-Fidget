@@ -12,6 +12,7 @@ import copy
 import hashlib
 import json
 import logging
+import re
 import sys
 from contextlib import nullcontext
 from typing import Any
@@ -240,19 +241,26 @@ def _save_feishu_notification(
     if store is None:
         return
     try:
-        # 只保存脱敏后的消息预览，at 的 user_id（open_id）属 PRD R4 敏感标识，不得持久化明文。
+        # 只保存脱敏后的消息预览；post user_id / card <at id> 均不得持久化明文 open_id。
         store.save_notification(notice=notice, notice_hash=digest, channel="feishu", status=status, message=_redacted_payload_preview(payload), error=error)
     except Exception as exc:
         logging.getLogger(__name__).warning("Feishu notification history unavailable: %s", type(exc).__name__)
 
 
 def _redacted_payload_preview(payload: dict) -> str:
-    """Return a JSON preview with at user_id values replaced, safe to persist."""
+    """Return a JSON preview with post/card mention IDs safe to persist."""
     preview = copy.deepcopy(payload)
+    # Backward-compatible redaction for legacy post payloads.
     for paragraph in preview.get("content", {}).get("post", {}).get("zh_cn", {}).get("content", []):
         for element in paragraph:
             if isinstance(element, dict) and element.get("tag") == "at" and "user_id" in element:
                 element["user_id"] = "***"
+    # Card Markdown represents mentions as <at id=ou_xxx></at>.
+    for element in preview.get("card", {}).get("body", {}).get("elements", []):
+        if not isinstance(element, dict) or element.get("tag") != "markdown":
+            continue
+        content = str(element.get("content") or "")
+        element["content"] = re.sub(r"(<at\s+id=)[^>\s]+(></at>)", r"\1***\2", content)
     return json.dumps(preview, ensure_ascii=False)
 
 

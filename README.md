@@ -450,7 +450,7 @@ rules:
 
 ### 4.7.1 飞书测试群单向通知
 
-飞书渠道只做**单向通知**：分析完成后把 `CiResponsibilityNotice` 以飞书富文本 `post` 消息发送到测试群自定义机器人 Webhook。飞书不生成反馈码、不提供卡片交互；反馈闭环留待后续独立任务。
+飞书渠道只做**单向通知**：分析完成后把 `CiResponsibilityNotice` 以飞书 `interactive` 展示卡片发送到测试群自定义机器人 Webhook。卡片使用蓝色 header、Markdown 粗体分区、显式 margin 留白和 `width_mode=fill` 自适应聊天窗口宽度；只提供 Jenkins URL 跳转，不处理按钮回调，也不生成反馈码，反馈闭环留待后续独立任务。
 
 | 配置                                      | 默认值      | 说明                                               |
 | ----------------------------------------- | ----------- | -------------------------------------------------- |
@@ -487,7 +487,7 @@ users:
 分级验证（先 dry-run，再真实发送）：
 
 ```powershell
-# 1. 本地 dry-run：生成飞书 post payload，不访问网络
+# 1. 本地 dry-run：生成飞书 interactive card payload，不访问网络
 python -m ci_owner_agent notify-notice --channel feishu --dry-run --notice-file .\runs\5064.notice.json
 
 # 2. 确认目标是测试群、机器人签名/关键词设置一致后，关闭 dry-run 真实发送
@@ -671,7 +671,7 @@ python -m ci_owner_agent notify-notice `
 | ----------------------- | ---------------------------------------------------------- |
 | `--notice-file`       | `CiResponsibilityNotice` JSON，支持 UTF-8 和 UTF-8 BOM。 |
 | `--channel`           | `wecom`（默认）或 `feishu`。                              |
-| `--dry-run`           | `wecom` 打印 Markdown；`feishu` 打印飞书 post payload JSON。均不调用 Webhook、也不向 Outbox 入队。 |
+| `--dry-run`           | `wecom` 打印 Markdown；`feishu` 打印飞书 interactive card payload JSON。均不调用 Webhook、也不向 Outbox 入队。 |
 | `--force`             | 忽略通知去重。                                             |
 | `--feedback-base-url` | 覆盖反馈 URL（仅 `wecom` 渠道使用）。                     |
 

@@ -227,14 +227,16 @@ def test_notify_notice_bot_queue_prints_transport_safe_summary(tmp_path, monkeyp
     assert summary["inserted"] is True and summary["deliveryKey"]
 
 
-def test_notify_notice_feishu_dry_run_prints_post_payload(tmp_path):
+def test_notify_notice_feishu_dry_run_prints_interactive_card_payload(tmp_path):
     notice_file = tmp_path / "notice.json"
     notice_file.write_text(_notice_json_text(), encoding="utf-8")
     completed = _run_module("notify-notice", "--channel", "feishu", "--dry-run", "--notice-file", str(notice_file))
     assert completed.returncode == 0
     assert "ERROR" not in completed.stderr
     payload = json.loads(completed.stdout)
-    assert payload["msg_type"] == "post"
+    assert payload["msg_type"] == "interactive"
+    assert payload["card"]["header"]["template"] == "blue"
+    assert payload["card"]["config"]["width_mode"] == "fill"
     assert "查看 Jenkins 分析" in json.dumps(payload, ensure_ascii=False)
 
 
