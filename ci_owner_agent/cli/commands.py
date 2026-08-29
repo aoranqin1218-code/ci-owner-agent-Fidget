@@ -22,7 +22,7 @@ from ci_owner_agent.schemas import (
     CiResponsibilityNotice,
     TestFileFailureStat,
 )
-from ci_owner_agent.services import wecom_notice_service
+from ci_owner_agent.services import feishu_notice_service, wecom_notice_service
 from ci_owner_agent.services.feedback_store import FeedbackStore
 from ci_owner_agent.services.git_client import GitClient
 from ci_owner_agent.services.history_store import get_history_store
@@ -145,6 +145,7 @@ def _run_analyze_local(args: Any, settings: Any) -> int:
     _emit_json(notice, args.output_file)
     with use_metrics_recorder(recorder):
         wecom_notice_service.maybe_notify_notice(notice, settings, args.notify, args.notify_dry_run, args.force_notify)
+        feishu_notice_service.maybe_notify_notice(notice, settings)
     _finish_metrics(recorder, settings)
     return 0
 
@@ -258,6 +259,7 @@ def _run_analyze_jenkins(args: Any, settings: Any) -> int:
     _emit_json(notice, args.output_file)
     with use_metrics_recorder(recorder):
         wecom_notice_service.maybe_notify_notice(notice, settings, args.notify, args.notify_dry_run, args.force_notify)
+        feishu_notice_service.maybe_notify_notice(notice, settings)
     _finish_metrics(recorder, settings)
     return 0
 
@@ -277,6 +279,8 @@ def _run_notify_notice(args: Any, settings: Any) -> int:
     except Exception as exc:
         print(f"ERROR: invalid notice schema: {exc}", file=sys.stderr)
         return 2
+    if args.channel == "feishu":
+        return _run_notify_notice_feishu(args, notice, settings)
     dry_run = args.dry_run or settings.wecom_notify_dry_run
     try:
         result = wecom_notice_service.notify_notice(
@@ -296,6 +300,29 @@ def _run_notify_notice(args: Any, settings: Any) -> int:
         return 2
     else:
         print(json.dumps(_notification_result_summary(result), ensure_ascii=False))
+    return 0
+
+
+def _run_notify_notice_feishu(args: Any, notice: CiResponsibilityNotice, settings: Any) -> int:
+    dry_run = args.dry_run or settings.feishu_notify_dry_run
+    try:
+        result = feishu_notice_service.notify_notice(notice, settings, dry_run=dry_run, force=args.force)
+    except Exception:
+        print("ERROR: feishu notify failed unexpectedly", file=sys.stderr)
+        return 2
+    if dry_run:
+        if not result.get("ok"):
+            print(f"WARNING: feishu dry-run failed: {result.get('error')}", file=sys.stderr)
+            return 2
+        print(json.dumps(result["payload"], ensure_ascii=False))
+        return 0
+    if not result.get("ok"):
+        print(f"WARNING: feishu notify failed: {result.get('error')}", file=sys.stderr)
+        return 2
+    output = _notification_result_summary(result)
+    if result.get("summary"):
+        output["summary"] = result["summary"]
+    print(json.dumps(output, ensure_ascii=False))
     return 0
 
 

@@ -122,3 +122,28 @@ def test_wecom_webhook_url_is_trimmed_and_redacted(monkeypatch):
 def test_empty_wecom_webhook_url_is_none(monkeypatch):
     monkeypatch.setenv("CI_AGENT_WECOM_WEBHOOK_URL", "   ")
     assert load_settings().wecom_webhook_url is None
+
+
+def test_feishu_defaults_are_safe(monkeypatch):
+    monkeypatch.delenv("CI_AGENT_FEISHU_NOTIFY_ENABLED", raising=False)
+    monkeypatch.delenv("CI_AGENT_FEISHU_NOTIFY_DRY_RUN", raising=False)
+    monkeypatch.delenv("CI_AGENT_FEISHU_NOTIFY_ON_SUCCESS", raising=False)
+    settings = load_settings()
+    # 安全默认：不显式配置时不自动通知、不真实发送、不通知成功构建。
+    assert settings.feishu_notify_enabled is False
+    assert settings.feishu_notify_dry_run is True
+    assert settings.feishu_notify_on_success is False
+    assert settings.feishu_notify_on_no_owner is True
+
+
+def test_feishu_webhook_url_and_secret_are_redacted(monkeypatch):
+    monkeypatch.setenv("CI_AGENT_FEISHU_WEBHOOK_URL", " https://open.feishu.cn/open-apis/bot/v2/hook/secret-token ")
+    monkeypatch.setenv("CI_AGENT_FEISHU_WEBHOOK_SECRET", "my-secret")
+    monkeypatch.setenv("CI_AGENT_FEISHU_FALLBACK_USER_IDS", "ou_a, ou_b, ou_a")
+    settings = load_settings()
+    assert settings.feishu_webhook_url == "https://open.feishu.cn/open-apis/bot/v2/hook/secret-token"
+    assert settings.feishu_fallback_userids == ("ou_a", "ou_b")
+    pub = public_settings(settings)
+    assert pub["feishu_webhook_url"] == "***"
+    assert pub["feishu_webhook_secret"] == "***"
+    assert pub["feishu_fallback_userids"] == ["***"]

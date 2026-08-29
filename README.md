@@ -448,6 +448,54 @@ rules:
 
 规则按顺序匹配，第一条同时满足 `repo`、`job` 和任一 `paths` glob 的规则生效。示例 userid 仅为占位值。
 
+### 4.7.1 飞书测试群单向通知
+
+飞书渠道只做**单向通知**：分析完成后把 `CiResponsibilityNotice` 以飞书富文本 `post` 消息发送到测试群自定义机器人 Webhook。飞书不生成反馈码、不提供卡片交互；反馈闭环留待后续独立任务。
+
+| 配置                                      | 默认值      | 说明                                               |
+| ----------------------------------------- | ----------- | -------------------------------------------------- |
+| `CI_AGENT_FEISHU_NOTIFY_ENABLED`        | `false`   | 分析命令是否自动触发飞书通知；默认关闭，`--notify` 不会触发飞书。 |
+| `CI_AGENT_FEISHU_WEBHOOK_URL`           | 空          | 飞书测试群自定义机器人 Webhook；公开配置输出中脱敏。 |
+| `CI_AGENT_FEISHU_WEBHOOK_SECRET`        | 空          | 仅当机器人开启「签名校验」时需要；签名按官方协议生成，签名值不记录。 |
+| `CI_AGENT_FEISHU_NOTIFY_DRY_RUN`        | `true`    | 默认只生成 payload，不访问网络。                    |
+| `CI_AGENT_FEISHU_NOTIFY_ON_SUCCESS`     | `false`   | 是否通知成功构建。                                 |
+| `CI_AGENT_FEISHU_NOTIFY_ON_NO_OWNER`    | `true`    | 无高可信责任人时是否仍通知。                       |
+| `CI_AGENT_FEISHU_USER_MAPPING_FILE`     | 空          | 飞书 open_id 映射 YAML（见下）；仅用于真实 `@`，无映射保守降级。 |
+| `CI_AGENT_FEISHU_FALLBACK_USER_IDS`     | 空          | 逗号分隔的兜底 open_id；显式配置，不得猜测。        |
+
+安全与去重边界：
+
+- 飞书自定义机器人只能以 **open_id（`ou_` 开头）** `@` 群成员，且没有通讯录权限、无法自行查 open_id。可靠 open_id 必须来自受管控的映射文件；映射缺失/冲突时消息保守降级为姓名文本，绝不猜测身份，也不把维护者写成责任人。
+- 发送前对 notice 做明文敏感信息扫描，任何 MongoDB/网络副作用之前 fail closed。
+- Webhook 返回只保留 HTTP 状态、数值业务码和受控错误类别；不输出或持久化原始响应正文，防止网关回显 Webhook token、Secret 或签名。
+- 去重键为 `repo + job + branch + buildNumber + notice digest + channel=feishu`，与企微 `channel=wecom` 完全隔离。MongoDB 关闭时只有进程内行为，不声明跨进程去重。
+- 企微与飞书是两个独立下游副作用：一个渠道失败不影响另一个，也不改写 notice。
+
+真实发送前请确认：目标是**飞书测试群**、机器人安全设置与签名配置一致、Webhook/Secret 不写入仓库或文档。
+
+飞书 open_id 映射 YAML（`CI_AGENT_FEISHU_USER_MAPPING_FILE`）示例：
+
+```yaml
+users:
+  - name: "张三"
+    email: zhangsan@example.com
+    openId: "ou_xxxxxxxx"
+  - name: "李四"
+    openId: "ou_yyyyyyyy"
+```
+
+分级验证（先 dry-run，再真实发送）：
+
+```powershell
+# 1. 本地 dry-run：生成飞书 post payload，不访问网络
+python -m ci_owner_agent notify-notice --channel feishu --dry-run --notice-file .\runs\5064.notice.json
+
+# 2. 确认目标是测试群、机器人签名/关键词设置一致后，关闭 dry-run 真实发送
+python -m ci_owner_agent notify-notice --channel feishu --notice-file .\runs\5064.notice.json
+```
+
+回退：Webhook 泄露时立即在飞书群撤销/重建机器人并轮换 Secret，仓库无需存旧值；关闭 `CI_AGENT_FEISHU_NOTIFY_ENABLED` 即停止飞书副作用，不影响分析与企微通知。
+
 ### 4.8 企业微信长连接机器人
 
 | 配置                                        | 默认值    | 说明                                                                  |
@@ -622,11 +670,19 @@ python -m ci_owner_agent notify-notice `
 | 参数                    | 说明                                                       |
 | ----------------------- | ---------------------------------------------------------- |
 | `--notice-file`       | `CiResponsibilityNotice` JSON，支持 UTF-8 和 UTF-8 BOM。 |
-| `--dry-run`           | 打印 Markdown，不调用 Webhook、也不向 Outbox 入队。        |
+| `--channel`           | `wecom`（默认）或 `feishu`。                              |
+| `--dry-run`           | `wecom` 打印 Markdown；`feishu` 打印飞书 post payload JSON。均不调用 Webhook、也不向 Outbox 入队。 |
 | `--force`             | 忽略通知去重。                                             |
-| `--feedback-base-url` | 覆盖反馈 URL。                                             |
+| `--feedback-base-url` | 覆盖反馈 URL（仅 `wecom` 渠道使用）。                     |
 
-`CI_AGENT_WECOM_NOTIFY_DRY_RUN=true` 也会使该命令进入 dry-run。
+`CI_AGENT_WECOM_NOTIFY_DRY_RUN=true` 也会使该命令进入 dry-run；`CI_AGENT_FEISHU_NOTIFY_DRY_RUN=true` 同理作用于 `--channel feishu`。
+
+飞书手动发送示例（先 dry-run 审阅 payload，确认目标为测试群后再真实发送）：
+
+```powershell
+python -m ci_owner_agent notify-notice --channel feishu --dry-run --notice-file .\runs\5064.notice.json
+python -m ci_owner_agent notify-notice --channel feishu --notice-file .\runs\5064.notice.json
+```
 
 `analyze` / `analyze-local` 的 `--notify-dry-run` 会执行格式化但不会打印 Markdown；需要人工预览时，先用 `--output-file` 保存 notice，再运行 `notify-notice --dry-run`。
 

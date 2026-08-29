@@ -227,6 +227,37 @@ def test_notify_notice_bot_queue_prints_transport_safe_summary(tmp_path, monkeyp
     assert summary["inserted"] is True and summary["deliveryKey"]
 
 
+def test_notify_notice_feishu_dry_run_prints_post_payload(tmp_path):
+    notice_file = tmp_path / "notice.json"
+    notice_file.write_text(_notice_json_text(), encoding="utf-8")
+    completed = _run_module("notify-notice", "--channel", "feishu", "--dry-run", "--notice-file", str(notice_file))
+    assert completed.returncode == 0
+    assert "ERROR" not in completed.stderr
+    payload = json.loads(completed.stdout)
+    assert payload["msg_type"] == "post"
+    assert "查看 Jenkins 分析" in json.dumps(payload, ensure_ascii=False)
+
+
+def test_notify_notice_feishu_send_prints_safe_summary(tmp_path, monkeypatch, capsys):
+    from dataclasses import replace
+
+    from ci_owner_agent.config import load_settings
+    from ci_owner_agent.main import main
+
+    notice_file = tmp_path / "notice.json"
+    notice_file.write_text(_notice_json_text(), encoding="utf-8")
+    settings = replace(load_settings(), feishu_notify_dry_run=False, feishu_webhook_url="https://example.test/hook/secret-token", history_enabled=False)
+    monkeypatch.setattr("ci_owner_agent.main.load_settings", lambda: settings)
+    monkeypatch.setattr("ci_owner_agent.services.feishu_notice_service.get_history_store", lambda _: None)
+    monkeypatch.setattr("ci_owner_agent.services.feishu_notice_service.send_feishu_payload",
+                        lambda *a, **k: {"ok": True, "statusCode": 200, "response": "{}", "error": None})
+    assert main(["notify-notice", "--channel", "feishu", "--notice-file", str(notice_file)]) == 0
+    captured = capsys.readouterr()
+    summary = json.loads(captured.out)
+    assert summary["status"] == "sent" and summary["transport"] == "feishu"
+    assert "secret-token" not in captured.out + captured.err
+
+
 def test_analyze_output_file_writes_utf8_without_bom(tmp_path):
     output_file = tmp_path / "subdir" / "notice.json"
     completed = _run_module(

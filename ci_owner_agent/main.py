@@ -58,8 +58,9 @@ def build_parser() -> argparse.ArgumentParser:
     weekly.add_argument("--dry-run", action="store_true")
     weekly.add_argument("--force", action="store_true")
 
-    notify = subparsers.add_parser("notify-notice", help="Send or preview a WeCom markdown notice")
+    notify = subparsers.add_parser("notify-notice", help="Send or preview a notice to WeCom (default) or Feishu")
     notify.add_argument("--notice-file", required=True)
+    notify.add_argument("--channel", choices=["wecom", "feishu"], default="wecom", help="Notification channel (default: wecom)")
     notify.add_argument("--dry-run", action="store_true")
     notify.add_argument("--force", action="store_true")
     notify.add_argument("--feedback-base-url", default=None)

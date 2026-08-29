@@ -206,8 +206,14 @@ python -m ci_owner_agent <command>
       - **Webhook 直发**：`store.notification_sent` 去重 → `send_wecom_markdown`（[wecom_notifier.py](ci_owner_agent/services/wecom_notifier.py)）POST 群机器人 → `save_notification` 落 `ci_notifications`；
       - **Bot Outbox**：`WeComNotificationOutbox.enqueue_markdown` 入队 `ci_wecom_notification_outbox` → 常驻 `serve-wecom-bot` Worker 轮询领取（租约 30s）→ SDK 长连接主动推送 → 成功 `mark_sent` / 失败退避重试 5 次后 `dead`。
     - **设计红线：通知失败不推翻定责**——`maybe_notify_notice` 里投递异常只打 WARNING，notice 结论不受通知成败影响（投递坏了 ≠ 判错了）。
+21. 若 `CI_AGENT_FEISHU_NOTIFY_ENABLED=true`：`feishu_notice_service.maybe_notify_notice` → `notify_notice`（[feishu_notice_service.py](ci_owner_agent/services/feishu_notice_service.py)）作为**独立下游副作用**（`--notify` 不触发飞书）：
+    - `_find_plaintext_secrets` 发送前敏感扫描（任何 MongoDB/网络副作用之前 fail closed）；
+    - `FeishuUserMapper`（[feishu_user_mapping.py](ci_owner_agent/services/feishu_user_mapping.py)）解析 open_id `@`，无映射降级姓名文本，不猜身份；
+    - `format_feishu_notice_payload`（[feishu_notification_formatter.py](ci_owner_agent/services/feishu_notification_formatter.py)）渲染飞书 `post` 富文本；
+    - `store.notification_sent`（`channel=feishu`）去重 → `send_feishu_payload`（[feishu_notifier.py](ci_owner_agent/services/feishu_notifier.py)，可选官方签名；返回仅保留 HTTP 状态、数值业务码和受控错误类别，不保留原始响应正文）POST 测试群 → `save_notification`（`channel=feishu`）；
+    - 企微与飞书互不影响，任一失败只打 WARNING，不改写 notice；飞书本期**不生成反馈码、不做卡片交互**（反馈闭环留待后续独立任务）。
 
-> **产出（对外，链路终点）**：notice 写 `--output-file` 或 stdout；若 `--notify`，再产出企微 Markdown 通知 + 反馈码 `CI-XXXXXX`（写 `ci_feedback_contexts`，TTL 30 天）——**反馈码是闭环的钥匙**：群里收到的人凭它提交"确认/纠正/标 flaky/no-owner"，写进 `ci_feedback`，下次历史预检变成 `feedbackOverride`，把"通知"和"历史修正"串成闭环（详见第 6 节）。
+> **产出（对外，链路终点）**：notice 写 `--output-file` 或 stdout；若 `--notify`，再产出企微 Markdown 通知 + 反馈码 `CI-XXXXXX`（写 `ci_feedback_contexts`，TTL 30 天）——**反馈码是闭环的钥匙**：群里收到的人凭它提交"确认/纠正/标 flaky/no-owner"，写进 `ci_feedback`，下次历史预检变成 `feedbackOverride`，把"通知"和"历史修正"串成闭环（详见第 6 节）。若 `CI_AGENT_FEISHU_NOTIFY_ENABLED=true`，再产出飞书 `post` 富文本消息（不含反馈码）。
 
 ### analyze-local 的差异
 
@@ -231,7 +237,7 @@ python -m ci_owner_agent <command>
 │   ├─ 历史：history_store(Mongo) / history_search / ai_history_search / history_no_owner / history_inheritance
 │   ├─ AI：failure_fact_ai / failure_fact_compare_ai / structured_output / llm_client
 │   ├─ 校验：scorer / responsibility_*_enricher
-│   ├─ 通知反馈：wecom_notice_service / notification_formatter / wecom_notification_routing / wecom_notifier / outbox / bot_worker / feedback_*
+│   ├─ 通知反馈：wecom_notice_service / notification_formatter / wecom_notification_routing / wecom_notifier / outbox / bot_worker / feedback_*；飞书单向通知：feishu_notice_service / feishu_notification_formatter / feishu_notifier / feishu_user_mapping
 │   └─ 统计周报：test_failure_stats / test_failure_priority / weekly_test_report_*
 │
 ├─ 工具层（Node）：ts-analyzer/（TS compiler API 静态分析，find_definitions / find_callers）
@@ -305,7 +311,7 @@ python -m ci_owner_agent <command>
 | `ci_wecom_pending_feedback`    | 群内待确认反馈                                                | confirmationCode / cardTaskId / eventKey / 状态机(pending→applying→applied/cancelled/stale) / applyLeaseUntil 60s 租约；TTL 7 天                                                 |
 | `ci_wecom_bot_events`          | 机器人消息幂等与处理租约                                      | eventKey 唯一 / status(processing→completed/failed) / leaseUntil；TTL 7 天                                                                                                        |
 | `ci_wecom_notification_outbox` | **Bot 通知队列**                                        | deliveryKey 唯一 / status(pending→sending→sent/dead) / attemptCount / nextAttemptAt（指数退避）/ leaseUntil 30s；无 TTL                                                          |
-| `ci_notifications`             | Webhook 直发记录与去重                                        | `(repo,job,branch,buildNumber,noticeHash,channel)` / status(sent/failed，**成功后永不降级**) / messagePreview / lastAttemptStatus                                          |
+| `ci_notifications`             | Webhook 直发记录与去重（企微 `channel=wecom` 与飞书 `channel=feishu` 各自隔离） | `(repo,job,branch,buildNumber,noticeHash,channel)` / status(sent/failed，**成功后永不降级**) / messagePreview / lastAttemptStatus                                          |
 | `ci_report_notifications`      | 周报通知去重                                                  | `(notificationType,repo,job,branch,periodStart,periodEnd,channel)` 唯一                                                                                                          |
 
 写入时机：`save_analysis` 一次性写 builds + notices + chunks + test_file_failures（构建分析后）；`save_failure_facts` 写 facts；`notify_notice` 写 notices 快照 + feedback_contexts + notifications/outbox；`feedback apply`/机器人写 feedback；周报写 report_notifications。

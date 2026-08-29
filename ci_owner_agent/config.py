@@ -69,6 +69,14 @@ class Settings:
     wecom_bot_event_ttl_days: int
     wecom_bot_llm_enabled: bool
     wecom_bot_llm_max_input_chars: int
+    feishu_notify_enabled: bool
+    feishu_webhook_url: str | None
+    feishu_webhook_secret: str | None
+    feishu_notify_dry_run: bool
+    feishu_notify_on_success: bool
+    feishu_notify_on_no_owner: bool
+    feishu_user_mapping_file: Path | None
+    feishu_fallback_userids: tuple[str, ...]
     feedback_base_url: str | None
     feedback_server_host: str
     feedback_server_port: int
@@ -214,6 +222,16 @@ def load_settings(env_file: str | Path | None = None) -> Settings:
         wecom_bot_event_ttl_days=_int_env("CI_AGENT_WECOM_BOT_EVENT_TTL_DAYS", 7),
         wecom_bot_llm_enabled=_bool_env("CI_AGENT_WECOM_BOT_LLM_ENABLED", False),
         wecom_bot_llm_max_input_chars=_int_env("CI_AGENT_WECOM_BOT_LLM_MAX_INPUT_CHARS", 2000),
+        feishu_notify_enabled=_bool_env("CI_AGENT_FEISHU_NOTIFY_ENABLED", False),
+        feishu_webhook_url=(os.getenv("CI_AGENT_FEISHU_WEBHOOK_URL") or "").strip() or None,
+        feishu_webhook_secret=(os.getenv("CI_AGENT_FEISHU_WEBHOOK_SECRET") or "").strip() or None,
+        feishu_notify_dry_run=_bool_env("CI_AGENT_FEISHU_NOTIFY_DRY_RUN", True),
+        feishu_notify_on_success=_bool_env("CI_AGENT_FEISHU_NOTIFY_ON_SUCCESS", False),
+        feishu_notify_on_no_owner=_bool_env("CI_AGENT_FEISHU_NOTIFY_ON_NO_OWNER", True),
+        feishu_user_mapping_file=Path(os.getenv("CI_AGENT_FEISHU_USER_MAPPING_FILE")).expanduser()
+        if os.getenv("CI_AGENT_FEISHU_USER_MAPPING_FILE")
+        else None,
+        feishu_fallback_userids=_parse_fallback_userids(os.getenv("CI_AGENT_FEISHU_FALLBACK_USER_IDS")),
         feedback_base_url=os.getenv("CI_AGENT_FEEDBACK_BASE_URL") or None,
         feedback_server_host=os.getenv("CI_AGENT_FEEDBACK_SERVER_HOST", "127.0.0.1"),
         feedback_server_port=_int_env_or_default("CI_AGENT_FEEDBACK_SERVER_PORT", 8765),
@@ -251,6 +269,11 @@ def public_settings(settings: Settings) -> dict[str, object]:
     data["wecom_bot_secret"] = "***" if settings.wecom_bot_secret else None
     data["wecom_webhook_url"] = "***" if settings.wecom_webhook_url else None
     data["wecom_bot_notify_chat_id"] = "***" if settings.wecom_bot_notify_chat_id else None
+    data["feishu_webhook_url"] = "***" if settings.feishu_webhook_url else None
+    data["feishu_webhook_secret"] = "***" if settings.feishu_webhook_secret else None
+    data["feishu_user_mapping_file"] = str(settings.feishu_user_mapping_file) if settings.feishu_user_mapping_file else None
+    # 飞书用户标识（open_id）属 PRD R4 敏感配置，公开输出脱敏。
+    data["feishu_fallback_userids"] = ["***"] if settings.feishu_fallback_userids else []
     data["wecom_bot_llm_max_input_chars"] = settings.wecom_bot_llm_max_input_chars
     data["repo_cache_dir"] = str(settings.repo_cache_dir)
     data["ts_analyzer_dir"] = str(settings.ts_analyzer_dir)
