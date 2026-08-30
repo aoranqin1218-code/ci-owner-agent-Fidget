@@ -412,7 +412,7 @@ metrics 包含总耗时、阶段耗时、LLM calls、provider 返回的 token us
 
 测试维护人不是失败责任人。no-owner 责任项仍保持 `no_high_confidence_owner / 无高可信责任人`，维护人只显示在通知的“待确认维护人”区域。
 
-CI 通知默认使用群机器人 Webhook。`userid` 映射成功时 Markdown 继续生成 `<@userid>`，Webhook 能在企业微信群中呈现蓝色真实成员 @。智能机器人与通知 transport 相互独立：即使 CI 通知使用 Webhook，机器人仍可处理文本反馈、模板卡片、AI 解析和二次确认。需要保留原有主动 Bot 通知链路时设置 `CI_AGENT_WECOM_NOTIFY_TRANSPORT=bot`。
+CI 通知默认使用群机器人 Webhook。`userid` 映射成功时 Markdown 继续生成 `<@userid>`，Webhook 能在企业微信群中呈现蓝色真实成员 @。Webhook 对瞬时连接异常做最多 3 次有限重试；HTTP 响应、企业微信业务错误和可能已送达的读取超时不重试，避免无界重试或明显重复。最终失败仍不覆盖 notice，但会输出 WARNING、写入 metrics warnings，并在 MongoDB 可用时保存失败尝试，后续可用同一 notice 正常补发。智能机器人与通知 transport 相互独立：即使 CI 通知使用 Webhook，机器人仍可处理文本反馈、模板卡片、AI 解析和二次确认。需要保留原有主动 Bot 通知链路时设置 `CI_AGENT_WECOM_NOTIFY_TRANSPORT=bot`。
 
 验收通过的推荐部署方式是：群机器人 Webhook 负责 CI 主动通知，长连接智能机器人负责群内反馈。Webhook 模式可以在未启用 MongoDB 时直接发送；启用 MongoDB 后会额外保存 notice 快照、反馈码、去重状态和发送尝试记录。真实群聊验收应确认 `<@userid>` 被客户端渲染为蓝色成员 @，而不是只检查原始 Markdown 文本。
 
@@ -1209,7 +1209,7 @@ token 只累计 provider 实际返回的 usage，不估算缺失值。
 analyze / notify-notice / weekly-test-report
   -> 格式化同一份 Markdown（保留 <@userid>）
   -> 可选 MongoDB 去重
-  -> 企业微信群机器人 Webhook 直发
+  -> 企业微信群机器人 Webhook 直发（连接异常最多 3 次有限重试）
   -> 保存 sent / failed 结果（MongoDB 可用时）
 ```
 
@@ -1299,7 +1299,7 @@ Windows 专属进程终止分支通过平台无关 mock 单测验证；POSIX des
 5. **fake provider 不做正式定责**：它用于验证流程和测试，结果固定保守。
 6. **history 关闭会禁用多项能力**：反馈、周报、测试文件统计、Outbox 和机器人均要求 MongoDB history store；Webhook 直发仍可使用，但不会持久化去重和反馈上下文。
 7. **默认通知是 dry-run**：`.env.example` 中 `CI_AGENT_WECOM_NOTIFY_DRY_RUN=true`。真实通知前必须显式关闭，并按 transport 配置 Webhook URL 或 Bot chatid。
-8. **分析通知失败不会覆盖 notice**：`analyze` / `analyze-local` 将通知异常降级为 warning；独立 `notify-notice` 和 `weekly-test-report` 会以非零状态报告通知失败。
+8. **分析通知失败不会覆盖 notice**：`analyze` / `analyze-local` 将通知异常降级为 stderr warning，并把脱敏原因写入 metrics warnings；独立 `notify-notice` 和 `weekly-test-report` 会以非零状态报告通知失败。Webhook 的连接异常会先做最多 3 次有限重试。
 9. **success marker 不是安全签名**：它保证失败执行和残留产物不会被误 resume，但不能防御有输出目录写权限的攻击者。
 10. **批处理默认 fail-closed**：旧 notice、marker、stdout、stderr、trace 或 metrics 无法清理时，不会启动当前子进程。
 11. **timeout 后产物不可信**：notice、owner、责任项、metrics 和 trace 都不作为成功结果。

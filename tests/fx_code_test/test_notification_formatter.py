@@ -14,6 +14,7 @@ from ci_owner_agent.services.notification_formatter import (
     responsibility_type_icon,
     source_build_label,
 )
+from ci_owner_agent.services.metrics import AnalysisMetricsRecorder, use_metrics_recorder
 from ci_owner_agent.services.wecom_notification_routing import (
     collect_responsible_display_names,
     notification_digest,
@@ -576,6 +577,33 @@ def test_maybe_notify_allows_item_owner_when_no_owner_notify_disabled(monkeypatc
     _maybe_notify_notice(notice, settings, cli_notify=True, cli_dry_run=True, force=False)
 
     assert len(calls) == 1
+
+
+def test_maybe_notify_records_sanitized_failure_in_metrics(monkeypatch):
+    notice = CiResponsibilityNotice.model_validate(notice_payload([item()]))
+    settings = replace(load_settings(), wecom_notify_enabled=True)
+    recorder = AnalysisMetricsRecorder.start(
+        enabled=True,
+        job=notice.job,
+        buildNumber=notice.buildNumber,
+        repo=notice.repo or "repo",
+        command="analyze",
+    )
+    monkeypatch.setattr(
+        "ci_owner_agent.services.wecom_notice_service.notify_notice",
+        lambda *args, **kwargs: {
+            "ok": False,
+            "status": "failed",
+            "transport": "webhook",
+            "error": "WeCom webhook request failed: ConnectionError",
+        },
+    )
+
+    with use_metrics_recorder(recorder):
+        result = _maybe_notify_notice(notice, settings, cli_notify=False, cli_dry_run=False, force=False)
+
+    assert result and result["status"] == "failed"
+    assert recorder.warnings == ["WeCom notification failed: WeCom webhook request failed: ConnectionError"]
 
 
 def test_env_enabled_notify_skips_success_by_default(monkeypatch):

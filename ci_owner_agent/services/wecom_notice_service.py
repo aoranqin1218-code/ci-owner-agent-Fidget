@@ -31,13 +31,13 @@ def maybe_notify_notice(
     cli_notify: bool,
     cli_dry_run: bool,
     force: bool,
-) -> None:
+) -> dict | None:
     if not (cli_notify or settings.wecom_notify_enabled):
-        return
+        return None
     if notice.result == "SUCCESS" and not settings.wecom_notify_on_success:
-        return
+        return None
     if not settings.wecom_notify_on_no_owner and not _has_responsible_item_owner(notice):
-        return
+        return None
     try:
         result = notify_notice(
             notice,
@@ -47,10 +47,21 @@ def maybe_notify_notice(
             feedback_base_url=settings.feedback_base_url,
         )
     except Exception:
+        warning = "WeCom notification failed unexpectedly"
+        _record_notification_warning(warning)
         print("WARNING: notify failed unexpectedly", file=sys.stderr)
-        return
+        return {"ok": False, "status": "failed", "transport": settings.wecom_notify_transport, "error": warning}
     if not result.get("ok"):
+        warning = f"WeCom notification failed: {result.get('error') or 'unknown error'}"
+        _record_notification_warning(warning)
         print(f"WARNING: notify failed: {result.get('error')}", file=sys.stderr)
+    return result
+
+
+def _record_notification_warning(warning: str) -> None:
+    recorder = current_metrics_recorder()
+    if recorder is not None and recorder.enabled:
+        recorder.warnings.append(warning)
 
 
 def notify_notice(

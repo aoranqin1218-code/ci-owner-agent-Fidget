@@ -197,15 +197,15 @@ python -m ci_owner_agent <command>
 > **这个阶段在干嘛（大白话）**：把结论送出去——notice 写文件或屏幕；若开启通知，生成反馈码、渲染企业微信 Markdown，走 Webhook 直发或 Bot 队列投递，并在群里收集人工反馈形成闭环。
 
 19. CLI 把 notice 原子写 `--output-file`（UTF-8）或 stdout。
-20. 若 `--notify`：`wecom_notice_service.maybe_notify_notice` → `notify_notice`（[wecom_notice_service.py](ci_owner_agent/services/wecom_notice_service.py)）：
+20. 若传入 `--notify` 或 `CI_AGENT_WECOM_NOTIFY_ENABLED=true`：`wecom_notice_service.maybe_notify_notice` → `notify_notice`（[wecom_notice_service.py](ci_owner_agent/services/wecom_notice_service.py)）：
     - `upsert_notice_snapshot`（[history_store.py](ci_owner_agent/services/history_store.py)）写 `ci_notices`；
     - `FeedbackContextStore.get_or_create_for_notice`（[feedback_context_store.py](ci_owner_agent/services/feedback_context_store.py)）生成**反馈码 `CI-XXXXXX`**（写 `ci_feedback_contexts`，TTL 30 天）；
     - `format_wecom_markdown_notice`（[notification_formatter.py](ci_owner_agent/services/notification_formatter.py)）渲染企微 Markdown（含 `<@userid>` @ 人、反馈码、反馈链接）；
     - [wecom_notification_routing.py](ci_owner_agent/services/wecom_notification_routing.py) 计算当前企微维护人路由和 `notification_digest` 去重摘要；
     - **两条投递链路**：
-      - **Webhook 直发**：`store.notification_sent` 去重 → `send_wecom_markdown`（[wecom_notifier.py](ci_owner_agent/services/wecom_notifier.py)）POST 群机器人 → `save_notification` 落 `ci_notifications`；
+      - **Webhook 直发**：`store.notification_sent` 去重 → `send_wecom_markdown`（[wecom_notifier.py](ci_owner_agent/services/wecom_notifier.py)）POST 群机器人；瞬时连接异常最多有限重试 3 次，HTTP/业务错误和读取超时不重试 → `save_notification` 落 `ci_notifications`；
       - **Bot Outbox**：`WeComNotificationOutbox.enqueue_markdown` 入队 `ci_wecom_notification_outbox` → 常驻 `serve-wecom-bot` Worker 轮询领取（租约 30s）→ SDK 长连接主动推送 → 成功 `mark_sent` / 失败退避重试 5 次后 `dead`。
-    - **设计红线：通知失败不推翻定责**——`maybe_notify_notice` 里投递异常只打 WARNING，notice 结论不受通知成败影响（投递坏了 ≠ 判错了）。
+    - **设计红线：通知失败不推翻定责**——`maybe_notify_notice` 里最终投递异常只打 WARNING，并把脱敏原因写入 metrics warnings；notice 结论不受通知成败影响（投递坏了 ≠ 判错了）。
 21. 若 `CI_AGENT_FEISHU_NOTIFY_ENABLED=true`：`feishu_notice_service.maybe_notify_notice` → `notify_notice`（[feishu_notice_service.py](ci_owner_agent/services/feishu_notice_service.py)）作为**独立下游副作用**（`--notify` 不触发飞书）：
     - `_find_plaintext_secrets` 发送前敏感扫描（任何 MongoDB/网络副作用之前 fail closed）；
     - `FeishuUserMapper`（[feishu_user_mapping.py](ci_owner_agent/services/feishu_user_mapping.py)）解析 open_id `@`，无映射降级姓名文本，不猜身份；

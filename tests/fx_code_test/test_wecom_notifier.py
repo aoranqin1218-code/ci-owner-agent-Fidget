@@ -57,9 +57,46 @@ def test_send_wecom_markdown_requires_exact_http_200(monkeypatch):
 
 def test_send_wecom_markdown_network_error_is_structured_and_redacted(monkeypatch):
     url = "https://example.test/secret-key"
+    calls = []
     def fail(*args, **kwargs):
+        calls.append(1)
         raise requests.ConnectionError(f"unable to reach {url}")
     monkeypatch.setattr("ci_owner_agent.services.wecom_notifier.requests.post", fail)
+    monkeypatch.setattr("ci_owner_agent.services.wecom_notifier.time.sleep", lambda _: None)
     result = send_wecom_markdown(url, "private markdown")
     assert result["ok"] is False and result["statusCode"] is None and result["response"] is None
+    assert result["attemptCount"] == 3 and len(calls) == 3
     assert url not in result["error"] and "private markdown" not in result["error"]
+
+
+def test_send_wecom_markdown_retries_connection_error_then_succeeds(monkeypatch):
+    outcomes = [requests.ConnectionError("temporary DNS failure"), _Response()]
+    sleeps = []
+
+    def post(*args, **kwargs):
+        outcome = outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr("ci_owner_agent.services.wecom_notifier.requests.post", post)
+    monkeypatch.setattr("ci_owner_agent.services.wecom_notifier.time.sleep", sleeps.append)
+
+    result = send_wecom_markdown("https://example.test/secret", "private markdown")
+
+    assert result["ok"] is True and result["attemptCount"] == 2
+    assert sleeps == [0.25]
+
+
+def test_send_wecom_markdown_does_not_retry_read_timeout(monkeypatch):
+    calls = []
+
+    def post(*args, **kwargs):
+        calls.append(1)
+        raise requests.ReadTimeout("response was not received")
+
+    monkeypatch.setattr("ci_owner_agent.services.wecom_notifier.requests.post", post)
+    result = send_wecom_markdown("https://example.test/secret", "private markdown")
+
+    assert result["ok"] is False and result["attemptCount"] == 1
+    assert len(calls) == 1
