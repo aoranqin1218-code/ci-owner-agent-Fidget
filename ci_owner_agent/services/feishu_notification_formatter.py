@@ -20,6 +20,7 @@ from ci_owner_agent.services.notification_formatter import (
     format_item_owner_label,
     format_item_title,
     is_continuing_coverage_item,
+    is_coverage_failure_item,
     public_single_line,
     responsibility_item_icon,
     responsibility_item_label,
@@ -47,6 +48,12 @@ _REASON_POINT_BREAK_RE = re.compile(
     r"(?:\r?\n)+|[；;。]+|[:：](?=[A-Za-z][A-Za-z0-9]*-\d+\b)"
 )
 _FAILURE_TITLE_RE = re.compile(r"^(?P<id>[A-Za-z][A-Za-z0-9]*-\d+)\s*[:：]\s*(?P<title>.+)$")
+_FAILURE_CATEGORY_ORDER = ("unit", "integration", "coverage")
+_FAILURE_CATEGORY_LABELS = {
+    "unit": "单元测试",
+    "integration": "集成测试",
+    "coverage": "覆盖率",
+}
 
 
 @dataclass(frozen=True)
@@ -165,12 +172,84 @@ def _evidence_points(value: str) -> list[str]:
     return normalized
 
 
+def _is_acceptance_retention_note(value: str) -> bool:
+    text = _public_text(value).lower()
+    acceptance_context = "验收场景" in text or ("验收" in text and "编排改动" in text)
+    retention_evaluation = "是否保留" in text or ("评估" in text and "保留" in text)
+    return acceptance_context and retention_evaluation
+
+
 def _suggestion_points(values: list[str]) -> list[str]:
-    return [
-        _semantic_clip(value, FEISHU_SUGGESTION_POINT_MAX_CHARS)
-        for value in values[:FEISHU_SUGGESTION_MAX_POINTS]
-        if _public_text(value)
-    ]
+    points: list[str] = []
+    for value in values:
+        cleaned = _public_text(value)
+        if not cleaned or _is_acceptance_retention_note(cleaned):
+            continue
+        points.append(_semantic_clip(cleaned, FEISHU_SUGGESTION_POINT_MAX_CHARS))
+        if len(points) >= FEISHU_SUGGESTION_MAX_POINTS:
+            break
+    return points
+
+
+def _failure_category(item: ResponsibilityItem) -> str:
+    if is_coverage_failure_item(item):
+        return "coverage"
+    identity = " ".join(
+        str(value or "")
+        for value in (
+            item.failureSignature,
+            item.testFilePath,
+            item.failureFilePath,
+            item.failureTitle,
+        )
+    ).replace("\\", "/").lower()
+    integration_markers = (
+        "test/integration/",
+        "integration_",
+        "integration-",
+        "select-integration",
+        "integration tests",
+        "集成测试",
+    )
+    return "integration" if any(marker in identity for marker in integration_markers) else "unit"
+
+
+def _failure_cause_point(item: ResponsibilityItem, category: str) -> str:
+    if category == "coverage":
+        return _semantic_clip(format_item_title(item, FEISHU_REASON_POINT_MAX_CHARS), FEISHU_REASON_POINT_MAX_CHARS)
+
+    raw_title = _public_text(item.failureTitle)
+    title_match = _FAILURE_TITLE_RE.match(raw_title)
+    if title_match:
+        label = title_match.group("id")
+    elif category == "unit" and (item.testFilePath or item.failureFilePath):
+        path = str(item.testFilePath or item.failureFilePath).replace("\\", "/")
+        label = re.sub(r"\.[^.]+$", "", path.rsplit("/", 1)[-1]) or raw_title
+    else:
+        label = raw_title
+
+    detail = _public_text(item.failureSummary or item.reason)
+    if detail and detail not in {label, raw_title}:
+        return _semantic_clip(f"{label}：{detail}", FEISHU_REASON_POINT_MAX_CHARS)
+    return _semantic_clip(raw_title or detail, FEISHU_REASON_POINT_MAX_CHARS)
+
+
+def _grouped_failure_causes(notice: CiResponsibilityNotice) -> list[tuple[str, list[str]]]:
+    grouped: dict[str, list[ResponsibilityItem]] = {key: [] for key in _FAILURE_CATEGORY_ORDER}
+    for item in notice.responsibilityItems:
+        grouped[_failure_category(item)].append(item)
+
+    result: list[tuple[str, list[str]]] = []
+    for category in _FAILURE_CATEGORY_ORDER:
+        items = grouped[category]
+        if not items:
+            continue
+        points = [_failure_cause_point(item, category) for item in items[:FEISHU_REASON_MAX_POINTS]]
+        omitted = len(items) - len(points)
+        if omitted > 0:
+            points.append(f"另有 {omitted} 项，详见责任明细")
+        result.append((_FAILURE_CATEGORY_LABELS[category], points))
+    return result
 
 
 def format_feishu_notice_payload(
@@ -244,19 +323,21 @@ def _build_payload(
     overview.append(_markdown_text(_stats_line(notice)))
     elements.append(_markdown("\n".join(overview)))
 
-    if notice.failureReason and notice.failureReason.strip():
-        reason_points = _semantic_points(
-            notice.failureReason,
-            max_points=FEISHU_REASON_MAX_POINTS,
-            max_chars=FEISHU_REASON_POINT_MAX_CHARS,
-            split_before_failure_id=True,
-        )
+    if (notice.failureReason and notice.failureReason.strip()) or notice.responsibilityItems:
         reason_lines = ["**🔎 失败原因**"]
-        if reason_points:
-            # 第一条是总述，不伪装成与 F-xxxx/O-xxxx 并列的失败项；标题后紧跟内容。
-            reason_lines.append(_markdown_text(reason_points[0]))
-            if len(reason_points) > 1:
-                reason_lines.extend(f"• {_markdown_text(point)}" for point in reason_points[1:])
+        grouped_causes = _grouped_failure_causes(notice)
+        if grouped_causes:
+            for category_label, points in grouped_causes:
+                reason_lines.append(f"**{category_label}：**")
+                reason_lines.extend(f"• {_markdown_text(point)}" for point in points)
+        else:
+            reason_points = _semantic_points(
+                notice.failureReason,
+                max_points=FEISHU_REASON_MAX_POINTS,
+                max_chars=FEISHU_REASON_POINT_MAX_CHARS,
+                split_before_failure_id=True,
+            )
+            reason_lines.extend(f"• {_markdown_text(point)}" for point in reason_points)
         elements.append(_markdown("\n".join(reason_lines)))
 
     items = notice.responsibilityItems

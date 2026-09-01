@@ -1003,11 +1003,10 @@ def test_multi_failure_no_owner_short_circuit_routes_each_test_maintainer(monkey
 
     assert len(notice.responsibilityItems) == 2
     assert [item.testFilePath for item in notice.responsibilityItems] == ["test/view/ViewTest.ts", "test/quota/QuotaTest.ts"]
-    assert "**待确认维护人**：<@charlie>、<@mars>" in markdown
     assert "📁 测试文件：test/view/ViewTest.ts" in markdown
-    assert "📣 待确认维护人：<@charlie>" in markdown
+    assert "📣 **待确认维护人**：<@charlie>" in markdown
     assert "📁 测试文件：test/quota/QuotaTest.ts" in markdown
-    assert "📣 待确认维护人：<@mars>" in markdown
+    assert "📣 **待确认维护人**：<@mars>" in markdown
 
 
 def test_ai_no_owner_decisions_build_one_item_per_current_fact():

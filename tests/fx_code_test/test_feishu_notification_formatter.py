@@ -205,6 +205,9 @@ def test_coverage_item_rendered_as_coverage_label():
     payload, _ = format_payload(notice, owner_open_ids={"秦奥然": "ou_cov"})
     text = all_text(payload)
     assert "覆盖率未达标" in text
+    assert "**覆盖率：**" in text
+    assert "**单元测试：**" not in text
+    assert "**集成测试：**" not in text
     assert "责任人（中等置信）：秦奥然" in text
 
 
@@ -246,10 +249,11 @@ def test_section_titles_tightly_follow_content_with_no_blank_lines():
     reason = next(el for el in markdown if el["content"].startswith("**🔎 失败原因**"))
     reason_lines = reason["content"].splitlines()
     assert reason_lines[0] == "**🔎 失败原因**"
-    assert reason_lines[1].startswith("本 build 共 2 个失败")
-    assert not reason_lines[1].startswith("•")
-    assert reason_lines[2].startswith("• F-1")
-    assert reason_lines[3].startswith("• F-2")
+    assert reason_lines[1] == "**单元测试：**"
+    assert all(line.startswith("• ") for line in reason_lines[2:])
+    assert reason_lines[2].startswith("• F-100：")
+    assert reason_lines[3].startswith("• F-2：")
+    assert "本 build 共 2 个失败" not in reason["content"]
     assert "" not in reason_lines
 
     items = [el for el in markdown if "**🔥 当前引入｜" in el["content"]]
@@ -291,22 +295,31 @@ def test_payload_respects_byte_budget():
     assert len(json.dumps(payload, ensure_ascii=False).encode("utf-8")) <= FEISHU_POST_MAX_JSON_BYTES
 
 
-def test_failure_reason_and_suggestions_appear_in_payload():
+def test_failure_reason_uses_only_categories_that_have_failures():
     notice = CiResponsibilityNotice.model_validate(
         notice_payload(
             [no_owner_item()],
             failureReason="本次构建多个模块编译失败，导致单元测试无法运行。",
-            suggestions=["先修复编译错误，再重跑全量单测。", "若为环境问题，检查依赖安装是否完整。"],
+            suggestions=[
+                "先修复编译错误，再重跑全量单测。",
+                "若为环境问题，检查依赖安装是否完整。",
+                "ci/Jenkinsfile.v2 中 catchError 允许单元失败后继续跑集成测试属于验收场景编排改动，正式仓库需评估是否保留。",
+                "修复 ci/Jenkinsfile.v2 的括号语法错误。",
+            ],
         )
     )
     payload, _ = format_payload(notice)
     text = all_text(payload)
     assert "**🔎 失败原因**" in text
-    assert "本次构建多个模块编译失败，导致单元测试无法运行" in text
-    assert "• 本次构建多个模块编译失败" not in text
+    assert "**单元测试：**" in text
+    assert "**集成测试：**" not in text
+    assert "**覆盖率：**" not in text
+    assert "• T-1：证据不足，无法确定高可信责任人" in text
     assert "**🛠️ 修复建议**" in text
     assert "• 先修复编译错误，再重跑全量单测。" in text
     assert "• 若为环境问题，检查依赖安装是否完整。" in text
+    assert "验收场景编排改动" not in text
+    assert "• 修复 ci/Jenkinsfile.v2 的括号语法错误。" in text
 
 
 def test_reason_and_evidence_are_split_into_key_points():
@@ -337,16 +350,78 @@ def test_reason_and_evidence_are_split_into_key_points():
     )
     reason_lines = reason_section.splitlines()
     assert reason_lines[0] == "**🔎 失败原因**"
-    assert reason_lines[1].startswith("本 build 共 2 个失败")
-    assert not reason_lines[1].startswith("•")
-    assert reason_lines[2].startswith("• F-1003 由聚合路由改动引起")
-    assert reason_lines[3].startswith("• O-0503 由 OID 包装改动引起")
-    assert "• F-1003 由聚合路由改动引起" in text
-    assert "• O-0503 由 OID 包装改动引起" in text
+    assert reason_lines[1] == "**单元测试：**"
+    assert len(reason_lines) == 3
+    assert reason_lines[2].startswith("• F-1003：")
+    assert "本 build 共 2 个失败" not in reason_section
     assert "🔥 当前引入｜F-1003：Group by main field" in text
     assert "• 日志：期望结果包含 sum_score，实际结果缺失" in text
     assert "• 代码：渲染器过滤了主字段聚合" in text
     assert "测试：原有测试要求" not in text  # 每项只保留最关键的日志与代码两点
+
+
+def test_failure_reason_groups_unit_integration_and_coverage_without_total_summary():
+    unit = current_item(title="should expose a deterministic assertion failure")
+    unit.update(
+        {
+            "failureId": "failure-unit",
+            "failureSummary": "AssertionError: expected actual to equal expected",
+            "testFilePath": "test/CiOwnerAgentControlledFailureTest.ts",
+            "failureFilePath": "test/CiOwnerAgentControlledFailureTest.ts",
+        }
+    )
+    integration_a = inherited_item()
+    integration_a.update(
+        {
+            "failureId": "failure-integration-a",
+            "failureTitle": "F-1003: Group by main field",
+            "failureSummary": "聚合结果缺失 sum_score 列",
+            "testFilePath": "test/integration/assertion/AssertUtils.ts",
+            "failureFilePath": "test/integration/assertion/AssertUtils.ts",
+        }
+    )
+    integration_b = inherited_item()
+    integration_b.update(
+        {
+            "failureId": "failure-integration-b",
+            "failureTitle": "O-0503: CaseWhenProjection OID",
+            "failureSummary": "case_record_oid 出现 bytea 前缀",
+            "testFilePath": "test/integration/assertion/AssertUtils.ts",
+            "failureFilePath": "test/integration/assertion/AssertUtils.ts",
+        }
+    )
+    coverage = current_item(title="coverage branches below threshold for src/SqlUtils.ts", medium=True)
+    coverage.update(
+        {
+            "failureId": "failure-coverage",
+            "failureSignature": "coverage_threshold_failure|packages/fidget-sql/src/sqlutils.ts",
+            "failureFilePath": "packages/fidget-sql/src/SqlUtils.ts",
+        }
+    )
+    notice = CiResponsibilityNotice.model_validate(
+        notice_payload(
+            [unit, integration_a, integration_b, coverage],
+            failureReason="本 build 含 4 个独立失败项：总述不应混入任一分类。",
+        )
+    )
+
+    payload, _ = format_payload(notice)
+    reason_section = next(
+        element["content"]
+        for element in payload["card"]["body"]["elements"]
+        if element.get("content", "").startswith("**🔎 失败原因**")
+    )
+    lines = reason_section.splitlines()
+
+    assert lines[0] == "**🔎 失败原因**"
+    assert lines[1] == "**单元测试：**"
+    assert lines[2].startswith("• CiOwnerAgentControlledFailureTest：AssertionError")
+    assert lines[3] == "**集成测试：**"
+    assert lines[4] == "• F-1003：聚合结果缺失 sum\\_score 列"
+    assert lines[5] == "• O-0503：case\\_record\\_oid 出现 bytea 前缀"
+    assert lines[6] == "**覆盖率：**"
+    assert lines[7].startswith("• 覆盖率未达标：src/SqlUtils.ts")
+    assert "本 build 含 4 个独立失败项" not in reason_section
 
 
 def test_long_point_uses_explicit_jenkins_hint_instead_of_truncation_ellipsis():

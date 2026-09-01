@@ -9,6 +9,8 @@ from ci_owner_agent.schemas import CiResponsibilityNotice
 from ci_owner_agent.config import load_settings
 from ci_owner_agent.main import main
 from ci_owner_agent.services.notification_formatter import (
+    WECOM_SECTION_SPACERS,
+    WECOM_VISUAL_SPACER,
     format_wecom_markdown_notice,
     result_icon,
     responsibility_type_icon,
@@ -69,15 +71,56 @@ def item(owner_name="Tang.Tangerine-唐嘉伟", owner_type="inherited_failure_ow
     }
 
 
-def test_inherited_item_owner_is_mentioned_without_top_level_conclusion():
+def test_inherited_item_owner_is_mentioned_in_feishu_aligned_sections():
     notice = CiResponsibilityNotice.model_validate(notice_payload([item()]))
     markdown = format_wecom_markdown_notice(notice, feedback_base_url="http://ci-agent.test/feedback")
-    assert "### ❌ CI 单测失败 | services/fx-code-unittest #5099" in markdown
+    assert "### ❌ CI 构建失败 | services/fx-code-unittest #5099" in markdown
+    assert "**📋 构建概览**" in markdown
+    assert "**🔎 失败原因**" in markdown
+    assert "**👥 责任明细**" in markdown
+    assert markdown.index("**📋 构建概览**") < markdown.index("**🔎 失败原因**") < markdown.index("**👥 责任明细**")
+    assert WECOM_SECTION_SPACERS == (WECOM_VISUAL_SPACER,)
+    section_break = "\n".join(WECOM_SECTION_SPACERS)
+    assert f"\n{section_break}\n**🔎 失败原因**" in markdown
+    assert f"\n{section_break}\n**👥 责任明细**" in markdown
     assert "👤 **责任人**：@Tang.Tangerine-唐嘉伟" in markdown
-    assert "**原因**：" in markdown
-    assert "#### 📌 责任项" in markdown
     assert "顶层结论" not in markdown
     assert "顶层结论：无高可信责任人" not in markdown
+
+
+def test_failure_reasons_are_grouped_by_unit_and_integration_tests():
+    unit = item(test_file_path="packages/fidget-core/test/CiOwnerAgentControlledFailureTest.ts")
+    unit.update(
+        {
+            "failureTitle": "should expose a deterministic assertion failure for mixed-failure acceptance",
+            "failureSummary": "AssertionError: expected 'unit-stage-actual' to equal 'unit-stage-expected'",
+        }
+    )
+    first_integration = item(test_file_path="packages/fidget-sdk/test/integration/select-integration/F1003Test.ts")
+    first_integration.update(
+        {
+            "failureTitle": "F-1003: Group by main field + aggregate main field",
+            "failureSummary": "AssertionError: SharedPgObject expected values to deeply equal",
+        }
+    )
+    second_integration = item(test_file_path="packages/fidget-sdk/test/integration/select-integration/O0503Test.ts")
+    second_integration.update(
+        {
+            "failureTitle": "O-0503: CaseWhenProjection OID",
+            "failureSummary": "AssertionError: actual OID does not match expected object_id",
+        }
+    )
+
+    markdown = format_wecom_markdown_notice(
+        CiResponsibilityNotice.model_validate(notice_payload([unit, first_integration, second_integration]))
+    )
+    reason_section = markdown.split("**🔎 失败原因**", maxsplit=1)[1].split("**👥 责任明细**", maxsplit=1)[0]
+
+    assert "**单元测试：**" in reason_section
+    assert "• CiOwnerAgentControlledFailureTest：AssertionError: expected 'unit-stage-actual'" in reason_section
+    assert "**集成测试：**" in reason_section
+    assert "• F-1003：AssertionError: SharedPgObject expected values to deeply equal" in reason_section
+    assert "• O-0503：AssertionError: actual OID does not match expected object_id" in reason_section
 
 
 def test_failure_notice_uses_wecom_compatible_responsibility_icons():
@@ -102,9 +145,9 @@ def test_failure_notice_uses_wecom_compatible_responsibility_icons():
     assert "🧭" not in markdown
     assert "🧩" not in markdown
     assert "🧷" not in markdown
-    assert "**原因**：" in markdown
-    assert "#### 📌 责任项" in markdown
-    assert "   - 来源：#5094" in markdown
+    assert "**🔎 失败原因**" in markdown
+    assert "**👥 责任明细**" in markdown
+    assert "• 来源：#5094" in markdown
     assert "🔥 当前引入" in markdown
     assert "♻️ 历史持续" in markdown
     assert "❓ 待确认" in markdown
@@ -115,8 +158,8 @@ def test_failure_notice_without_items_uses_compatible_unknown_fallback():
 
     markdown = format_wecom_markdown_notice(notice)
 
-    assert "1. ❓ unknown | 未识别到独立责任项" in markdown
-    assert "   - 来源：-" in markdown
+    assert "**❓ 待确认｜未识别到独立责任项**" in markdown
+    assert "• 来源：-" in markdown
     assert "🧩" not in markdown
     assert "🧷" not in markdown
 
@@ -155,12 +198,14 @@ def test_source_build_label_for_current_and_inherited_owner():
     assert source_build_label(inherited_notice.responsibilityItems[0], inherited_notice) == "#5094"
 
 
-def test_multiple_responsible_names_are_deduplicated_in_order():
+def test_responsible_name_collection_is_deduplicated_but_items_keep_their_own_owner():
     notice = CiResponsibilityNotice.model_validate(
         notice_payload([item("Tang"), item("Tang"), item("Mars", "high_confidence", "current_build_owner", "新失败。", "mars@example.com")])
     )
     assert collect_responsible_display_names(notice) == ["Tang", "Mars"]
-    assert "👤 **责任人**：@Tang、@Mars" in format_wecom_markdown_notice(notice)
+    markdown = format_wecom_markdown_notice(notice)
+    assert markdown.count("👤 **责任人**：@Tang") == 2
+    assert markdown.count("👤 **责任人**：@Mars") == 1
 
 
 def test_no_item_owner_displays_no_high_confidence_owner():
@@ -178,9 +223,9 @@ def test_responsibility_type_labels_are_public_readable():
     markdown = format_wecom_markdown_notice(notice)
 
     assert "📌 **责任项**：共 3 项，当前引入 1，历史持续 1，待确认 1" in markdown
-    assert "🔥 当前引入 | EtlUtils - getInputEntryInfo" in markdown
-    assert "♻️ 历史持续 | EtlUtils - getInputEntryInfo" in markdown
-    assert "❓ 待确认 | EtlUtils - getInputEntryInfo" in markdown
+    assert "**🔥 当前引入｜EtlUtils - getInputEntryInfo**" in markdown
+    assert "**♻️ 历史持续｜EtlUtils - getInputEntryInfo**" in markdown
+    assert "**❓ 待确认｜EtlUtils - getInputEntryInfo**" in markdown
     assert "current_build_owner" not in markdown
     assert "inherited_failure_owner" not in markdown
     assert "no_high_confidence_owner" not in markdown
@@ -209,7 +254,7 @@ def test_coverage_item_is_rendered_in_chinese_without_changing_its_schema_data()
     markdown = format_wecom_markdown_notice(notice)
 
     assert "覆盖率未达标：src/generator/SqlUtils.ts（分支、行、语句）" in markdown
-    assert "责任人（中等置信）：@AoranQin-秦奥然" in markdown
+    assert "**责任人（中等置信）**：@AoranQin-秦奥然" in markdown
     assert "在本次责任排查范围内，仅 AoranQin-秦奥然 修改了 packages/fidget-sql/src/generator/SqlUtils.ts。" in markdown
     assert "coverage branches,lines,statements below threshold" not in markdown
     assert "single author AoranQin-秦奥然 modified" not in markdown
@@ -244,9 +289,9 @@ def test_mixed_failure_notice_distinguishes_continuing_coverage_and_includes_its
 
     assert "📌 **责任项**：共 2 项，当前引入 1，覆盖率持续 1" in markdown
     assert "其他 1" not in markdown
-    assert "🔥 当前引入 | EtlUtils - getInputEntryInfo" in markdown
-    assert "♻️ 覆盖率持续 | 覆盖率未达标：src/generator/SqlUtils.ts（分支、行、语句）" in markdown
-    assert "🛠️ 建议：补充 src/generator/SqlUtils.ts 中未覆盖分支的测试，使 分支、行、语句 达到配置阈值。" in markdown
+    assert "**🔥 当前引入｜EtlUtils - getInputEntryInfo**" in markdown
+    assert "**♻️ 覆盖率持续｜覆盖率未达标：src/generator/SqlUtils.ts（分支、行、语句）**" in markdown
+    assert "• 🛠️ 建议：补充 src/generator/SqlUtils.ts 中未覆盖分支的测试，使 分支、行、语句 达到配置阈值。" in markdown
     assert len(markdown.encode("utf-8")) <= 4096
 
 
@@ -273,14 +318,14 @@ def test_responsibility_item_owner_uses_mapper_userid_mention(tmp_path):
     mapper = WeComUserMapper.from_csv(path)
     notice = CiResponsibilityNotice.model_validate(notice_payload([item("Tang")]))
     markdown = format_wecom_markdown_notice(notice, user_mapper=mapper)
-    assert "   - 👤 责任人：<@tang.userid>" in markdown
+    assert "👤 **责任人**：<@tang.userid>" in markdown
 
 
 def test_unmapped_owner_fallback_to_name_mention():
     notice = CiResponsibilityNotice.model_validate(notice_payload([item("Tang")]))
     markdown = format_wecom_markdown_notice(notice, user_mapper=WeComUserMapper([]))
     assert "👤 **责任人**：@Tang" in markdown
-    assert "   - 👤 责任人：@Tang" in markdown
+    assert "👤 **责任人**：@Tang" in markdown
 
 
 def test_mention_mode_name_does_not_use_userid(tmp_path):
@@ -312,7 +357,7 @@ def test_system_fields_are_not_displayed():
 
 def test_item_reason_is_used_as_evidence():
     notice = CiResponsibilityNotice.model_validate(notice_payload([item(reason="当前 failure item 与历史构建 #5094 一致。")]))
-    assert "🔎 证据：当前 failure item 与历史构建 #5094 一致。" in format_wecom_markdown_notice(notice)
+    assert "• 依据：当前 failure item 与历史构建 #5094 一致。" in format_wecom_markdown_notice(notice)
 
 
 def test_empty_reason_falls_back_to_evidence_ids():
@@ -330,27 +375,27 @@ def test_suggestions_show_first_three_items():
 
     markdown = format_wecom_markdown_notice(notice)
 
-    assert "#### 🛠️ 修复建议" in markdown
-    assert "- 检查测试数据准备逻辑。" in markdown
-    assert "- 优先验证历史持续失败。" in markdown
-    assert "- 补充单测覆盖。" in markdown
+    assert "**🛠️ 修复建议**" in markdown
+    assert "• 检查测试数据准备逻辑。" in markdown
+    assert "• 优先验证历史持续失败。" in markdown
+    assert "• 补充单测覆盖。" in markdown
     assert "第四条不展示" not in markdown
 
 
 def test_suggestions_section_is_omitted_when_empty():
     notice = CiResponsibilityNotice.model_validate(notice_payload([item()]))
 
-    assert "#### 🛠️ 修复建议" not in format_wecom_markdown_notice(notice)
+    assert "**🛠️ 修复建议**" not in format_wecom_markdown_notice(notice)
 
 
 def test_result_icons_and_labels():
     expected = {
-        "SUCCESS": "### ✅ CI 单测成功",
-        "FAILURE": "### ❌ CI 单测失败",
-        "UNSTABLE": "### ⚠️ CI 单测不稳定",
-        "ABORTED": "### ⏹️ CI 单测中止",
-        "UNKNOWN": "### ❔ CI 单测未知",
-        "OTHER": "### ❔ CI 单测未知",
+        "SUCCESS": "### ✅ CI 构建成功",
+        "FAILURE": "### ❌ CI 构建失败",
+        "UNSTABLE": "### ⚠️ CI 构建不稳定",
+        "ABORTED": "### ⏹️ CI 构建中止",
+        "UNKNOWN": "### ❔ CI 构建未知",
+        "OTHER": "### ❔ CI 构建未知",
     }
     for result, title in expected.items():
         payload = notice_payload([item()])
@@ -363,7 +408,7 @@ def test_result_icons_and_labels():
 def test_build_and_feedback_links():
     notice = CiResponsibilityNotice.model_validate(notice_payload([item()]))
     markdown = format_wecom_markdown_notice(notice, feedback_base_url="http://ci-agent.xxx/feedback")
-    assert "#### 🔗 相关链接" in markdown
+    assert "**🔗 相关链接**" in markdown
     assert notice.buildUrl in markdown
     assert "🏗️ [查看 Jenkins 构建]" in markdown
     assert "📝 [提交反馈]" in markdown
@@ -391,8 +436,8 @@ def test_notify_notice_dry_run_outputs_markdown(tmp_path, capsys, monkeypatch):
     rc = main(["notify-notice", "--notice-file", str(notice_file), "--dry-run", "--feedback-base-url", "http://ci-agent.test/feedback"])
     out = capsys.readouterr().out
     assert rc == 0
-    assert "### ❌ CI 单测失败 | services/fx-code-unittest #5099" in out
-    assert "#### 🔗 相关链接" in out
+    assert "### ❌ CI 构建失败 | services/fx-code-unittest #5099" in out
+    assert "**🔗 相关链接**" in out
 
 
 def test_notify_notice_dry_run_uses_mapping_file(tmp_path, capsys, monkeypatch):
@@ -828,8 +873,8 @@ def test_fallback_userids_appended_when_no_owner():
     markdown = format_wecom_markdown_notice(notice, fallback_userids=("ci.owner", "team.leader"))
     assert "**责任人**：无高可信责任人" in markdown
     assert "**待确认维护人**：<@ci.owner>、<@team.leader>" in markdown
-    # Item detail line still shows no-owner without fallback
-    item_lines = [l for l in markdown.split("\n") if l.strip().startswith("- 👤 责任人")]
+    # 责任项中的 owner 仍保持 no-owner，不被兜底通知对象替代。
+    item_lines = [l for l in markdown.split("\n") if l.startswith("👤 **责任人**")]
     assert len(item_lines) >= 1
     assert "无高可信责任人" in item_lines[0]
     assert "ci.owner" not in item_lines[0]
@@ -854,7 +899,7 @@ def test_mixed_real_and_no_owner_keeps_real_owner_and_routes_no_owner():
     markdown = format_wecom_markdown_notice(notice, fallback_userids=("user001",))
     assert "**责任人**：@Tang" in markdown
     assert "**待确认维护人**：<@user001>" in markdown
-    assert "   - 👤 责任人：无高可信责任人" in markdown
+    assert "👤 **责任人**：无高可信责任人" in markdown
 
 
 def test_item_owner_still_shows_no_owner_with_fallback():
@@ -862,9 +907,8 @@ def test_item_owner_still_shows_no_owner_with_fallback():
     notice = CiResponsibilityNotice.model_validate(notice_payload([no_owner]))
     markdown = format_wecom_markdown_notice(notice, fallback_userids=("user001",))
     assert "**待确认维护人**：<@user001>" in markdown
-    # Item owner line still shows no high confidence owner (not fallback userid)
-    # Item lines have "   - 👤 责任人：" prefix
-    item_owner_lines = [line for line in markdown.split("\n") if line.strip().startswith("- 👤 责任人")]
+    # Item owner line still shows no high confidence owner (not fallback userid).
+    item_owner_lines = [line for line in markdown.split("\n") if line.startswith("👤 **责任人**")]
     assert len(item_owner_lines) >= 1
     assert "无高可信责任人" in item_owner_lines[0]
     assert "user001" not in item_owner_lines[0]
@@ -967,8 +1011,8 @@ def test_no_owner_notice_mentions_fallback_userids_at_top_and_item_route():
 
     assert " **责任人**：无高可信责任人" in markdown
     assert " **待确认维护人**：<@ci.owner>、<@team.leader>" in markdown
-    assert "   - 👤 责任人：无高可信责任人" in markdown
-    assert "   - 📣 待确认维护人：<@ci.owner>、<@team.leader>" in markdown
+    assert "👤 **责任人**：无高可信责任人" in markdown
+    assert "📣 **待确认维护人**：<@ci.owner>、<@team.leader>" in markdown
 
 
 def test_fallback_userids_are_not_used_when_real_owner_exists():
@@ -1011,7 +1055,7 @@ def test_notify_notice_passes_fallback_userids_from_settings(monkeypatch):
 
     assert "**责任人**：无高可信责任人" in result["markdown"]
     assert "**待确认维护人**：<@ci.owner>" in result["markdown"]
-    assert "   - 👤 责任人：无高可信责任人" in result["markdown"]
+    assert "👤 **责任人**：无高可信责任人" in result["markdown"]
 
 
 def _maintainer_resolver(tmp_path, maintainers=None, pattern="test/service/view/**"):
@@ -1090,7 +1134,7 @@ def test_no_owner_path_routes_multiple_maintainers_in_order(tmp_path):
     markdown = format_wecom_markdown_notice(notice, maintainer_resolver=resolver, repo="fx-code")
 
     assert "**待确认维护人**：<@charlie.guo>、<@henry>" in markdown
-    assert "   - 📣 待确认维护人：<@charlie.guo>、<@henry>" in markdown
+    assert "📣 **待确认维护人**：<@charlie.guo>、<@henry>" in markdown
 
 
 def test_unmatched_and_missing_test_path_route_fallback(tmp_path):
@@ -1124,10 +1168,11 @@ def test_unmatched_and_missing_test_path_route_fallback(tmp_path):
     assert "<@default.userid>" in unmatched_markdown
     assert "<@default.userid>" in missing_markdown
 
-    evidence_pos = unmatched_markdown.index("   - 🔎 证据：")
-    path_pos = unmatched_markdown.index("   - 📁 测试文件：")
-    maintainer_pos = unmatched_markdown.index("   - 📣 待确认维护人：")
-    reason_pos = unmatched_markdown.index("   - ℹ️ 路由说明：")
+    details = unmatched_markdown.split("**👥 责任明细**", maxsplit=1)[1]
+    evidence_pos = details.index("• 依据：")
+    path_pos = details.index("• 📁 测试文件：")
+    maintainer_pos = details.index("📣 **待确认维护人**：")
+    reason_pos = details.index("• ℹ️ 路由说明：")
     assert evidence_pos < path_pos < maintainer_pos < reason_pos
 
 
@@ -1141,7 +1186,8 @@ def test_multiple_no_owner_routes_are_deduplicated_and_mixed_owner_is_preserved(
     markdown = format_wecom_markdown_notice(notice, maintainer_resolver=resolver, repo="fx-code")
 
     assert "**责任人**：@Tang" in markdown
-    assert markdown.count("**待确认维护人**：<@charlie.guo>、<@henry>") == 1
+    details = markdown.split("**👥 责任明细**", maxsplit=1)[1]
+    assert details.count("📣 **待确认维护人**：<@charlie.guo>、<@henry>") == 2
     assert notice.responsibilityItems[1].owner.type == "no_high_confidence_owner"
 
 
@@ -1164,9 +1210,8 @@ def test_multiple_no_owner_items_route_to_different_maintainers(tmp_path):
         maintainer_resolver=TestMaintainerResolver.from_yaml(path),
     )
 
-    assert "**待确认维护人**：<@charlie>、<@mars>" in markdown
-    assert "   - 📣 待确认维护人：<@charlie>" in markdown
-    assert "   - 📣 待确认维护人：<@mars>" in markdown
+    assert "📣 **待确认维护人**：<@charlie>" in markdown
+    assert "📣 **待确认维护人**：<@mars>" in markdown
 
 
 def test_maintainer_name_mode_and_no_no_owner_item(tmp_path):

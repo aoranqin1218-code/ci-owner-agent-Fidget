@@ -4,7 +4,7 @@ from ci_owner_agent.schemas import CiResponsibilityNotice
 from ci_owner_agent.services.notification_formatter import format_wecom_markdown_notice
 
 
-def test_success_notification_only_keeps_title_and_jenkins_link():
+def test_success_notification_uses_the_same_overview_hierarchy_as_feishu():
     notice = CiResponsibilityNotice.model_validate(
         {
             "repo": "fx-code",
@@ -46,7 +46,11 @@ def test_success_notification_only_keeps_title_and_jenkins_link():
     )
 
     assert markdown == (
-        "### ✅ CI 单测成功 | services/fx-code-unittest #5205\n\n"
+        "### ✅ CI 构建成功 | services/fx-code-unittest #5205\n\n"
+        "**📋 构建概览**\n"
+        "• 项目：fx-code\n"
+        "• 流水线：services/fx-code-unittest\n"
+        "• 分支：dev\n\n"
         "🏗️ [查看 Jenkins 构建](https://jenkins.example/job/services/job/fx-code-unittest/5205/)"
     )
     assert "责任人" not in markdown

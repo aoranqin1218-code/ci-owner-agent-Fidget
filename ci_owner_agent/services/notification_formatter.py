@@ -7,9 +7,6 @@ from ci_owner_agent.constants import NO_OWNER_NAME
 from ci_owner_agent.schemas import CiResponsibilityNotice, EvidenceItem, Owner, ResponsibilityItem
 from ci_owner_agent.services.test_maintainer_mapping import TestMaintainer, TestMaintainerResolver
 from ci_owner_agent.services.wecom_notification_routing import (
-    collect_pending_maintainers as _collect_pending_maintainers,
-    collect_responsible_display_names,
-    collect_responsible_owners,
     notification_digest,
     resolve_test_maintainer_matches,
 )
@@ -34,6 +31,25 @@ COVERAGE_METRIC_LABELS = {
 
 
 WECOM_MAX_UTF8_BYTES = 4096
+# 企业微信会折叠纯空行。盲文空白不是 Markdown 空白字符，但视觉上不显示，
+# 可稳定占据一行高度，模拟飞书卡片区块间的 margin。
+WECOM_VISUAL_SPACER = "\u2800"
+# 一个视觉空行即可区分大区块，避免企业微信消息出现过大的留白。
+WECOM_SECTION_SPACERS = (WECOM_VISUAL_SPACER,)
+WECOM_REASON_POINT_MAX_CHARS = 150
+WECOM_REASON_MAX_POINTS = 3
+WECOM_LONG_TEXT_HINT = "（内容较长，详见 Jenkins）"
+
+_WECOM_REASON_POINT_BREAK_RE = re.compile(
+    r"(?:\r?\n)+|[；;。]+|[:：](?=[A-Za-z][A-Za-z0-9]*-\d+\b)"
+)
+_WECOM_FAILURE_TITLE_RE = re.compile(r"^(?P<id>[A-Za-z][A-Za-z0-9]*-\d+)\s*[:：]\s*(?P<title>.+)$")
+_WECOM_FAILURE_CATEGORY_ORDER = ("unit", "integration", "coverage")
+_WECOM_FAILURE_CATEGORY_LABELS = {
+    "unit": "单元测试",
+    "integration": "集成测试",
+    "coverage": "覆盖率",
+}
 
 
 def _utf8_bytes(text: str) -> int:
@@ -72,7 +88,7 @@ def _finalize_within_budget(
     separators = int(bool(head_text)) + int(bool(tail_text)) + 1
     middle_budget = WECOM_MAX_UTF8_BYTES - _utf8_bytes(omission) - protected_bytes - separators
     if middle_budget < 0:
-        # 极端情况下受保护字段本身已超预算：优先保留头部责任/@信息和省略提示。
+        # 极端情况下受保护字段本身已超预算：优先保留头部概览和省略提示。
         head_budget = WECOM_MAX_UTF8_BYTES - _utf8_bytes(omission) - 1
         return _truncate_utf8(head_text, max(0, head_budget)) + "\n" + omission
     middle_text = _truncate_utf8("\n".join(parts), middle_budget)
@@ -99,6 +115,112 @@ def _append_within_budget(lines: list[str], tail_lines: list[str], addition: lis
     return False
 
 
+def _wecom_public_text(value: str | None) -> str:
+    """Return public-safe one-line text without applying an arbitrary clip."""
+
+    raw = str(value or "")
+    return public_single_line(raw, max(1, len(raw) + 1))
+
+
+def _wecom_semantic_clip(value: str, max_chars: int) -> str:
+    """Keep failure bullets readable and point readers to Jenkins when clipped."""
+
+    cleaned = _wecom_public_text(value)
+    if len(cleaned) <= max_chars:
+        return cleaned
+    keep = max(1, max_chars - len(WECOM_LONG_TEXT_HINT))
+    prefix = cleaned[:keep]
+    boundary = max(prefix.rfind(mark) for mark in ("，", ",", "、", "：", ":"))
+    if boundary < keep // 2:
+        boundary = prefix.rfind(" ")
+    if boundary >= keep // 2:
+        prefix = prefix[:boundary]
+    return prefix.rstrip("，,、：:；;。 ") + WECOM_LONG_TEXT_HINT
+
+
+def _wecom_failure_category(item: ResponsibilityItem) -> str:
+    if is_coverage_failure_item(item):
+        return "coverage"
+    identity = " ".join(
+        str(value or "")
+        for value in (
+            item.failureSignature,
+            item.testFilePath,
+            item.failureFilePath,
+            item.failureTitle,
+        )
+    ).replace("\\", "/").lower()
+    integration_markers = (
+        "test/integration/",
+        "integration_",
+        "integration-",
+        "select-integration",
+        "integration tests",
+        "集成测试",
+    )
+    return "integration" if any(marker in identity for marker in integration_markers) else "unit"
+
+
+def _wecom_failure_cause_point(item: ResponsibilityItem, category: str) -> str:
+    if category == "coverage":
+        return _wecom_semantic_clip(
+            format_item_title(item, WECOM_REASON_POINT_MAX_CHARS),
+            WECOM_REASON_POINT_MAX_CHARS,
+        )
+
+    raw_title = _wecom_public_text(item.failureTitle)
+    title_match = _WECOM_FAILURE_TITLE_RE.match(raw_title)
+    if title_match:
+        label = title_match.group("id")
+    elif category == "unit" and (item.testFilePath or item.failureFilePath):
+        path = str(item.testFilePath or item.failureFilePath).replace("\\", "/")
+        label = re.sub(r"\.[^.]+$", "", path.rsplit("/", 1)[-1]) or raw_title
+    else:
+        label = raw_title
+
+    detail = _wecom_public_text(item.failureSummary or item.reason)
+    if detail and detail not in {label, raw_title}:
+        return _wecom_semantic_clip(f"{label}：{detail}", WECOM_REASON_POINT_MAX_CHARS)
+    return _wecom_semantic_clip(raw_title or detail, WECOM_REASON_POINT_MAX_CHARS)
+
+
+def _wecom_grouped_failure_causes(notice: CiResponsibilityNotice) -> list[tuple[str, list[str]]]:
+    """Mirror Feishu's test-type grouping within the WeCom text template."""
+
+    grouped: dict[str, list[ResponsibilityItem]] = {
+        key: [] for key in _WECOM_FAILURE_CATEGORY_ORDER
+    }
+    for item in notice.responsibilityItems:
+        grouped[_wecom_failure_category(item)].append(item)
+
+    result: list[tuple[str, list[str]]] = []
+    for category in _WECOM_FAILURE_CATEGORY_ORDER:
+        items = grouped[category]
+        if not items:
+            continue
+        points = [
+            _wecom_failure_cause_point(item, category)
+            for item in items[:WECOM_REASON_MAX_POINTS]
+        ]
+        omitted = len(items) - len(points)
+        if omitted > 0:
+            points.append(f"另有 {omitted} 项，详见责任明细")
+        result.append((_WECOM_FAILURE_CATEGORY_LABELS[category], points))
+    return result
+
+
+def _wecom_reason_fallback_points(value: str, max_reason_chars: int) -> list[str]:
+    points: list[str] = []
+    for part in _WECOM_REASON_POINT_BREAK_RE.split(str(value or "")):
+        cleaned = _wecom_public_text(part).strip("：:；;。 ")
+        if not cleaned:
+            continue
+        points.append(_wecom_semantic_clip(cleaned, min(max_reason_chars, WECOM_REASON_POINT_MAX_CHARS)))
+        if len(points) >= WECOM_REASON_MAX_POINTS:
+            break
+    return points
+
+
 def format_wecom_markdown_notice(
     notice: CiResponsibilityNotice,
     feedback_base_url: str | None = None,
@@ -114,57 +236,72 @@ def format_wecom_markdown_notice(
 ) -> str:
     display_job = truncate_single_line(notice.job, 240)
     job_truncated = display_job != str(notice.job or "")
-    title = f"### {result_icon(notice.result)} CI 单测{result_label(notice.result)} | {display_job} #{notice.buildNumber}"
+    title = f"### {result_icon(notice.result)} CI 构建{result_label(notice.result)} | {display_job} #{notice.buildNumber}"
+    overview_lines = ["**📋 构建概览**"]
+    if notice.repo:
+        overview_lines.append(f"• 项目：{public_single_line(notice.repo, 160)}")
+    overview_lines.append(f"• 流水线：{display_job}")
+    if notice.branch:
+        overview_lines.append(f"• 分支：{public_single_line(notice.branch, 160)}")
     if str(notice.result or "").upper() == "SUCCESS":
         tail_lines: list[str] = []
         if job_truncated:
             tail_lines.extend(["", "…Job 名称过长已截断。"])
         if notice.buildUrl:
             tail_lines.extend(["", f"🏗️ [查看 Jenkins 构建]({notice.buildUrl})"])
-        return _finalize_within_budget([], tail_lines, [title])
+        return _finalize_within_budget([], tail_lines, [title, "", *overview_lines])
 
     mapper = user_mapper or WeComUserMapper([])
-    owners = collect_responsible_owners(notice)
     maintainer_matches = resolve_test_maintainer_matches(
         notice,
         maintainer_resolver=maintainer_resolver,
         repo=repo,
         fallback_userids=fallback_userids,
     )
-    pending_maintainers = _collect_pending_maintainers(maintainer_matches)
     evidence_by_id = {item.id: item for item in notice.evidence}
-    protected_head = [
-        title,
-        "",
-        f"👤 **责任人**：{format_responsible_mentions(owners, mapper, mention_mode)}",
-    ]
-    if any(match is not None for match in maintainer_matches):
-        protected_head.append(f"📣 **待确认维护人**：{format_test_maintainer_mentions(pending_maintainers, mention_mode) or '未配置'}")
+    overview_lines.append(responsibility_item_stats(notice))
+    protected_head = [title, "", *overview_lines]
+    if (notice.failureReason and notice.failureReason.strip()) or notice.responsibilityItems:
+        reason_lines = ["**🔎 失败原因**"]
+        grouped_causes = _wecom_grouped_failure_causes(notice)
+        if grouped_causes:
+            for category_label, points in grouped_causes:
+                reason_lines.append(f"**{category_label}：**")
+                reason_lines.extend(f"• {point}" for point in points)
+        else:
+            reason_lines.extend(
+                f"• {point}"
+                for point in _wecom_reason_fallback_points(notice.failureReason, max_reason_chars)
+            )
+        protected_head.extend(
+            [
+                *WECOM_SECTION_SPACERS,
+                *reason_lines,
+            ]
+        )
     lines = protected_head + [
-        f"**原因**：{public_single_line(notice.failureReason, max_reason_chars)}",
-        responsibility_item_stats(notice),
-        "",
-        "#### 📌 责任项",
-        "",
+        *WECOM_SECTION_SPACERS,
+        "**👥 责任明细**",
     ]
 
     # 尾部（建议 + 链接 + 反馈）先构建，始终保留，不计入责任项的预算竞争。
     tail_lines: list[str] = []
     if job_truncated:
-        tail_lines.extend(["…Job 名称过长已截断。", ""])
+        tail_lines.extend([WECOM_VISUAL_SPACER, "…Job 名称过长已截断。", ""])
     suggestions = format_suggestions(notice.suggestions)
     if suggestions:
-        tail_lines.extend(["#### 🛠️ 修复建议", ""])
-        tail_lines.extend(f"- {suggestion}" for suggestion in suggestions)
-        tail_lines.append("")
-    tail_lines.extend(["#### 🔗 相关链接", ""])
-    tail_lines.append(f"- 🏗️ [查看 Jenkins 构建]({notice.buildUrl})" if notice.buildUrl else "- 🏗️ Jenkins 构建：无")
+        if not tail_lines:
+            tail_lines.extend(WECOM_SECTION_SPACERS)
+        tail_lines.extend(["**🛠️ 修复建议**", ""])
+        tail_lines.extend(f"• {suggestion}" for suggestion in suggestions)
+    tail_lines.extend([*WECOM_SECTION_SPACERS, "**🔗 相关链接**", ""])
+    tail_lines.append(f"• 🏗️ [查看 Jenkins 构建]({notice.buildUrl})" if notice.buildUrl else "• 🏗️ Jenkins 构建：无")
     feedback_url = build_feedback_url(feedback_base_url, notice, feedback_token)
-    tail_lines.append(f"- 📝 [提交反馈]({feedback_url})" if feedback_url else "- 📝 反馈：未配置")
+    tail_lines.append(f"• 📝 [提交反馈]({feedback_url})" if feedback_url else "• 📝 反馈：未配置")
     if feedback_code:
         tail_lines.extend(
             [
-                "",
+                WECOM_VISUAL_SPACER,
                 f"**反馈码：{feedback_code}**",
                 "",
                 "群内反馈：",
@@ -180,33 +317,54 @@ def format_wecom_markdown_notice(
         for idx, item in enumerate(notice.responsibilityItems, start=1):
             owner_name = format_item_owner(item.owner, mapper, mention_mode)
             item_lines = [
-                f"{idx}. {responsibility_item_icon(item, notice)} {responsibility_item_label(item, notice)} | {format_item_title(item, 120)}",
-                f"   - 👤 {format_item_owner_label(item)}：{owner_name}",
-                f"   - 来源：{source_build_label(item, notice)}",
-                f"   - 🔎 证据：{format_item_evidence(item, evidence_by_id, max_evidence_chars)}",
+                (
+                    f"**{responsibility_item_icon(item, notice)} "
+                    f"{responsibility_item_label(item, notice)}｜{format_item_title(item, 120)}**"
+                ),
+                f"👤 **{format_item_owner_label(item)}**：{owner_name}",
+                f"• 来源：{source_build_label(item, notice)}",
+                f"• 依据：{format_item_evidence(item, evidence_by_id, max_evidence_chars)}",
             ]
             coverage_suggestion = format_coverage_item_suggestion(item)
             if coverage_suggestion:
-                item_lines.append(f"   - 🛠️ 建议：{coverage_suggestion}")
+                item_lines.append(f"• 🛠️ 建议：{coverage_suggestion}")
             match = maintainer_matches[idx - 1]
             if match is not None:
                 item_lines.extend(
                     [
-                        f"   - 📁 测试文件：{match.test_file_path or '未识别'}",
-                        f"   - 📣 待确认维护人：{format_test_maintainer_mentions(match.maintainers, mention_mode) or '未配置'}",
+                        f"• 📁 测试文件：{match.test_file_path or '未识别'}",
+                        f"📣 **待确认维护人**：{format_test_maintainer_mentions(match.maintainers, mention_mode) or '未配置'}",
                     ]
                 )
                 if match.used_fallback:
-                    item_lines.append(f"   - ℹ️ 路由说明：{match.reason}")
-            item_lines.append("")
+                    item_lines.append(f"• ℹ️ 路由说明：{match.reason}")
+            if idx < len(notice.responsibilityItems):
+                item_lines.append(WECOM_VISUAL_SPACER)
             if not _append_within_budget(lines, tail_lines, item_lines):
                 break
             shown += 1
         omitted = len(notice.responsibilityItems) - shown
         if omitted > 0:
-            tail_lines[0:0] = ["", f"…本消息展示 {shown} 项，其余 {omitted} 项请查看分析结果 JSON。", ""]
+            tail_lines[0:0] = [WECOM_VISUAL_SPACER, f"…本消息展示 {shown} 项，其余 {omitted} 项请查看分析结果 JSON。"]
     else:
-        lines.extend(["1. ❓ unknown | 未识别到独立责任项", f"   - 👤 责任人：{NO_OWNER_NAME}", "   - 来源：-", "   - 🔎 证据：证据不足，详见分析结果 JSON。", ""])
+        lines.extend(
+            [
+                "**❓ 待确认｜未识别到独立责任项**",
+                f"👤 **责任人**：{NO_OWNER_NAME}",
+                "• 来源：-",
+                "• 依据：证据不足，详见分析结果 JSON。",
+            ]
+        )
+        match = maintainer_matches[0] if maintainer_matches else None
+        if match is not None:
+            lines.extend(
+                [
+                    f"• 📁 测试文件：{match.test_file_path or '未识别'}",
+                    f"📣 **待确认维护人**：{format_test_maintainer_mentions(match.maintainers, mention_mode) or '未配置'}",
+                ]
+            )
+            if match.used_fallback:
+                lines.append(f"• ℹ️ 路由说明：{match.reason}")
 
     return _finalize_within_budget(lines[len(protected_head):], tail_lines, protected_head)
 
