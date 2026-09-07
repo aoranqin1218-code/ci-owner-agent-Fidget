@@ -2,7 +2,7 @@
 
 校验 samples/fidget_log/integration/ 下的脱敏样本、manifest 与 PROTOCOL.md：
 - 精确锁定 3 个样本 ID 与 protocol 路径，防空数组空循环通过；
-- 样本实际 sha256 与 manifest 完全一致；
+- 样本按 LF 规范化后的 sha256 与 manifest 完全一致；
 - checkout SHA 与 manifest 的 checkoutCommit 一致；
 - 恰好一个 Finished，与 finalStatus 一致；
 - 恰好一个 summary，数字与 suiteTotals 一致；
@@ -79,7 +79,10 @@ def _read(path: Path) -> str:
 
 
 def _sha256(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+    # Git 在 Windows 和 Linux 上可能分别检出 CRLF 与 LF。清单锁定的是
+    # 规范化后的日志内容，避免同一 Git blob 因工作区换行符不同而误报。
+    normalized = path.read_bytes().replace(b"\r\n", b"\n")
+    return hashlib.sha256(normalized).hexdigest()
 
 
 def _marker_lines(text: str) -> list[str]:

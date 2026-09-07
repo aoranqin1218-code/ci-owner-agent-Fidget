@@ -25,7 +25,7 @@
       ],
       "expectedOwnerPolicy": "code-owner (subject to trusted git evidence in failure-analysis)",
       "cleanupExpected": "success",
-      "sha256": "e1f21e018344a17923b194c3ef289c832fe9885e3f0d8fbf91dfd3f280f92e3a",
+      "sha256": "07e95652a851ba836b61cc7530f34732d653563c9469b701e4b71f70283064ee",
       "sanitization": "ANSI/BuildKit stripped; credential-id, internal git/npm/jenkins host, workspace path, agent host, git username replaced with placeholders",
       "limitations": "Known-defect baseline (D-009), NOT a success sample. select-integration fails on 2 known PG (SharedPgObject) assertions: F-1003 sum_score field lost; O-0503 case_record_oid returned as bytea literal. No Mongo/Protonbase/Docker/connection errors present."
     },
@@ -51,7 +51,7 @@
       ],
       "expectedOwnerPolicy": "no-owner, history ineligible",
       "cleanupExpected": "success",
-      "sha256": "bd89f50efe7ee2efd0de77b0cd6ee17aa667cce5c68bad482e31d3a918b7c245",
+      "sha256": "481571916584455b740b46bcc76ec11228e019b77a85e4d1908254514514ae1a",
       "sanitization": "ANSI/BuildKit stripped; credential-id, internal git/npm/jenkins host, workspace path, agent host, git username replaced with placeholders",
       "limitations": "Docker image pull failed (mongo:4.2.999 does not exist) at image_pull stage → not_started=8 → cleanup success. This is a Pipeline/image-pull failure, NOT Mongo database unavailability (D-010). Constructed via controlled temporary commit 562d70b7, reverted in 85526060."
     },
@@ -77,7 +77,7 @@
       ],
       "expectedOwnerPolicy": "no-owner, history ineligible",
       "cleanupExpected": "success",
-      "sha256": "24a389f517b5ece4aa8c503a2e60b4534f1fc6301283c4bb53d7846ae7c0387f",
+      "sha256": "481f8a1e458d9efff756161d1e3e018c9210f0dc4c6d0af0ada9240d831e3748",
       "sanitization": "ANSI/BuildKit stripped; credential-id, internal git/npm/jenkins host, workspace path, agent host, git username replaced with placeholders",
       "limitations": "Protonbase (PG) override pointed to unreachable 127.0.0.1:5432 → connect ECONNREFUSED → 7 PG-dependent suites failed, shadow (non-PG) passed. Confirms external DB failure signature. Constructed via controlled temporary commit 89bfd4a5, reverted in e851afdd."
     }

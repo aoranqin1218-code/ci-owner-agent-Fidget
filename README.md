@@ -6,9 +6,9 @@ CI Owner Agent 是一个面向 Jenkins / CI 构建失败的分析与责任判断
 
 ## 当前范围
 
-当前代码同时保留一期 `fx-code` 能力，并重点支持 Fidget 二期：
+当前代码支持以下 CI 失败分析能力：
 
-- 解析 Fidget/Japa 单元测试失败块，提取测试、错误和代码路径；
+- 解析 Japa 单元测试失败块，提取测试、错误和代码路径；
 - 识别 c8 `check-coverage` 门槛失败，并展示实际覆盖率和阈值；
 - 解析 `FIDGET_INTEGRATION_V1` 集成测试协议，区分代码断言与数据库/基础设施失败；
 - 使用 Jenkins 实际 checkout SHA 和可信 Git 区间调查责任人；
@@ -19,7 +19,7 @@ CI Owner Agent 是一个面向 Jenkins / CI 构建失败的分析与责任判断
 尚未完成或不属于当前交付的内容：
 
 - 飞书群内反馈和历史修正闭环尚未实现；
-- Fidget Connection Tests 未接入当前交付；
+- Connection Tests 未接入当前交付；
 - 正式 Jenkins Job、目标群和生产部署尚需单独评审与验收；
 - 本项目不是面向任意仓库、测试框架和通知渠道的通用平台。
 
@@ -98,8 +98,8 @@ CI_AGENT_FEISHU_NOTIFY_ENABLED=false
 `CI_AGENT_REPO_CACHE_DIR` 必须指向 Agent 专用 clone 或 mirror，例如：
 
 ```text
-E:/ci-agent-cache
-└── fidget-xiaoqin
+<agent-cache-root>
+└── <repository-cache>
 ```
 
 不要使用日常开发工作区。Git 服务可能执行 fetch、读取指定 commit 或进入 detached checkout。
@@ -111,113 +111,71 @@ Set-Location ts-analyzer
 npm ci
 ```
 
-## 常用命令
+## 项目分析命令
 
-稳定入口统一为：
+日常分析统一使用根目录 `package.json` 定义的 npm 快捷命令。它们会调用项目虚拟环境中的 Python，不需要执行 `npm install`。
 
-```powershell
-python -m ci_owner_agent <command> [options]
-```
-
-| 命令 | 用途 |
-| --- | --- |
-| `analyze` | 在线读取并分析一个 Jenkins 构建 |
-| `analyze-local` | 使用本地 console log 离线回放 |
-| `notify-notice` | 预览或发送已有 notice |
-| `feedback apply/list` | 提交或查询人工反馈 |
-| `serve-feedback` | 启动反馈 Web 服务 |
-| `test-failure-stats` | 查询测试文件失败统计 |
-| `weekly-test-report` | 生成或发送每周失败报告 |
-| `serve-wecom-bot` | 启动企业微信长连接 Worker |
-
-查看完整参数：
+查看帮助：
 
 ```powershell
-python -m ci_owner_agent --help
-python -m ci_owner_agent analyze-local --help
-```
-
-### Fidget 手工验证快捷入口
-
-根目录 `package.json` 只包装现有 Python CLI，不需要执行 `npm install`：
-
-```powershell
-# 分析个人 Fidget Jenkins Job，并保存 notice
-npm run analyze:jenkins -- 31
-
-# 分析本地日志；base/head 必须来自可信构建事实
-npm run analyze:local -- .\path\to\console.log 31 <base-commit> <head-commit>
-
-# 在终端预览 notice，不发送
-npm run notice:preview -- .\runs\manual\jenkins-build-31.notice.json
-```
-
-快捷命令默认使用个人验证环境：
-
-```text
-job:    npm/fxp-fidget/fidget-xiaoqin-pipeline
-repo:   fidget-xiaoqin
-branch: main
-```
-
-注意：`npm run analyze:jenkins` 本身不传 `--notify`，但如果 `.env` 已启用企业微信或飞书自动通知，仍可能真实发送。要确保纯分析，必须同时保持：
-
-```env
-CI_AGENT_WECOM_NOTIFY_ENABLED=false
-CI_AGENT_FEISHU_NOTIFY_ENABLED=false
+npm run analyze:help
 ```
 
 ### Jenkins 在线分析
 
+分析一个构建并把 notice 保存到 `runs/manual/`：
+
 ```powershell
-python -m ci_owner_agent analyze `
-  --job npm/fxp-fidget/fidget-xiaoqin-pipeline `
-  --build 31 `
-  --repo fidget-xiaoqin `
-  --output-file .\runs\manual\jenkins-build-31.notice.json
+npm run analyze:jenkins -- <build-number>
 ```
 
-系统会从 Jenkins 查找同分支的上次可信成功构建，并使用实际 checkout SHA 建立责任窗口。调用方必须检查 notice 内容，不能只看进程退出码；例如 Jenkins 配置缺失时，命令可能正常产出一份 no-owner notice。
+如需覆盖已配置的目标，可以追加公开占位参数：
+
+```powershell
+npm run analyze:jenkins -- <build-number> `
+  --job <jenkins-job> `
+  --repo <repository>
+```
+
+系统会从 Jenkins 查找同分支的上次可信成功构建，并使用实际 checkout SHA 建立责任窗口。必须检查生成的 notice 内容，不能只看进程退出码。
+
+默认命令不主动请求通知。明确需要真实通知时使用：
+
+```powershell
+npm run analyze:jenkins:notify -- <build-number>
+```
+
+真实通知前必须确认 notice、目标测试群、人员映射、敏感信息和消息长度。只验证通知格式时使用：
+
+```powershell
+npm run analyze:jenkins -- <build-number> --notify-dry-run
+```
 
 ### 本地日志分析
 
-```powershell
-python -m ci_owner_agent analyze-local `
-  --repo fidget-xiaoqin `
-  --job npm/fxp-fidget/fidget-xiaoqin-pipeline `
-  --build 31 `
-  --branch main `
-  --base-commit <last-success-commit> `
-  --head-commit <failed-build-commit> `
-  --console-file .\path\to\console.log `
-  --build-url local://fidget/build-31 `
-  --result FAILURE `
-  --output-file .\runs\manual\local-build-31.notice.json
-```
-
-`analyze-local` 会校验日志中的 checkout SHA 与 `--head-commit`。两者不一致时默认拒绝分析，防止对错误版本定责。
-
-### 通知预览与发送
-
-先 dry-run 审阅内容：
+`base/head` 必须来自可信构建事实：
 
 ```powershell
-python -m ci_owner_agent notify-notice `
-  --notice-file .\runs\manual\jenkins-build-31.notice.json `
-  --channel wecom `
-  --dry-run
-
-python -m ci_owner_agent notify-notice `
-  --notice-file .\runs\manual\jenkins-build-31.notice.json `
-  --channel feishu `
-  --dry-run
+npm run analyze:local -- `
+  .\path\to\console.log `
+  <build-number> `
+  <base-commit> `
+  <head-commit>
 ```
 
-确认 notice、目标测试群、人员映射、敏感信息和消息长度后，移除 `--dry-run` 才会真实发送。使用 `--force` 可忽略通知去重；它只应用于本次指定渠道。
+需要覆盖默认目标时，可以继续追加 `--job <jenkins-job>`、`--repo <repository>`、`--branch <branch>` 或 `--result <build-result>`。本地分析会校验日志中的 checkout SHA 与 `<head-commit>`，不一致时拒绝定责。
+
+### Notice 预览
+
+```powershell
+npm run notice:preview -- .\runs\manual\jenkins-build-<build-number>.notice.json
+```
+
+该命令只在终端预览，不发送通知。其他运维、反馈和统计命令可通过底层入口 `python -m ci_owner_agent --help` 查询。
 
 ## 失败分析与责任语义
 
-### Fidget 单元测试
+### 单元测试
 
 以 Japa `✖` 失败块为锚点，清理 ANSI 和 Docker/BuildKit 前缀后，提取测试名称、错误类型、代码路径和稳定签名。结构化签名可用于历史匹配；普通 wrapper 不会形成可继承的测试失败事实。
 
@@ -231,7 +189,7 @@ ERROR: Coverage for <metric> (<pct>%) does not meet [global] threshold (<thresho
 
 只有实际覆盖率低于阈值才算失败。文件级 coverage 会在可信 diff 中寻找唯一作者，最高为 `medium_confidence`；多作者、无 diff、路径无法验证或范围异常时输出 no-owner。coverage 责任项完全由确定性逻辑生成，不交给 Agent 猜测。
 
-### Fidget 集成测试
+### 集成测试
 
 集成日志以 `FIDGET_INTEGRATION_V1` marker 为协议锚点：
 
@@ -343,10 +301,8 @@ GitHub Actions 会在推送到 `main`、面向 `main` 的 Pull Request 和手工
 - 批处理、超时和 resume 默认 fail closed；残留产物不能当作成功结果复用。
 - `scripts/clear_history_failure_chunks.py` 会删除整类历史数据，未经备份和明确授权不得执行。
 
-部署与维护以 [`docs/ubuntu_scheduled_analysis.md`](docs/ubuntu_scheduled_analysis.md) 及内部部署维护手册为准。仓库内文档示例均不应替代现场配置确认。
+部署与维护以 [`docs/ubuntu_scheduled_analysis.md`](docs/ubuntu_scheduled_analysis.md) 及组织内部的授权维护手册为准。仓库内文档示例均不应替代现场配置确认。
 
-## 项目资料
+## 内部资料
 
-- [项目介绍（飞书）](https://fanruan-x.feishu.cn/wiki/WynLw41XZiV8zykRwYwcrEJhnQb)
-- [部署维护手册（飞书）](https://fanruan-x.feishu.cn/wiki/SJwHwOOK3iTsmUkp7jac2xVenzc)
-- [Fidget 单元/集成测试通知优化（飞书）](https://fanruan-x.feishu.cn/wiki/N8rNwNR2dihxCzkEf8xclopsnng)
+项目需求、部署手册和生产环境信息仅保存在组织内部的授权知识库中，不在公开 README 中提供链接或标识。
