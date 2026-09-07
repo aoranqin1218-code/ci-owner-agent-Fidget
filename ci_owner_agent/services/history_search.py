@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 
 from ci_owner_agent.agents.context import AgentRuntimeContext
 from ci_owner_agent.services.failure_similarity import (
@@ -13,8 +14,10 @@ from ci_owner_agent.services.failure_similarity import (
 )
 from ci_owner_agent.services.failure_identity import build_failure_summary_signature
 from ci_owner_agent.services.history_inheritance import (
+    assess_failure_chain_continuity,
     build_inherited_owner,
     build_no_owner_decision_payload,
+    continuity_previous_build_number,
     feedback_blocks_inheritance,
     find_no_owner_decision_from_notice,
     source_from_correct_owner_feedback,
@@ -28,6 +31,11 @@ CURRENT_ALLOWED_CHUNK_SOURCES = {
     "jenkins_failed_stage_failure_summary",
     "notice_failure_summary",
 }
+
+_REPOSITORY_FILE_RE = re.compile(
+    r"(?P<path>(?:[A-Za-z0-9_.@+-]+/)+[A-Za-z0-9_.@+-]+\.(?:ts|tsx|js|jsx|json|ya?ml|sh))",
+    re.IGNORECASE,
+)
 
 
 def history_search_similar_failures(
@@ -90,6 +98,10 @@ def history_search_similar_failures(
             last_successful_build_number=context.last_successful_build_number,
             lookback_builds=lookbackBuilds,
         )
+        previous_build_number = continuity_previous_build_number(
+            context.build_number,
+            context.investigation_scope,
+        )
         historical_chunk_count_by_build: dict[int, int] = {}
         for hist in historical:
             build_number = hist.get("buildNumber")
@@ -147,8 +159,19 @@ def history_search_similar_failures(
                 }
                 candidates.append(candidate)
                 candidates_by_chunk.setdefault(current["chunkIndex"], []).append(candidate)
+        for candidate in candidates:
+            candidate.update(
+                _assess_candidate_continuity(
+                    context,
+                    candidate,
+                    previous_build_number=previous_build_number,
+                )
+            )
         inherited_by_chunk = {
-            chunk_index: _find_inherited_owner_for_chunk(chunk_candidates, context.build_number)
+            chunk_index: _find_inherited_owner_for_chunk(
+                chunk_candidates,
+                context.build_number,
+            )
             for chunk_index, chunk_candidates in candidates_by_chunk.items()
         }
         no_owner_by_chunk = {}
@@ -161,17 +184,22 @@ def history_search_similar_failures(
                     context.build_number,
                 )
         for candidate in candidates:
-            candidate["inheritedOwner"] = inherited_by_chunk.get(
-                candidate.get("currentChunkIndex"),
-                {"found": False},
-            )
-            candidate["noOwnerDecision"] = no_owner_by_chunk.get(
-                candidate.get("currentChunkIndex"),
-                {"found": False},
-            )
+            if candidate.get("continuityEligible"):
+                candidate["inheritedOwner"] = inherited_by_chunk.get(
+                    candidate.get("currentChunkIndex"),
+                    {"found": False},
+                )
+                candidate["noOwnerDecision"] = no_owner_by_chunk.get(
+                    candidate.get("currentChunkIndex"),
+                    {"found": False},
+                )
+            else:
+                candidate["inheritedOwner"] = {"found": False}
+                candidate["noOwnerDecision"] = {"found": False}
             candidate.pop("_noticeDoc", None)
         candidates.sort(
             key=lambda item: (
+                bool(item.get("continuityEligible")),
                 item.get("similarity") or 0,
                 item.get("buildNumber") or 0,
             ),
@@ -182,6 +210,7 @@ def history_search_similar_failures(
             "ok": True,
             "historyEnabled": True,
             "currentBuild": context.build_number,
+            "previousBuildNumber": previous_build_number,
             "lastSuccessfulBuildNumber": context.last_successful_build_number,
             "lastSuccessfulBuildNumberMissing": context.last_successful_build_number is None,
             "currentChunks": [
@@ -197,8 +226,10 @@ def history_search_similar_failures(
             ],
             "candidates": candidates[:max_candidates],
             "instruction": (
-                "如果 signature_exact/signature_structural + very_likely_same_failure 出现在当前 build 之前，"
-                "当前 failure item 应视为历史持续失败。若 inheritedOwner.found=true，"
+                "signature_exact/signature_structural + very_likely_same_failure 只有在 "
+                "continuityEligible=true 时才表示历史持续失败。中间构建未执行该测试不会切断责任链；"
+                "历史失败之后相关致因或测试文件被任何提交修改过时，必须按当前 build 重新分析。"
+                "若 inheritedOwner.found=true，"
                 "在 responsibilityItems 中使用 inherited_failure_owner 表达首次失败责任人；"
                 "不要将后续提交判为该持续失败的首次责任人。"
             ),
@@ -228,18 +259,82 @@ def _signature_structural_match(current: dict, historical: dict) -> bool:
     return chunk_similarity(left_message, right_message) >= 0.9
 
 
-def _find_inherited_owner_for_chunk(candidates: list[dict], current_build_number: int) -> dict:
+def _assess_candidate_continuity(
+    context: AgentRuntimeContext,
+    candidate: dict,
+    *,
+    previous_build_number: int | None,
+) -> dict:
+    if not (
+        candidate.get("matchType") in {"signature_exact", "signature_structural"}
+        and candidate.get("relationship") == "very_likely_same_failure"
+    ):
+        return {
+            "continuityEligible": False,
+            "continuityReason": "candidate is not a deterministic same-failure match",
+            "continuityRelevantPaths": [],
+            "continuityTouchedPaths": [],
+        }
+    source = _high_confidence_source_from_candidate(candidate)
+    return assess_failure_chain_continuity(
+        git_client=context.git_client,
+        repo=context.repo,
+        current_build_number=context.build_number,
+        previous_build_number=previous_build_number,
+        current_head_commit=context.head_commit,
+        historical_build_number=candidate.get("buildNumber"),
+        historical_head_commit=candidate.get("headCommit"),
+        source_commit=source.get("ownerCommit") if isinstance(source, dict) else None,
+        relevant_paths=_candidate_relevant_paths(candidate),
+    )
+
+
+def _candidate_relevant_paths(candidate: dict) -> list[str]:
+    signature = candidate.get("historicalSignature") or {}
+    paths = [
+        signature.get("testFile"),
+        signature.get("topStackFile"),
+        *(signature.get("businessStackFiles") or []),
+    ]
+    notice = ((candidate.get("_noticeDoc") or {}).get("notice") or {})
+    item = _matching_responsibility_item(notice, candidate)
+    if item is not None:
+        paths.extend([item.get("testFilePath"), item.get("failureFilePath")])
+        evidence_by_id = {
+            evidence.get("id"): evidence
+            for evidence in notice.get("evidence") or []
+            if isinstance(evidence, dict)
+        }
+        for evidence_id in item.get("evidenceIds") or []:
+            evidence = evidence_by_id.get(evidence_id)
+            if not isinstance(evidence, dict) or evidence.get("type") not in {
+                "diff",
+                "file_content",
+                "keyword_match",
+                "ts_symbol",
+            }:
+                continue
+            for text in (evidence.get("source"), evidence.get("summary"), evidence.get("detail")):
+                paths.extend(match.group("path") for match in _REPOSITORY_FILE_RE.finditer(str(text or "")))
+    return list(dict.fromkeys(str(path) for path in paths if path))
+
+
+def _find_inherited_owner_for_chunk(
+    candidates: list[dict],
+    current_build_number: int,
+) -> dict:
     eligible = [
         candidate
         for candidate in candidates
         if candidate.get("buildNumber") is not None
         and candidate.get("buildNumber") < current_build_number
+        and candidate.get("continuityEligible") is True
         and candidate.get("matchType") in {"signature_exact", "signature_structural"}
         and candidate.get("relationship") == "very_likely_same_failure"
     ]
-    eligible.sort(key=lambda item: item.get("buildNumber") or 0)
+    eligible.sort(key=lambda item: item.get("buildNumber") or 0, reverse=True)
     for candidate in eligible:
-        source = _high_confidence_source_from_candidate(candidate)
+        source = _trace_inherited_owner_source(candidate, candidates)
         if source is None:
             continue
         return build_inherited_owner(
@@ -252,16 +347,43 @@ def _find_inherited_owner_for_chunk(candidates: list[dict], current_build_number
     return {"found": False}
 
 
-def _find_no_owner_decision_for_chunk(candidates: list[dict], current_build_number: int) -> dict:
+def _trace_inherited_owner_source(continuity_candidate: dict, candidates: list[dict]) -> dict | None:
+    source = _high_confidence_source_from_candidate(continuity_candidate)
+    visited_builds: set[int] = set()
+    while isinstance(source, dict) and source.get("ownerType") == "inherited_failure_owner":
+        source_build = source.get("sourceBuildNumber")
+        if not isinstance(source_build, int) or source_build in visited_builds:
+            break
+        visited_builds.add(source_build)
+        source_candidate = next(
+            (candidate for candidate in candidates if candidate.get("buildNumber") == source_build),
+            None,
+        )
+        if source_candidate is None:
+            break
+        traced_source = _high_confidence_source_from_candidate(source_candidate)
+        if traced_source is None:
+            break
+        traced_source.setdefault("sourceBuildNumber", source_build)
+        traced_source.setdefault("sourceBuildUrl", source_candidate.get("buildUrl"))
+        source = traced_source
+    return source
+
+
+def _find_no_owner_decision_for_chunk(
+    candidates: list[dict],
+    current_build_number: int,
+) -> dict:
     eligible = [
         candidate
         for candidate in candidates
         if candidate.get("buildNumber") is not None
         and candidate.get("buildNumber") < current_build_number
+        and candidate.get("continuityEligible") is True
         and candidate.get("matchType") in {"signature_exact", "signature_structural"}
         and candidate.get("relationship") == "very_likely_same_failure"
     ]
-    eligible.sort(key=lambda item: item.get("buildNumber") or 0)
+    eligible.sort(key=lambda item: item.get("buildNumber") or 0, reverse=True)
     for candidate in eligible:
         feedback = candidate.get("feedbackOverride")
         if source_from_correct_owner_feedback(
@@ -333,9 +455,8 @@ def _high_confidence_source_from_candidate(candidate: dict) -> dict | None:
     notice = notice_doc.get("notice")
     items = notice.get("responsibilityItems") if isinstance(notice, dict) else None
     if isinstance(items, list) and items:
-        for item in items:
-            if not isinstance(item, dict) or not _responsibility_item_matches_candidate(item, candidate):
-                continue
+        item = _matching_responsibility_item(notice, candidate)
+        if item is not None:
             owner = item.get("owner") if isinstance(item.get("owner"), dict) else {}
             if item.get("responsibilityType") == "current_build_owner" and owner.get("type") == "high_confidence":
                 source = {
@@ -374,6 +495,13 @@ def _high_confidence_source_from_candidate(candidate: dict) -> dict | None:
         if candidate.get("feedbackVerified"):
             source["feedbackVerified"] = True
         return source
+    return None
+
+
+def _matching_responsibility_item(notice: dict, candidate: dict) -> dict | None:
+    for item in notice.get("responsibilityItems") or []:
+        if isinstance(item, dict) and _responsibility_item_matches_candidate(item, candidate):
+            return item
     return None
 
 

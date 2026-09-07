@@ -125,6 +125,9 @@ def test_empty_wecom_webhook_url_is_none(monkeypatch):
 
 
 def test_feishu_defaults_are_safe(monkeypatch):
+    # 默认值测试必须与开发机 .env 隔离，否则本地显式启用飞书通知会覆盖
+    # Settings 的安全默认值并让标准 pytest 门禁产生环境相关误报。
+    monkeypatch.setenv("PYTHON_DOTENV_DISABLED", "1")
     monkeypatch.delenv("CI_AGENT_FEISHU_NOTIFY_ENABLED", raising=False)
     monkeypatch.delenv("CI_AGENT_FEISHU_NOTIFY_DRY_RUN", raising=False)
     monkeypatch.delenv("CI_AGENT_FEISHU_NOTIFY_ON_SUCCESS", raising=False)

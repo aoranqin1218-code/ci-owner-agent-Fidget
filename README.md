@@ -9,7 +9,7 @@ CI Owner Agent 是一个用于分析 Jenkins / CI 构建失败并生成结构化
 它不会简单地把失败归给“最后一次提交人”，而是综合构建状态、可信 checkout SHA、Git 提交与 diff、失败日志、历史失败、人工反馈和可选 LLM 工具调用，判断失败属于：
 
 - 当前构建新引入的问题；
-- 历史持续失败，应继承历史责任结论；
+- 历史相同失败是否持续以 Git 代码连续性判断：中间构建未执行该测试不会自动断链；历史失败后的相关致因或测试文件只要被修改过（含删除后重加），本次就重新定责，否则继承历史责任结论；
 - 偶发、环境或 Pipeline 问题；
 - 证据不足，无法高可信定责。
 
@@ -410,7 +410,7 @@ metrics 包含总耗时、阶段耗时、LLM calls、provider 返回的 token us
 | `CI_AGENT_WECOM_FALLBACK_USERIDS`       | 空          | 逗号分隔的兜底 userid。                            |
 | `CI_AGENT_NOTIFICATION_DEDUP_ENABLED`   | `true`    | 是否按通知 digest 去重。                           |
 
-测试维护人不是失败责任人。no-owner 责任项仍保持 `no_high_confidence_owner / 无高可信责任人`，维护人只显示在通知的“待确认维护人”区域。
+测试维护人不是失败责任人。no-owner 责任项仍保持 `no_high_confidence_owner / 无高可信责任人`，企业微信和飞书均按责任项在“待确认维护人”区域展示处理路由；未命中维护规则时使用各渠道显式配置的默认兜底人，并保留路由说明。两种通知的失败原因统一按“构建失败 / 单元测试 / 集成测试 / 覆盖率 / 其他失败”分栏，无法由明确签名或路径识别的内容进入“其他失败”，不再默认归为单元测试。覆盖率责任项中的确定性修复建议与其他建议合并到通知底部唯一的“修复建议”区域，不在责任明细中重复展示；Agent 阶段遗留的“覆盖率不分配责任人/不生成责任项”等流程说明会被移除，避免与最终确定性责任项冲突。
 
 CI 通知默认使用群机器人 Webhook。`userid` 映射成功时 Markdown 继续生成 `<@userid>`，Webhook 能在企业微信群中呈现蓝色真实成员 @。Webhook 对瞬时连接异常做最多 3 次有限重试；HTTP 响应、企业微信业务错误和可能已送达的读取超时不重试，避免无界重试或明显重复。最终失败仍不覆盖 notice，但会输出 WARNING、写入 metrics warnings，并在 MongoDB 可用时保存失败尝试，后续可用同一 notice 正常补发。智能机器人与通知 transport 相互独立：即使 CI 通知使用 Webhook，机器人仍可处理文本反馈、模板卡片、AI 解析和二次确认。需要保留原有主动 Bot 通知链路时设置 `CI_AGENT_WECOM_NOTIFY_TRANSPORT=bot`。
 
@@ -450,7 +450,7 @@ rules:
 
 ### 4.7.1 飞书测试群单向通知
 
-飞书渠道只做**单向通知**：分析完成后把 `CiResponsibilityNotice` 以飞书 `interactive` 展示卡片发送到测试群自定义机器人 Webhook。卡片使用蓝色 header、Markdown 粗体分区、显式 margin 留白和 `width_mode=fill` 自适应聊天窗口宽度；只提供 Jenkins URL 跳转，不处理按钮回调，也不生成反馈码，反馈闭环留待后续独立任务。
+飞书渠道只做**单向通知**：分析完成后把 `CiResponsibilityNotice` 以飞书 `interactive` 展示卡片发送到测试群自定义机器人 Webhook。卡片使用蓝色 header、Markdown 粗体分区、显式 margin 留白和 `width_mode=fill` 自适应聊天窗口宽度；失败原因按“构建失败 / 单元测试 / 集成测试 / 覆盖率 / 其他失败”分栏，只有具备明确测试或构建身份的责任项才进入对应栏，无法可靠识别的项保守进入“其他失败”；只提供 Jenkins URL 跳转，不处理按钮回调，也不生成反馈码，反馈闭环留待后续独立任务。
 
 | 配置                                      | 默认值      | 说明                                               |
 | ----------------------------------------- | ----------- | -------------------------------------------------- |
@@ -461,11 +461,12 @@ rules:
 | `CI_AGENT_FEISHU_NOTIFY_ON_SUCCESS`     | `false`   | 是否通知成功构建。                                 |
 | `CI_AGENT_FEISHU_NOTIFY_ON_NO_OWNER`    | `true`    | 无高可信责任人时是否仍通知。                       |
 | `CI_AGENT_FEISHU_USER_MAPPING_FILE`     | 空          | 飞书 open_id 映射 YAML（见下）；仅用于真实 `@`，无映射保守降级。 |
-| `CI_AGENT_FEISHU_FALLBACK_USER_IDS`     | 空          | 逗号分隔的兜底 open_id；显式配置，不得猜测。        |
+| `CI_AGENT_FEISHU_FALLBACK_USER_IDS`     | 空          | 逗号分隔的兜底 open_id；映射文件存在 `fallback: true` 时由映射文件覆盖。 |
 
 安全与去重边界：
 
 - 飞书自定义机器人只能以 **open_id（`ou_` 开头）** `@` 群成员，且没有通讯录权限、无法自行查 open_id。可靠 open_id 必须来自受管控的映射文件；映射缺失/冲突时消息保守降级为姓名文本，绝不猜测身份，也不把维护者写成责任人。
+- 飞书对每个 no-owner 责任项独立展示“无高可信责任人”、待确认维护人和路由说明；即使同一构建的其他责任项已有可触达责任人，也不会吞掉该项的默认兜底路由。
 - 发送前对 notice 做明文敏感信息扫描，任何 MongoDB/网络副作用之前 fail closed。
 - Webhook 返回只保留 HTTP 状态、数值业务码和受控错误类别；不输出或持久化原始响应正文，防止网关回显 Webhook token、Secret 或签名。
 - 去重键为 `repo + job + branch + buildNumber + notice digest + channel=feishu`，与企微 `channel=wecom` 完全隔离。MongoDB 关闭时只有进程内行为，不声明跨进程去重。
@@ -480,6 +481,7 @@ users:
   - name: "张三"
     email: zhangsan@example.com
     openId: "ou_xxxxxxxx"
+    fallback: true # 作为默认兜底维护人；该标记优先于环境变量中的旧兜底值
   - name: "李四"
     openId: "ou_yyyyyyyy"
 ```
@@ -545,7 +547,7 @@ CI_AGENT_WECOM_BOT_NOTIFY_CHAT_ID=***
 
 仓库根目录的 `package.json` 只把常用参数转发给现有 Python CLI，不会把本项目变成 Node.js / TypeScript 项目，也不需要执行 `npm install`。Windows 开发环境会直接使用项目的 `.venv\Scripts\python.exe`。
 
-真实 Jenkins 分析默认不传 `--notify`，因此不会发送通知；模型调用和历史 MongoDB 读写仍以当前 `.env` 配置为准：
+真实 Jenkins 分析默认不传 `--notify`；但只有同时保持 `CI_AGENT_WECOM_NOTIFY_ENABLED=false` 和 `CI_AGENT_FEISHU_NOTIFY_ENABLED=false`，分析才不会自动发送通知。模型调用和历史 MongoDB 读写仍以当前 `.env` 配置为准：
 
 ```powershell
 npm run analyze:jenkins -- 31

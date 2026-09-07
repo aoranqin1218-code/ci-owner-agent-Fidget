@@ -12,8 +12,10 @@ from ci_owner_agent.services.history_store import (
     get_history_store,
 )
 from ci_owner_agent.services.history_inheritance import (
+    assess_failure_chain_continuity,
     build_inherited_owner,
     build_no_owner_decision_payload,
+    continuity_previous_build_number,
     feedback_blocks_inheritance,
     feedback_preview,
     find_no_owner_decision_from_notice,
@@ -78,6 +80,10 @@ def history_search_similar_failure_facts(
     if not historical_docs:
         return _base_result(context, current_facts=_public_current_views(current_views), candidates=[], diagnostics=diagnostics)
 
+    previous_build_number = continuity_previous_build_number(
+        context.build_number,
+        context.investigation_scope,
+    )
     pairs = _ranked_pairs(eligible_current, historical_docs, diagnostics)
     diagnostics["rankedPairsCount"] = len(pairs)
     compare_limit = max(1, context.settings.ai_history_max_compare_calls)
@@ -86,6 +92,26 @@ def history_search_similar_failure_facts(
     warning: str | None = None
 
     for current_view, historical_doc, historical_fact in pairs[:compare_limit]:
+        continuity = _assess_fact_continuity(
+            context,
+            current_view["_fact"],
+            historical_doc,
+            historical_fact,
+            previous_build_number=previous_build_number,
+        )
+        if not continuity["continuityEligible"]:
+            diagnostics["skipped"]["continuityBroken"] += 1
+            _append_compare_result(
+                diagnostics,
+                current_view["_fact"],
+                historical_fact,
+                historical_doc,
+                None,
+                False,
+                "continuity_broken",
+                continuity["continuityReason"],
+            )
+            continue
         try:
             comparison = compare_failure_facts_with_ai(
                 settings=context.settings,
@@ -142,7 +168,15 @@ def history_search_similar_failure_facts(
             _append_compare_result(diagnostics, current_view["_fact"], historical_fact, historical_doc, comparison, False, "invalid_owner", comparison.reason)
             continue
 
-        candidate = _candidate_dict(current_view["_fact"], historical_fact, historical_doc, comparison, inherited_owner, feedback)
+        candidate = _candidate_dict(
+            current_view["_fact"],
+            historical_fact,
+            historical_doc,
+            comparison,
+            inherited_owner,
+            feedback,
+            continuity,
+        )
         candidates.append(candidate)
         current_view.setdefault("_candidateOwners", []).append(inherited_owner)
         _append_compare_result(diagnostics, current_view["_fact"], historical_fact, historical_doc, comparison, True, None, comparison.reason)
@@ -187,6 +221,10 @@ def _base_result(
         "historyEnabled": True,
         "mode": "ai_failure_facts",
         "currentBuild": context.build_number,
+        "previousBuildNumber": continuity_previous_build_number(
+            context.build_number,
+            context.investigation_scope,
+        ),
         "lastSuccessfulBuildNumber": context.last_successful_build_number,
         "threshold": context.settings.ai_history_compare_threshold,
         "currentFacts": current_facts,
@@ -206,6 +244,7 @@ def _new_diagnostics() -> dict:
         "acceptedCandidatesCount": 0,
         "skipped": {
             "currentFactIneligible": 0,
+            "continuityBroken": 0,
             "invalidHistoricalFact": 0,
             "compareNotSameFailure": 0,
             "compareBelowThreshold": 0,
@@ -371,6 +410,36 @@ def _is_same_failure(comparison: FailureFactComparison, threshold: float) -> boo
     )
 
 
+def _assess_fact_continuity(
+    context: AgentRuntimeContext,
+    current_fact: FailureFact,
+    historical_doc: dict,
+    historical_fact: FailureFact,
+    *,
+    previous_build_number: int | None,
+) -> dict:
+    item = _matching_notice_item_source(historical_doc)
+    fact_owner = historical_doc.get("factOwner")
+    source_commit = fact_owner.get("commit") if isinstance(fact_owner, dict) else None
+    relevant_paths = [current_fact.filePath, historical_fact.filePath]
+    if isinstance(item, dict):
+        owner = item.get("owner") if isinstance(item.get("owner"), dict) else {}
+        source_commit = item.get("sourceCommit") or owner.get("commit") or source_commit
+        relevant_paths.extend([item.get("testFilePath"), item.get("failureFilePath")])
+    source_commit = source_commit or historical_doc.get("ownerCommit")
+    return assess_failure_chain_continuity(
+        git_client=context.git_client,
+        repo=context.repo,
+        current_build_number=context.build_number,
+        previous_build_number=previous_build_number,
+        current_head_commit=context.head_commit,
+        historical_build_number=historical_doc.get("buildNumber"),
+        historical_head_commit=historical_doc.get("headCommit"),
+        source_commit=source_commit,
+        relevant_paths=[str(path) for path in relevant_paths if path],
+    )
+
+
 def _inherited_owner_from_historical_doc(
     historical_doc: dict,
     comparison: FailureFactComparison,
@@ -527,6 +596,7 @@ def _candidate_dict(
     comparison: FailureFactComparison,
     inherited_owner: dict,
     feedback: dict | None,
+    continuity: dict,
 ) -> dict:
     return {
         "currentFactId": current_fact.factId,
@@ -548,4 +618,8 @@ def _candidate_dict(
         "ownerCommit": inherited_owner.get("ownerCommit"),
         "inheritedOwner": inherited_owner,
         "feedbackOverride": feedback_preview(feedback),
+        "continuityEligible": continuity.get("continuityEligible"),
+        "continuityReason": continuity.get("continuityReason"),
+        "continuityRelevantPaths": continuity.get("continuityRelevantPaths") or [],
+        "continuityTouchedPaths": continuity.get("continuityTouchedPaths") or [],
     }

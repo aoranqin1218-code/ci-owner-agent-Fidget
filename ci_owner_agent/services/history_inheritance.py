@@ -4,9 +4,124 @@ from typing import Any
 
 from ci_owner_agent.constants import NO_OWNER_NAME
 from ci_owner_agent.services.failure_identity import canonicalize_failure_signature
+from ci_owner_agent.services.repository_path import normalize_repository_path
 
 INHERITABLE_OWNER_TYPES = {"high_confidence", "medium_confidence", "inherited_failure_owner"}
 BLOCKING_FEEDBACK_ACTIONS = {"mark_flaky", "mark_no_owner"}
+
+
+def continuity_previous_build_number(current_build_number: int, investigation_scope: Any | None) -> int | None:
+    """Return the immediately previous build, used as a continuity fast path."""
+    scoped_number = getattr(investigation_scope, "previous_build_number", None)
+    if isinstance(scoped_number, int) and 0 < scoped_number < current_build_number:
+        return scoped_number
+    fallback_number = current_build_number - 1
+    return fallback_number if fallback_number > 0 else None
+
+
+def _same_repository_path(left: str, right: str) -> bool:
+    """Match package-relative and repository-relative names for the same file."""
+    return left == right or left.endswith(f"/{right}") or right.endswith(f"/{left}")
+
+
+def assess_failure_chain_continuity(
+    *,
+    git_client: Any,
+    repo: str,
+    current_build_number: int,
+    previous_build_number: int | None,
+    current_head_commit: str | None,
+    historical_build_number: int | None,
+    historical_head_commit: str | None,
+    source_commit: str | None,
+    relevant_paths: list[str],
+) -> dict:
+    """Decide whether an earlier matching failure survived without a relevant code touch."""
+    base = {
+        "continuityEligible": False,
+        "continuityCheckedFromCommit": historical_head_commit,
+        "continuityRelevantPaths": [],
+        "continuityTouchedPaths": [],
+    }
+    if not isinstance(historical_build_number, int) or historical_build_number >= current_build_number:
+        return {**base, "continuityReason": "historical build number is invalid"}
+    if not current_head_commit or not historical_head_commit:
+        return {**base, "continuityReason": "trusted historical/current head commit is missing"}
+    if historical_head_commit == current_head_commit:
+        return {
+            **base,
+            "continuityEligible": True,
+            "continuityReason": "historical and current builds use the same trusted head commit",
+        }
+    if not hasattr(git_client, "check_ancestor") or not hasattr(git_client, "get_path_changes_between"):
+        return {**base, "continuityReason": "Git client cannot verify failure-path history"}
+
+    ancestry = git_client.check_ancestor(repo, historical_head_commit, current_head_commit)
+    if not ancestry.get("ok") or not ancestry.get("isAncestor"):
+        return {**base, "continuityReason": "historical head is not a verified ancestor of current head"}
+
+    normalized_paths = {
+        normalized
+        for path in relevant_paths
+        if (normalized := normalize_repository_path(path))
+    }
+    if source_commit:
+        if not hasattr(git_client, "get_commit_changed_paths"):
+            return {**base, "continuityReason": "Git client cannot resolve source-commit paths"}
+        source_paths = git_client.get_commit_changed_paths(repo, source_commit)
+        if not source_paths.get("ok"):
+            return {**base, "continuityReason": "source-commit paths could not be verified"}
+        # The introducing commit may contain unrelated changes.  Use it only to
+        # expand an already-known package-relative failure path; never turn every
+        # file in that commit into a continuity dependency.
+        known_paths = tuple(normalized_paths)
+        normalized_paths.update(
+            normalized
+            for path in source_paths.get("paths") or []
+            if (normalized := normalize_repository_path(path))
+            and any(_same_repository_path(normalized, relevant) for relevant in known_paths)
+        )
+    if not normalized_paths:
+        return {**base, "continuityReason": "no trustworthy failure-related paths are available"}
+    if len(normalized_paths) > 200:
+        return {**base, "continuityReason": "too many failure-related paths to verify safely"}
+
+    ordered_paths = sorted(normalized_paths)
+    changes = git_client.get_path_changes_between(
+        repo,
+        historical_head_commit,
+        current_head_commit,
+        ordered_paths,
+    )
+    public_paths = ordered_paths[:20]
+    if not changes.get("ok"):
+        return {
+            **base,
+            "continuityReason": "failure-path history could not be verified",
+            "continuityRelevantPaths": public_paths,
+        }
+    touched_paths = [
+        path for path in changes.get("touchedPaths") or []
+        if normalize_repository_path(path) in normalized_paths
+    ]
+    if touched_paths:
+        return {
+            **base,
+            "continuityReason": "failure-related paths were modified after the historical failure",
+            "continuityRelevantPaths": public_paths,
+            "continuityTouchedPaths": touched_paths[:20],
+        }
+    continuity_scope = (
+        "the immediately previous failure"
+        if historical_build_number == previous_build_number
+        else "the historical failure"
+    )
+    return {
+        **base,
+        "continuityEligible": True,
+        "continuityReason": f"no failure-related path was modified after {continuity_scope}",
+        "continuityRelevantPaths": public_paths,
+    }
 
 
 def active_feedback_docs(store: Any, repo: str, job: str, branch: str | None) -> list[dict]:

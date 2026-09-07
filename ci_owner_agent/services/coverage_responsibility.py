@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -18,6 +19,16 @@ from ci_owner_agent.services.investigation_scope import InvestigationScope
 
 CoverageOwnerType = str  # "medium_confidence" | "no_high_confidence_owner"
 
+_COVERAGE_POLICY_MARKERS = ("coverage", "覆盖率", "c8")
+_NON_ASSIGNMENT_MARKERS = (
+    "不为其分配责任人",
+    "不分配责任人",
+    "不生成责任项",
+    "不创建责任项",
+    "does not assign an owner",
+    "does not create a responsibility item",
+)
+
 # Fidget 参与 c8 check-coverage 门槛的候选包（AGENTS.md：100% 覆盖率集合不含 fidget-sdk）。
 # 用于 C 消歧：无可信包名时，在这些包的完整路径下校验覆盖率文件唯一命中。
 FIDGET_COVERAGE_PACKAGES: tuple[str, ...] = (
@@ -27,6 +38,21 @@ FIDGET_COVERAGE_PACKAGES: tuple[str, ...] = (
     "fidget-mongo",
     "fidget-postgres",
 )
+
+
+def is_stale_coverage_non_assignment_claim(value: str | None) -> bool:
+    """识别 Agent 阶段遗留、与最终 coverage 责任项冲突的流程说明。"""
+    text = str(value or "").strip().lower()
+    return (
+        any(marker in text for marker in _COVERAGE_POLICY_MARKERS)
+        and any(marker in text for marker in _NON_ASSIGNMENT_MARKERS)
+    )
+
+
+def strip_stale_coverage_non_assignment_claims(value: str | None) -> str:
+    """删除冲突句，保留同一 failureReason 中其它真实失败说明。"""
+    parts = re.split(r"(?<=[。！？!?])|\r?\n", str(value or ""))
+    return "".join(part for part in parts if not is_stale_coverage_non_assignment_claim(part)).strip()
 
 
 def resolve_coverage_package(
@@ -379,6 +405,13 @@ def reconcile_coverage_responsibilities(
                 evidence_ids=evidence_ids,
             )
         )
+    notice.suggestions = [
+        suggestion
+        for suggestion in notice.suggestions
+        if not is_stale_coverage_non_assignment_claim(suggestion)
+    ]
+    cleaned_failure_reason = strip_stale_coverage_non_assignment_claims(notice.failureReason)
+    notice.failureReason = cleaned_failure_reason or "构建失败：覆盖率门槛未达标，责任项见 responsibilityItems。"
     _aggregate_top_level_owner(notice)
     return notice
 

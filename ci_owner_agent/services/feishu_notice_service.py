@@ -26,6 +26,7 @@ from ci_owner_agent.services.failure_identity import (
 from ci_owner_agent.services.feishu_notification_formatter import (
     FEISHU_POST_MAX_JSON_BYTES,
     FeishuFormatSummary,
+    FeishuMaintainerRoute,
     format_feishu_notice_payload,
 )
 from ci_owner_agent.services.feishu_notifier import send_feishu_payload
@@ -81,18 +82,23 @@ def notify_notice(
         mapper = FeishuUserMapper.from_yaml(settings.feishu_user_mapping_file, settings.feishu_fallback_userids)
         maintainer_resolver = TestMaintainerResolver.from_yaml(settings.test_maintainer_mapping_file)
         owner_open_ids = _resolve_owner_open_ids(notice, mapper)
-        item_maintainer_names, build_maintainer_names = _resolve_maintainer_names(notice, maintainer_resolver)
-        maintainer_open_ids = _resolve_maintainer_open_ids(item_maintainer_names, build_maintainer_names, mapper)
+        maintainer_routes = _resolve_maintainer_routes(notice, maintainer_resolver)
+        maintainer_open_ids = _resolve_maintainer_open_ids(maintainer_routes, mapper)
         payload, summary = format_feishu_notice_payload(
             notice,
             jenkins_link=notice.buildUrl,
             owner_open_ids=owner_open_ids,
             maintainer_open_ids=maintainer_open_ids,
-            item_maintainer_names=item_maintainer_names,
-            build_maintainer_names=build_maintainer_names,
+            maintainer_routes=maintainer_routes,
             fallback_open_ids=mapper.fallback_open_ids,
         )
-        digest = _feishu_digest(notice, owner_open_ids, maintainer_open_ids, mapper.fallback_open_ids)
+        digest = _feishu_digest(
+            notice,
+            owner_open_ids,
+            maintainer_open_ids,
+            maintainer_routes,
+            mapper.fallback_open_ids,
+        )
         payload_json = json.dumps(payload, ensure_ascii=False)
         if len(payload_json.encode("utf-8")) > FEISHU_POST_MAX_JSON_BYTES:
             return {
@@ -164,14 +170,15 @@ def _resolve_owner_open_ids(notice: CiResponsibilityNotice, mapper: FeishuUserMa
     return result
 
 
-def _resolve_maintainer_names(
+def _resolve_maintainer_routes(
     notice: CiResponsibilityNotice,
     maintainer_resolver: TestMaintainerResolver,
-) -> tuple[list[str | None], list[str]]:
-    """Return (per-item maintainer name, build-level maintainer names).
+) -> list[FeishuMaintainerRoute | None]:
+    """Return one Feishu-safe maintainer route per unresolved item.
 
-    Reuses the WeCom routing match only for the *names* of the current
-    maintainer route; Feishu never consumes WeCom userids here.
+    The shared resolver still determines path matching and the fallback reason,
+    but Feishu consumes only maintainer names. WeCom userids never cross this
+    channel boundary.
     """
     matches = resolve_test_maintainer_matches(
         notice,
@@ -179,33 +186,36 @@ def _resolve_maintainer_names(
         repo=notice.repo,
         fallback_userids=(),
     )
-    if not notice.responsibilityItems:
-        build_names: list[str] = []
-        if matches and matches[0]:
-            build_names = [m.name for m in matches[0].maintainers if m.name]
-        return [], build_names
-    item_names: list[str | None] = []
+    routes: list[FeishuMaintainerRoute | None] = []
     for match in matches:
         if match is None:
-            item_names.append(None)
+            routes.append(None)
             continue
-        names = [m.name for m in match.maintainers if m.name]
-        item_names.append(names[0] if names else None)
-    return item_names, []
+        names = tuple(dict.fromkeys(m.name for m in match.maintainers if m.name))
+        routes.append(
+            FeishuMaintainerRoute(
+                names=names,
+                used_fallback=match.used_fallback,
+                reason=match.reason,
+            )
+        )
+    return routes
 
 
 def _resolve_maintainer_open_ids(
-    item_names: list[str | None],
-    build_names: list[str],
+    routes: list[FeishuMaintainerRoute | None],
     mapper: FeishuUserMapper,
 ) -> dict[str, str]:
     result: dict[str, str] = {}
-    for name in list(item_names) + list(build_names):
-        if not name or name in result:
+    for route in routes:
+        if route is None:
             continue
-        open_id = mapper.resolve_open_id(name)
-        if open_id:
-            result[name] = open_id
+        for name in route.names:
+            if name in result:
+                continue
+            open_id = mapper.resolve_open_id(name)
+            if open_id:
+                result[name] = open_id
     return result
 
 
@@ -213,6 +223,7 @@ def _feishu_digest(
     notice: CiResponsibilityNotice,
     owner_open_ids: dict[str, str],
     maintainer_open_ids: dict[str, str],
+    maintainer_routes: list[FeishuMaintainerRoute | None],
     fallback_open_ids: tuple[str, ...],
 ) -> str:
     """Digest includes the notice and the current Feishu routing result, so a
@@ -221,6 +232,16 @@ def _feishu_digest(
         "notice": notice.model_dump(mode="json"),
         "ownerOpenIds": owner_open_ids,
         "maintainerOpenIds": maintainer_open_ids,
+        "maintainerRoutes": [
+            None
+            if route is None
+            else {
+                "names": route.names,
+                "usedFallback": route.used_fallback,
+                "reason": route.reason,
+            }
+            for route in maintainer_routes
+        ],
         "fallbackOpenIds": fallback_open_ids,
     }
     raw = canonicalize_failure_message(

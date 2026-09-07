@@ -31,6 +31,7 @@ class FeishuUserMappingEntry:
     name: str
     email: str | None = None
     open_id: str | None = None
+    fallback: bool = False
 
 
 class FeishuUserMapper:
@@ -49,7 +50,8 @@ class FeishuUserMapper:
         self._by_name: dict[str, str] = {}
         conflicted_email: set[str] = set()
         conflicted_name: set[str] = set()
-        for entry in entries or []:
+        mapping_entries = entries or []
+        for entry in mapping_entries:
             if not is_valid_open_id(entry.open_id):
                 continue
             if entry.email:
@@ -72,11 +74,19 @@ class FeishuUserMapper:
             self._by_email.pop(key, None)
         for key in conflicted_name:
             self._by_name.pop(key, None)
-        self.fallback_open_ids = tuple(dict.fromkeys(oid for oid in fallback_open_ids if is_valid_open_id(oid)))
+        has_mapping_fallback = any(entry.fallback for entry in mapping_entries)
+        selected_fallbacks = (
+            tuple(entry.open_id or "" for entry in mapping_entries if entry.fallback)
+            if has_mapping_fallback
+            else fallback_open_ids
+        )
+        self.fallback_open_ids = tuple(
+            dict.fromkeys(oid for oid in selected_fallbacks if is_valid_open_id(oid))
+        )
 
     @classmethod
     def from_yaml(cls, path: Path | None, fallback_open_ids: tuple[str, ...] = ()) -> "FeishuUserMapper":
-        """Build a mapper from a YAML file (``users: [{name, email?, openId}]``)."""
+        """Build a mapper from YAML; ``fallback: true`` overrides env fallbacks."""
         if not path:
             return cls(fallback_open_ids=fallback_open_ids)
         try:
@@ -93,6 +103,7 @@ class FeishuUserMapper:
                     name=str(item.get("name") or "").strip(),
                     email=str(item.get("email") or "").strip() or None,
                     open_id=str(item.get("openId") or "").strip() or None,
+                    fallback=item.get("fallback") is True,
                 )
             )
         return cls(entries, fallback_open_ids)

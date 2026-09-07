@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from ci_owner_agent.services.log_parsing import (
     build_integration_protocol_index,
     classify_japa_block,
@@ -41,6 +43,29 @@ def test_parse_integration_marker_rejects_non_marker():
 
 def test_protocol_index_detects_integration():
     assert build_integration_protocol_index(_lines("failure-assertion.log"))["is_integration"] is True
+
+
+@pytest.mark.parametrize(
+    "skip_reason",
+    [
+        "due to when conditional",
+        "due to earlier failure(s)",
+        "due to earlier failures",
+    ],
+)
+def test_protocol_index_ignores_skipped_integration_stage(skip_reason: str):
+    """Declarative stage 外壳未执行时，不得伪造集成协议冲突。"""
+    lines = [
+        "[Pipeline] { (Integration Tests)",
+        f'Stage "Integration Tests" skipped {skip_reason}',
+        "[Pipeline] // stage",
+    ]
+
+    index = build_integration_protocol_index(lines)
+
+    assert index["is_integration"] is False
+    assert index["has_marker"] is False
+    assert index["conflicts"] == []
 
 
 def test_protocol_index_detects_preflight_failure():

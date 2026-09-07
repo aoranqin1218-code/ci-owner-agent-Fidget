@@ -287,6 +287,94 @@ class GitClient:
             return {"ok": False, "error": "git file history contained an invalid commit", "commits": []}
         return {"ok": True, "commits": commits}
 
+    def get_commit_changed_paths(self, repo: str, commit: str) -> dict:
+        """Return all repository paths touched by one trusted commit."""
+        error = validate_commit_ref(commit)
+        if error:
+            return {"ok": False, "error": error, "paths": []}
+        result, repo_error = self._run_git(
+            repo,
+            ["show", "--pretty=format:", "--name-only", "--no-renames", commit],
+        )
+        if repo_error:
+            return {"ok": False, "error": repo_error, "paths": []}
+        if result is None or not result.ok or result.truncated:
+            return {
+                "ok": False,
+                "error": (
+                    "git commit path output was truncated"
+                    if result is not None and result.truncated
+                    else result.error if result else "git command failed"
+                ),
+                "command": result.to_dict() if result else None,
+                "paths": [],
+            }
+        paths = list(dict.fromkeys(line.strip() for line in result.stdout.splitlines() if line.strip()))
+        if any(validate_git_path(path) for path in paths):
+            return {"ok": False, "error": "git commit contained an invalid path", "paths": []}
+        return {"ok": True, "commit": commit, "paths": paths}
+
+    def get_path_changes_between(
+        self,
+        repo: str,
+        base_commit: str,
+        head_commit: str,
+        paths: list[str],
+    ) -> dict:
+        """Return every commit/path touch in ``base..head``, including delete/re-add cycles."""
+        error = validate_commit_ref(base_commit) or validate_commit_ref(head_commit)
+        if error:
+            return {"ok": False, "error": error, "changes": [], "touchedPaths": []}
+        normalized_paths = list(dict.fromkeys(path.replace("\\", "/") for path in paths if path))
+        for path in normalized_paths:
+            path_error = validate_git_path(path)
+            if path_error:
+                return {"ok": False, "error": path_error, "changes": [], "touchedPaths": []}
+        if not normalized_paths:
+            return {"ok": False, "error": "at least one path is required", "changes": [], "touchedPaths": []}
+        result, repo_error = self._run_git(
+            repo,
+            [
+                "log",
+                "--format=commit:%H",
+                "--name-only",
+                "--no-renames",
+                f"{base_commit}..{head_commit}",
+                "--",
+                *normalized_paths,
+            ],
+        )
+        if repo_error:
+            return {"ok": False, "error": repo_error, "changes": [], "touchedPaths": []}
+        if result is None or not result.ok or result.truncated:
+            return {
+                "ok": False,
+                "error": (
+                    "git path change output was truncated"
+                    if result is not None and result.truncated
+                    else result.error if result else "git command failed"
+                ),
+                "command": result.to_dict() if result else None,
+                "changes": [],
+                "touchedPaths": [],
+            }
+        changes: list[dict[str, str]] = []
+        current_commit: str | None = None
+        for line in result.stdout.splitlines():
+            value = line.strip()
+            if not value:
+                continue
+            if value.startswith("commit:"):
+                current_commit = value.removeprefix("commit:")
+                if validate_commit_ref(current_commit):
+                    return {"ok": False, "error": "git path history contained an invalid commit", "changes": [], "touchedPaths": []}
+                continue
+            if current_commit is None or validate_git_path(value):
+                return {"ok": False, "error": "git path history contained malformed output", "changes": [], "touchedPaths": []}
+            changes.append({"commit": current_commit, "path": value})
+        touched_paths = list(dict.fromkeys(item["path"] for item in changes))
+        return {"ok": True, "changes": changes, "touchedPaths": touched_paths}
+
     def list_tags(self, repo: str) -> dict:
         """List tag names without assuming normal repository sync fetched tags."""
         result, repo_error = self._run_git(repo, ["for-each-ref", "--format=%(refname:short)", "refs/tags"])

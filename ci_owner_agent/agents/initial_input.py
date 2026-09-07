@@ -128,6 +128,7 @@ def compact_ai_history_precheck(precheck: dict[str, Any] | None) -> dict[str, An
     return {
         "ok": precheck.get("ok"),
         "mode": precheck.get("mode"),
+        "previousBuildNumber": precheck.get("previousBuildNumber"),
         "threshold": precheck.get("threshold"),
         "warning": precheck.get("warning"),
         "error": precheck.get("error"),
@@ -224,6 +225,7 @@ def compact_history_precheck(precheck: dict[str, Any] | None) -> dict[str, Any] 
         "ok": precheck.get("ok"),
         "historyEnabled": precheck.get("historyEnabled"),
         "currentBuild": precheck.get("currentBuild"),
+        "previousBuildNumber": precheck.get("previousBuildNumber"),
         "lastSuccessfulBuildNumber": precheck.get("lastSuccessfulBuildNumber"),
         "lastSuccessfulBuildNumberMissing": precheck.get("lastSuccessfulBuildNumberMissing"),
         "warning": precheck.get("warning"),
@@ -242,8 +244,10 @@ def compact_history_precheck(precheck: dict[str, Any] | None) -> dict[str, Any] 
         ],
         "candidates": [],
         "instruction": (
-            "如果 candidates 或 currentChunks 中存在 signature_exact / signature_structural + very_likely_same_failure或 currentChunks[*].inheritedOwner.found=true，"
-            "且历史 buildNumber 小于当前 build，则当前 failure item 属于历史持续失败。"
+            "只有 currentChunks[*].inheritedOwner.found=true，当前 failure item 才属于历史持续失败。"
+            "历史候选可以来自更早构建；continuityEligible=true 表示 Git 已确认该失败相关的致因或测试文件"
+            "从历史失败后未被修改，中间构建未执行到该测试不会切断责任链。"
+            "continuityEligible=false 表示相关文件已被改动或连续性无法可信验证，必须按当前 build 重新分析。"
             "如果 inheritedOwner.found=true，应在 responsibilityItems 中输出 responsibilityType=inherited_failure_owner，"
             "owner 使用 inheritedOwner；顶层 owner 不要因为 inherited owner 而输出 high_confidence，"
             "顶层 owner 通常保持 no_high_confidence_owner。"
@@ -268,6 +272,10 @@ def compact_history_precheck(precheck: dict[str, Any] | None) -> dict[str, Any] 
                 "similarity": candidate.get("similarity"),
                 "relationship": candidate.get("relationship"),
                 "matchType": candidate.get("matchType"),
+                "continuityEligible": candidate.get("continuityEligible"),
+                "continuityReason": candidate.get("continuityReason"),
+                "continuityRelevantPaths": candidate.get("continuityRelevantPaths") or [],
+                "continuityTouchedPaths": candidate.get("continuityTouchedPaths") or [],
                 "ownerType": candidate.get("ownerType"),
                 "ownerName": candidate.get("ownerName"),
                 "ownerCommit": candidate.get("ownerCommit"),

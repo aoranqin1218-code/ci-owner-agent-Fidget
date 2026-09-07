@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from ci_owner_agent.orchestrator import (
     _is_coverage_only_failures,
     _is_integration_env_only_failures,
@@ -213,6 +215,52 @@ def test_unit_only_assertion_has_no_integration_conflict():
     assert result.get("integrationConflicts") == []
     assert result["totals"]["integrationEnv"] == 0
     assert len(result["chunks"]) == 1
+
+
+@pytest.mark.parametrize(
+    "skip_reason",
+    ["due to when conditional", "due to earlier failure(s)"],
+)
+def test_unit_assertion_with_skipped_integration_stage_has_no_protocol_conflict(skip_reason: str):
+    """真实 Jenkins 会声明但跳过 Integration stage；Unit 失败仍只能产出 Unit 事实。"""
+    lines = [
+        "[Pipeline] { (Unit Tests)",
+        "✖ unit test",
+        "❯ group / unit test",
+        "AssertionError: expected",
+        "[Pipeline] // stage",
+        "[Pipeline] { (Integration Tests)",
+        f'Stage "Integration Tests" skipped {skip_reason}',
+        "[Pipeline] // stage",
+    ]
+
+    result = _provider_from_lines(lines)
+
+    assert result.get("integrationConflicts") == []
+    assert result["totals"]["integrationEnv"] == 0
+    assert len(result["chunks"]) == 1
+    assert result["chunks"][0]["stageName"] == "Unit Tests"
+
+
+def test_build_56_typescript_failure_is_not_reclassified_as_integration():
+    """构建 #56 形态：编译先失败，后续 Integration stage 仅为跳过外壳。"""
+    lines = [
+        "[Pipeline] { (Build)",
+        "src/data/conversion/PgFieldValueConverter.ts(29,74): error TS2552: "
+        "Cannot find name 'value1'. Did you mean 'value'?",
+        "[Pipeline] // stage",
+        "[Pipeline] { (Integration Tests)",
+        'Stage "Integration Tests" skipped due to earlier failure(s)',
+        "[Pipeline] // stage",
+        "ERROR: script returned exit code 2",
+        "Finished: FAILURE",
+    ]
+
+    result = _provider_from_lines(lines)
+
+    assert result["integrationConflicts"] == []
+    assert result["totals"]["integrationEnv"] == 0
+    assert result["chunks"] == []
 
 
 def test_mixed_stage_unit_block_not_integration_env():
@@ -630,3 +678,142 @@ def test_connection_and_unknown_not_merged():
     sigs = sorted(item.failureSignature for item in result.responsibilityItems)
     assert "integration_connection|select-integration" in sigs
     assert "integration_unknown|select-integration" in sigs
+
+
+def test_cleanup_failure_adds_no_owner_without_removing_inherited_code_item():
+    """#47 形态：历史断言保留，cleanup=failed 追加独立 no-owner，重复 reconcile 不增殖。"""
+    from ci_owner_agent.schemas import CiResponsibilityNotice, Owner, ResponsibilityItem
+    from ci_owner_agent.services.integration_responsibility import reconcile_integration_responsibilities
+
+    inherited_item = ResponsibilityItem(
+        failureId="assertion-history",
+        failureTitle="F-1003: historical assertion",
+        failureSignature="xfail|f-1003|assertionerror",
+        failureSummary="AssertionError: historical assertion",
+        owner=Owner(
+            type="inherited_failure_owner",
+            name="historical owner",
+            email="owner@example.com",
+            commit="first-failure",
+            confidence=0.9,
+        ),
+        responsibilityType="inherited_failure_owner",
+        sourceBuildNumber=24,
+        confidence=0.9,
+        reason="inherited",
+        evidenceIds=[],
+    )
+    notice = CiResponsibilityNotice(
+        repo="fidget-xiaoqin",
+        job="job",
+        buildNumber=47,
+        buildUrl="local://47",
+        result="FAILURE",
+        branch="main",
+        headCommit="head",
+        baseCommit="base",
+        owner=Owner(type="no_high_confidence_owner", name="无高可信责任人", confidence=0.0),
+        failureReason="failed",
+        responsibilityItems=[inherited_item],
+        hasHighConfidenceOwner=False,
+    )
+    lines = _complete_preflight()
+    lines += [
+        "FIDGET_INTEGRATION_V1 phase=suite suite=select-integration status=start run_id=r1",
+        "✖ F-1003: historical assertion",
+        "❯ integration / F-1003: historical assertion",
+        "AssertionError: historical assertion",
+        "FIDGET_INTEGRATION_V1 phase=suite suite=select-integration status=end exit=1 run_id=r1",
+    ]
+    for suite in _ALL_SUITES[1:]:
+        lines.append(f"FIDGET_INTEGRATION_V1 phase=suite suite={suite} status=start run_id=r1")
+        lines.append(f"FIDGET_INTEGRATION_V1 phase=suite suite={suite} status=end exit=0 run_id=r1")
+    lines += [
+        "FIDGET_INTEGRATION_V1 phase=summary status=failed total=8 passed=7 failed=1 not_started=0 run_id=r1",
+        "FIDGET_INTEGRATION_V1 phase=cleanup status=failed run_id=r1",
+    ]
+    summaries = _provider_from_lines(lines)
+    assert summaries["totals"]["integrationEnv"] == 1
+    assert summaries["integrationProtocolIndex"]["cleanup_failed"] is True
+
+    reconciled = reconcile_integration_responsibilities(notice, failure_summaries=summaries)
+    reconciled = reconcile_integration_responsibilities(reconciled, failure_summaries=summaries)
+
+    signatures = [item.failureSignature for item in reconciled.responsibilityItems]
+    assert signatures.count("xfail|f-1003|assertionerror") == 1
+    assert signatures.count("integration_pipeline|cleanup") == 1
+    cleanup_item = next(
+        item
+        for item in reconciled.responsibilityItems
+        if item.failureSignature == "integration_pipeline|cleanup"
+    )
+    assert cleanup_item.owner.type == "no_high_confidence_owner"
+    assert cleanup_item.responsibilityType == "no_high_confidence_owner"
+    assert any(e.source == "integration_protocol_index" and "cleanup" in e.summary for e in reconciled.evidence)
+
+
+def test_preflight_failure_adds_step_specific_no_owner_item():
+    """#49: preflight 必须覆盖 Agent 的非规范签名责任项，且只保留 canonical no-owner。"""
+    from ci_owner_agent.schemas import CiResponsibilityNotice, Owner, ResponsibilityItem
+    from ci_owner_agent.services.integration_responsibility import reconcile_integration_responsibilities
+
+    agent_item = ResponsibilityItem(
+        failureId="agent-preflight",
+        failureTitle="Integration Tests preflight image pull failure: manifest not found",
+        failureSignature="integration_tests_preflight_image_pull_failure|manifest_not_found",
+        failureSummary="preflight image_pull failed",
+        owner=Owner(type="high_confidence", name="current author", confidence=0.9),
+        responsibilityType="current_build_owner",
+        sourceBuildNumber=44,
+        confidence=0.9,
+        reason="current diff changed the image tag",
+        evidenceIds=[],
+    )
+    unit_item = ResponsibilityItem(
+        failureId="historical-unit",
+        failureTitle="controlled unit failure",
+        failureSignature="xfail|controlled_unit_failure|assertionerror",
+        failureSummary="AssertionError: expected actual to equal expected",
+        owner=Owner(type="inherited_failure_owner", name="first author", confidence=0.9),
+        responsibilityType="inherited_failure_owner",
+        sourceBuildNumber=43,
+        confidence=0.9,
+        reason="inherited",
+        evidenceIds=[],
+    )
+    notice = CiResponsibilityNotice(
+        repo="fidget-xiaoqin",
+        job="job",
+        buildNumber=44,
+        buildUrl="local://44",
+        result="FAILURE",
+        branch="main",
+        headCommit="head",
+        baseCommit="base",
+        owner=Owner(type="high_confidence", name="current author", confidence=0.9),
+        failureReason="preflight image pull failure was introduced by current author",
+        responsibilityItems=[unit_item, agent_item],
+        hasHighConfidenceOwner=True,
+    )
+    summaries = _provider_from_lines(
+        [
+            "FIDGET_INTEGRATION_V1 phase=preflight step=image_pull status=start run_id=r1",
+            "FIDGET_INTEGRATION_V1 phase=preflight step=image_pull status=failed exit=1 run_id=r1",
+            "FIDGET_INTEGRATION_V1 phase=summary status=failed total=8 passed=0 failed=0 not_started=8 run_id=r1",
+            "FIDGET_INTEGRATION_V1 phase=cleanup status=success run_id=r1",
+        ]
+    )
+    assert summaries["totals"]["integrationEnv"] == 1
+    assert summaries["integrationConflicts"] == []
+
+    reconciled = reconcile_integration_responsibilities(notice, failure_summaries=summaries)
+
+    assert [item.failureSignature for item in reconciled.responsibilityItems] == [
+        "xfail|controlled_unit_failure|assertionerror",
+        "integration_pipeline|preflight:image_pull",
+    ]
+    assert reconciled.responsibilityItems[0].owner.type == "inherited_failure_owner"
+    assert reconciled.responsibilityItems[1].owner.type == "no_high_confidence_owner"
+    assert reconciled.owner.type == "no_high_confidence_owner"
+    assert reconciled.hasHighConfidenceOwner is False
+    assert "代码/测试失败及集成测试环境失败" in reconciled.failureReason

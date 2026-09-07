@@ -74,3 +74,35 @@ def test_duplicate_same_open_id_is_not_a_conflict():
         ]
     )
     assert mapper.resolve_open_id("张三") == "ou_same"
+
+
+def test_yaml_fallback_marker_overrides_environment_fallback(tmp_path):
+    mapping_file = tmp_path / "feishu-users.yml"
+    mapping_file.write_text(
+        """
+users:
+  - name: "dust-黄诚杰"
+    email: "dust@fanruan.com"
+    openId: "ou_dust"
+    fallback: true
+  - name: "AoranQin-秦奥然"
+    openId: "ou_aoran"
+""".strip(),
+        encoding="utf-8",
+    )
+
+    mapper = FeishuUserMapper.from_yaml(mapping_file, fallback_open_ids=("ou_aoran",))
+
+    assert mapper.fallback_open_ids == ("ou_dust",)
+
+
+def test_yaml_without_fallback_marker_keeps_environment_fallback(tmp_path):
+    mapping_file = tmp_path / "feishu-users.yml"
+    mapping_file.write_text(
+        'users:\n  - name: "dust-黄诚杰"\n    openId: "ou_dust"\n',
+        encoding="utf-8",
+    )
+
+    mapper = FeishuUserMapper.from_yaml(mapping_file, fallback_open_ids=("ou_env",))
+
+    assert mapper.fallback_open_ids == ("ou_env",)

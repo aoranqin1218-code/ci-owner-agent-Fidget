@@ -115,8 +115,8 @@ python -m ci_owner_agent <command>
 
 9. **确定性失败摘要**：`log_provider.find_test_failure_summaries(tail_lines, max_chunks=5)` 调用 [log_parsing.py](ci_owner_agent/services/log_parsing.py) 的纯解析规则——直接在日志中收集最多 `max_chunks` 个 Japa `✖ 标题` 失败块，逐块提取签名 `signatureKey` + `signatureHash`（schemaVersion=3）。**Docker/Jenkins/shell/typecheck/lint 包装失败不生成历史签名**（它们不能进历史继承）。**Fidget 二期另独立识别 c8 `check-coverage` 门槛失败**（`Coverage for <metric> (<pct>%) does not meet threshold ... for <file>`）：同文件多指标合并为一个 `coverage_failure_block`，与 Japa 混合时同时保留，并通过 `coverageFiles`/`totals` 完整记录受展示预算省略的事实；按 Nx task 块归属包名（`> nx run @fx/<pkg>:` + `> @fx/<pkg>@` 一致才写 `packageName`）。coverage 使用独立 `chunkSource`，不进入 Japa 确定性历史继承。
 10. **AI failure facts**（可选，`CI_AGENT_AI_FAILURE_FACTS_ENABLED`）：若确定性摘要为空，`extract_failure_facts_with_ai`（[failure_fact_ai.py](ci_owner_agent/services/failure_fact_ai.py)）从非结构化日志提取内层失败事实（`FailureFact`：failureKind/errorCode/filePath/symbol/message/rootCauseSummary/confidence），并按置信度 ≥0.70 过滤、本地重算 signatureKey。
-11. **历史预检**：`history_search_similar_failures(enriched, maxCandidates, store)`（[history_search.py](ci_owner_agent/services/history_search.py)）——按稳定失败签名查 MongoDB 历史相似失败，附带 `inheritedOwner`（可继承的责任人）和 `feedbackOverride`（人工反馈覆盖）。
-12. **AI 历史语义比对**（可选）：`history_search_similar_failure_facts`（[ai_history_search.py](ci_owner_agent/services/ai_history_search.py)）——对 AI facts 做语义比对，阈值 0.90，命中才允许基于 AI facts 继承。
+11. **历史预检**：`history_search_similar_failures(enriched, maxCandidates, store)`（[history_search.py](ci_owner_agent/services/history_search.py)）——按稳定失败签名查 MongoDB 历史相似失败，并用可信历史/current head 的 Git 路径历史验证代码连续性。中间构建未执行该测试不自动断链；历史失败后相关致因或测试文件未被任何提交修改时才附带可用的 `inheritedOwner`，修改过或无法验证则由当前构建重新定责。
+12. **AI 历史语义比对**（可选）：`history_search_similar_failure_facts`（[ai_history_search.py](ci_owner_agent/services/ai_history_search.py)）——对候选 AI facts 先执行同一套 Git 路径连续性校验，再做阈值 0.90 的语义比对；两项都通过才允许继承。
 
 > **补充：0.70 / 0.90 两个置信度怎么来的（不是算出来的）**
 > 两个数都是 **AI 自评的把握分 + 配置写死的门槛**：`confidence` 由 AI 自己打（0~1），**不是公式算的**（提取 prompt 自评"失败长什么样"，比对 prompt 自评"是否同一根因"并附人话 reason）。
@@ -208,8 +208,9 @@ python -m ci_owner_agent <command>
     - **设计红线：通知失败不推翻定责**——`maybe_notify_notice` 里最终投递异常只打 WARNING，并把脱敏原因写入 metrics warnings；notice 结论不受通知成败影响（投递坏了 ≠ 判错了）。
 21. 若 `CI_AGENT_FEISHU_NOTIFY_ENABLED=true`：`feishu_notice_service.maybe_notify_notice` → `notify_notice`（[feishu_notice_service.py](ci_owner_agent/services/feishu_notice_service.py)）作为**独立下游副作用**（`--notify` 不触发飞书）：
     - `_find_plaintext_secrets` 发送前敏感扫描（任何 MongoDB/网络副作用之前 fail closed）；
-    - `FeishuUserMapper`（[feishu_user_mapping.py](ci_owner_agent/services/feishu_user_mapping.py)）解析 open_id `@`，无映射降级姓名文本，不猜身份；
-    - `format_feishu_notice_payload`（[feishu_notification_formatter.py](ci_owner_agent/services/feishu_notification_formatter.py)）渲染飞书 `interactive` 展示卡片（蓝色 header、Markdown 粗体分区、显式区块 margin、`width_mode=fill` 自适应聊天窗口宽度）；
+    - `FeishuUserMapper`（[feishu_user_mapping.py](ci_owner_agent/services/feishu_user_mapping.py)）解析 open_id `@`，无映射降级姓名文本，不猜身份；映射条目的 `fallback: true` 指定默认兜底维护人，并优先于环境变量中的旧兜底值；
+    - 企微 Markdown 与飞书 `interactive` 卡片共用保守的失败原因分类：按“构建失败 / 单元测试 / 集成测试 / 覆盖率 / 其他失败”分栏，只有明确的失败签名或测试路径才进入专用栏，未知项进入“其他失败”，避免把普通 Jenkins/编译失败默认写成单元或集成测试；同一集成 suite 的大量环境失败被聚合为责任项时，栏目标题同时展示原始失败总数与聚合组数，避免把数百次失败误读成少量失败；
+    - `format_feishu_notice_payload`（[feishu_notification_formatter.py](ci_owner_agent/services/feishu_notification_formatter.py)）渲染飞书 `interactive` 展示卡片（蓝色 header、Markdown 粗体分区、显式区块 margin、`width_mode=fill` 自适应聊天窗口宽度）；no-owner 项逐项展示待确认维护人或默认兜底路由，覆盖率建议与其他建议统一进入底部“修复建议”，并过滤与最终 coverage 责任项冲突的 Agent 阶段流程说明；
     - `store.notification_sent`（`channel=feishu`）去重 → `send_feishu_payload`（[feishu_notifier.py](ci_owner_agent/services/feishu_notifier.py)，可选官方签名；返回仅保留 HTTP 状态、数值业务码和受控错误类别，不保留原始响应正文）POST 测试群 → `save_notification`（`channel=feishu`）；
     - 企微与飞书互不影响，任一失败只打 WARNING，不改写 notice；飞书卡片本期只做展示和 URL 跳转，**不生成反馈码、不处理卡片交互回调**（反馈闭环留待后续独立任务）。
 
@@ -285,7 +286,7 @@ python -m ci_owner_agent <command>
 
 - **调查顺序**：优先用首轮的 failureSummaries → failureFacts → historyPrecheck；不默认读 log tail，只在证据不足时才调日志工具；TS 工具只在 diff 证据不足且有明确符号时用。
 - **收束规则**：证据链足够立即输出；预算耗尽必须输出。
-- **历史持续失败规则**：命中 `signature_exact/structural + very_likely_same_failure` 且历史 build 更早 → 输出 `inherited_failure_owner`（继承首次失败责任人），不再重新分析当前 diff；单个 inherited 项时顶层 owner 保持 no-owner。
+- **历史持续失败规则**：命中 `signature_exact/structural + very_likely_same_failure` 后，还要验证历史失败至当前 head 之间的相关致因/测试文件从未被改动，才输出 `inherited_failure_owner`（沿连续失败链追溯首次责任人）。中间构建未运行该测试或流水线提前失败不自动断链；相关文件被触碰（含删除后重加）或 Git 证据不完整时，本次重新定责。单个 inherited 项时顶层 owner 保持 no-owner。
 - **路径规则**：不猜路径，`repo_get_file_content` 前路径必须来自 changedFiles/diff/日志堆栈等可信来源。
 - **高可信证据组合**：4 种"日志 + 本次 diff/TS 关系"组合。
 - **JSON schema 提示**：严格字段、禁止额外字段、no-owner 的固定写法。

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import json
 from unittest.mock import Mock
 
 import pytest
@@ -51,6 +52,27 @@ def current_item(name="张三", email="zs@example.com"):
     }
 
 
+def no_owner_item(title="integration cleanup marker failed"):
+    return {
+        "failureId": "failure-no-owner",
+        "failureTitle": title,
+        "failureSignature": None,
+        "failureSummary": None,
+        "testFilePath": None,
+        "failureFilePath": None,
+        "owner": {"type": "no_high_confidence_owner", "name": "无高可信责任人", "email": None, "commit": None, "confidence": 0},
+        "responsibilityType": "no_high_confidence_owner",
+        "sourceBuildNumber": None,
+        "sourceBuildUrl": None,
+        "sourceCommit": None,
+        "matchType": None,
+        "relationship": None,
+        "confidence": 0,
+        "reason": "cleanup 属于环境异常，无法归责代码提交者。",
+        "evidenceIds": [],
+    }
+
+
 def _notice(**overrides):
     return CiResponsibilityNotice.model_validate(notice_payload([current_item()], **overrides))
 
@@ -65,6 +87,7 @@ def _settings(**overrides):
         feishu_notify_on_no_owner=True,
         feishu_user_mapping_file=None,
         feishu_fallback_userids=(),
+        test_maintainer_mapping_file=None,
         history_enabled=False,
         notification_dedup_enabled=True,
     )
@@ -110,6 +133,29 @@ def test_notify_notice_dry_run_has_no_network_and_no_store_write(monkeypatch):
     settings = _settings(feishu_notify_dry_run=True)
     result = feishu_notice_service.notify_notice(_notice(), settings, dry_run=True, force=False)
     assert result["ok"] is True and result["status"] == "dry_run"
+    assert calls == []
+    get_store.assert_not_called()
+
+
+def test_notify_notice_dry_run_routes_fallback_per_unresolved_item_in_mixed_build(monkeypatch):
+    get_store = Mock(side_effect=AssertionError("dry-run must not initialize Mongo history store"))
+    monkeypatch.setattr("ci_owner_agent.services.feishu_notice_service.get_history_store", get_store)
+    calls = _ok_send(monkeypatch)
+    notice = CiResponsibilityNotice.model_validate(notice_payload([current_item(), no_owner_item()]))
+
+    result = feishu_notice_service.notify_notice(
+        notice,
+        _settings(feishu_notify_dry_run=True, feishu_fallback_userids=("ou_fb",)),
+        dry_run=True,
+        force=False,
+    )
+
+    payload_text = json.dumps(result["payload"], ensure_ascii=False)
+    assert result["ok"] is True and result["status"] == "dry_run"
+    assert "责任人：无高可信责任人" in payload_text
+    assert "待确认维护人：<at id=ou_fb></at>" in payload_text
+    assert "未识别失败测试文件，使用默认兜底人" in payload_text
+    assert result["summary"]["atOpenIdCount"] == 1
     assert calls == []
     get_store.assert_not_called()
 

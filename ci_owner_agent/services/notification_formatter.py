@@ -5,6 +5,7 @@ from urllib.parse import urlencode
 
 from ci_owner_agent.constants import NO_OWNER_NAME
 from ci_owner_agent.schemas import CiResponsibilityNotice, EvidenceItem, Owner, ResponsibilityItem
+from ci_owner_agent.services.coverage_responsibility import is_stale_coverage_non_assignment_claim
 from ci_owner_agent.services.test_maintainer_mapping import TestMaintainer, TestMaintainerResolver
 from ci_owner_agent.services.wecom_notification_routing import (
     notification_digest,
@@ -44,12 +45,30 @@ _WECOM_REASON_POINT_BREAK_RE = re.compile(
     r"(?:\r?\n)+|[；;。]+|[:：](?=[A-Za-z][A-Za-z0-9]*-\d+\b)"
 )
 _WECOM_FAILURE_TITLE_RE = re.compile(r"^(?P<id>[A-Za-z][A-Za-z0-9]*-\d+)\s*[:：]\s*(?P<title>.+)$")
-_WECOM_FAILURE_CATEGORY_ORDER = ("unit", "integration", "coverage")
+_WECOM_FAILURE_CATEGORY_ORDER = ("build", "unit", "integration", "coverage", "other")
 _WECOM_FAILURE_CATEGORY_LABELS = {
+    "build": "构建失败",
     "unit": "单元测试",
     "integration": "集成测试",
     "coverage": "覆盖率",
+    "other": "其他失败",
 }
+
+_BUILD_FAILURE_RE = re.compile(
+    r"(?ix)(?:"
+    r"\btypescript[_ -]?compile[_ -]?error\b|"
+    r"\b(?:docker[_ -]?)?build[_ -]?failure\b|"
+    r"\bnpm[_ -]?dependency[_ -]?resolution[_ -]?error\b|"
+    r"\bdependency[_ -]?error\b|"
+    r"\btypecheck\b|\blint[_ -]?error\b|"
+    r"\berror\s+ts\d{4,5}\b|"
+    r"\b(?:compile|compilation)\s+(?:error|failed|failure)\b|"
+    r"\bsyntaxerror\b|"
+    r"编译失败|类型检查失败"
+    r")"
+)
+_UNIT_TEST_PATH_RE = re.compile(r"(?:^|/)(?:test|tests)(?:/|$)")
+_INTEGRATION_OCCURRENCES_RE = re.compile(r"(?:^|,\s*)occurrences=(?P<count>\d+)(?:,|$)")
 
 
 def _utf8_bytes(text: str) -> int:
@@ -138,7 +157,13 @@ def _wecom_semantic_clip(value: str, max_chars: int) -> str:
     return prefix.rstrip("，,、：:；;。 ") + WECOM_LONG_TEXT_HINT
 
 
-def _wecom_failure_category(item: ResponsibilityItem) -> str:
+def failure_category(item: ResponsibilityItem) -> str:
+    """Classify one responsibility item without defaulting unknown facts to Unit.
+
+    The notification category is presentation metadata only. It must rely on
+    explicit failure identity/path evidence so an arbitrary Jenkins or compiler
+    failure cannot be presented as a Unit/Integration test failure.
+    """
     if is_coverage_failure_item(item):
         return "coverage"
     identity = " ".join(
@@ -148,6 +173,7 @@ def _wecom_failure_category(item: ResponsibilityItem) -> str:
             item.testFilePath,
             item.failureFilePath,
             item.failureTitle,
+            item.failureSummary,
         )
     ).replace("\\", "/").lower()
     integration_markers = (
@@ -158,7 +184,69 @@ def _wecom_failure_category(item: ResponsibilityItem) -> str:
         "integration tests",
         "集成测试",
     )
-    return "integration" if any(marker in identity for marker in integration_markers) else "unit"
+    if any(marker in identity for marker in integration_markers):
+        return "integration"
+    if _BUILD_FAILURE_RE.search(identity):
+        return "build"
+    signature = str(item.failureSignature or "").lower()
+    explicit_test_paths = [
+        str(path or "").replace("\\", "/").lower()
+        for path in (item.testFilePath, item.failureFilePath)
+    ]
+    if (
+        signature.startswith("xfail|")
+        or "japa" in signature
+        or any(_UNIT_TEST_PATH_RE.search(path) for path in explicit_test_paths)
+    ):
+        return "unit"
+    return "other"
+
+
+def failure_reason_category(value: str | None) -> str:
+    """Conservatively classify a build-level reason when no item was produced."""
+    text = _wecom_public_text(value).replace("\\", "/").lower()
+    if "coverage" in text or "覆盖率" in text:
+        return "coverage"
+    if "integration" in text or "集成测试" in text:
+        return "integration"
+    if _BUILD_FAILURE_RE.search(text):
+        return "build"
+    if "unit test" in text or "单元测试" in text or "japa" in text:
+        return "unit"
+    return "other"
+
+
+def integration_failure_group_label(
+    notice: CiResponsibilityNotice,
+    items: list[ResponsibilityItem],
+    default_label: str,
+) -> str:
+    """Expose raw integration-failure volume when canonical items aggregate suites.
+
+    Integration environment failures intentionally collapse hundreds of log
+    occurrences into one responsibility item per ``kind + suite``.  The
+    occurrence count is retained in deterministic classifier evidence; surface
+    it in both notification channels so an item budget cannot make 769 failures
+    look like five independent failures.
+    """
+    evidence_by_id = {evidence.id: evidence for evidence in notice.evidence}
+    total = 0
+    has_aggregation = False
+    for item in items:
+        item_count = 1
+        for evidence_id in item.evidenceIds:
+            evidence = evidence_by_id.get(evidence_id)
+            if evidence is None or evidence.source != "integration_classifier":
+                continue
+            match = _INTEGRATION_OCCURRENCES_RE.search(str(evidence.detail or ""))
+            if match:
+                item_count = max(1, int(match.group("count")))
+                break
+        total += item_count
+        has_aggregation = has_aggregation or item_count > 1
+    if not has_aggregation:
+        return default_label
+    return f"{default_label}（共 {total} 项原始失败，聚合为 {len(items)} 组）"
 
 
 def _wecom_failure_cause_point(item: ResponsibilityItem, category: str) -> str:
@@ -191,7 +279,7 @@ def _wecom_grouped_failure_causes(notice: CiResponsibilityNotice) -> list[tuple[
         key: [] for key in _WECOM_FAILURE_CATEGORY_ORDER
     }
     for item in notice.responsibilityItems:
-        grouped[_wecom_failure_category(item)].append(item)
+        grouped[failure_category(item)].append(item)
 
     result: list[tuple[str, list[str]]] = []
     for category in _WECOM_FAILURE_CATEGORY_ORDER:
@@ -205,7 +293,10 @@ def _wecom_grouped_failure_causes(notice: CiResponsibilityNotice) -> list[tuple[
         omitted = len(items) - len(points)
         if omitted > 0:
             points.append(f"另有 {omitted} 项，详见责任明细")
-        result.append((_WECOM_FAILURE_CATEGORY_LABELS[category], points))
+        label = _WECOM_FAILURE_CATEGORY_LABELS[category]
+        if category == "integration":
+            label = integration_failure_group_label(notice, items, label)
+        result.append((label, points))
     return result
 
 
@@ -269,10 +360,11 @@ def format_wecom_markdown_notice(
                 reason_lines.append(f"**{category_label}：**")
                 reason_lines.extend(f"• {point}" for point in points)
         else:
-            reason_lines.extend(
-                f"• {point}"
-                for point in _wecom_reason_fallback_points(notice.failureReason, max_reason_chars)
-            )
+            fallback_points = _wecom_reason_fallback_points(notice.failureReason, max_reason_chars)
+            if fallback_points:
+                fallback_category = failure_reason_category(notice.failureReason)
+                reason_lines.append(f"**{_WECOM_FAILURE_CATEGORY_LABELS[fallback_category]}：**")
+                reason_lines.extend(f"• {point}" for point in fallback_points)
         protected_head.extend(
             [
                 *WECOM_SECTION_SPACERS,
@@ -288,7 +380,7 @@ def format_wecom_markdown_notice(
     tail_lines: list[str] = []
     if job_truncated:
         tail_lines.extend([WECOM_VISUAL_SPACER, "…Job 名称过长已截断。", ""])
-    suggestions = format_suggestions(notice.suggestions)
+    suggestions = format_suggestions(collect_notice_suggestions(notice))
     if suggestions:
         if not tail_lines:
             tail_lines.extend(WECOM_SECTION_SPACERS)
@@ -325,9 +417,6 @@ def format_wecom_markdown_notice(
                 f"• 来源：{source_build_label(item, notice)}",
                 f"• 依据：{format_item_evidence(item, evidence_by_id, max_evidence_chars)}",
             ]
-            coverage_suggestion = format_coverage_item_suggestion(item)
-            if coverage_suggestion:
-                item_lines.append(f"• 🛠️ 建议：{coverage_suggestion}")
             match = maintainer_matches[idx - 1]
             if match is not None:
                 item_lines.extend(
@@ -493,6 +582,35 @@ def format_coverage_item_suggestion(item: ResponsibilityItem) -> str | None:
     target = path or "相关源码文件"
     metric_text = "、".join(metrics) or "覆盖率"
     return f"补充 {target} 中未覆盖分支的测试，使 {metric_text} 达到配置阈值。"
+
+
+def collect_notice_suggestions(notice: CiResponsibilityNotice) -> list[str]:
+    """Merge deterministic coverage advice into the notice-level suggestion list.
+
+    Coverage responsibility items are still rendered independently for audit,
+    but all actionable advice belongs to the single notification-level fix
+    section. Coverage advice is placed first so the channel display limit cannot
+    hide it behind model-generated suggestions.
+    """
+    result: list[str] = []
+    seen: set[str] = set()
+    values = [
+        suggestion
+        for item in notice.responsibilityItems
+        if (suggestion := format_coverage_item_suggestion(item))
+    ]
+    values.extend(
+        suggestion
+        for suggestion in notice.suggestions
+        if not is_stale_coverage_non_assignment_claim(suggestion)
+    )
+    for value in values:
+        cleaned = str(value or "").strip()
+        if not cleaned or cleaned in seen:
+            continue
+        seen.add(cleaned)
+        result.append(cleaned)
+    return result
 
 
 def format_item_evidence(item: ResponsibilityItem, evidence_by_id: dict[str, EvidenceItem], max_chars: int = 500) -> str:

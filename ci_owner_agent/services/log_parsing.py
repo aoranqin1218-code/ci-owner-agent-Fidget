@@ -59,6 +59,13 @@ INTEGRATION_MARKER_RE = re.compile(r"FIDGET_INTEGRATION_V1\b")
 # Jenkins declarative pipeline 的 stage 边界行：``[Pipeline] { (StageName)``。
 PIPELINE_STAGE_RE = re.compile(r"^\s*\[Pipeline\]\s+\{\s+\((?P<stage>.+)\)\s*$")
 PIPELINE_STAGE_END_RE = re.compile(r"^\s*\[Pipeline\]\s+//\s+stage\s*$")
+# Declarative Pipeline 即使 stage 未执行也会打印 stage 外壳；后续 skip 行是
+# “未执行”的权威信号，不能把它误当成已经进入 Integration Tests 却缺协议
+# marker。Jenkins 会分别用 when conditional 和 earlier failure(s) 表示跳过原因。
+PIPELINE_STAGE_SKIPPED_RE = re.compile(
+    r'^\s*Stage\s+"(?P<stage>[^"]+)"\s+skipped\s+due\s+to\s+'
+    r'(?:when\s+conditional|earlier\s+failure(?:\(s\)|s)?)\s*$'
+)
 # 集成测试里「外部库/数据库不可达」的连接层错误信号（窄于 STRONG_INNER_FAILURE_RE，
 # 不含 assertionerror/typeerror 等代码断言，避免把 X/Y 数据库错误 Topic 误判环境）。
 INTEGRATION_CONNECTION_ERROR_RE = re.compile(
@@ -307,6 +314,8 @@ def build_integration_protocol_index(all_lines: list[str]) -> dict:
     }
     run_ids: list[str] = []
     current_stage: dict | None = None
+    integration_stage_starts: set[int] = set()
+    skipped_integration_stage_starts: set[int] = set()
     open_suites: dict[str, int] = {}   # suite name -> start_line(0-based)
     seen_suite_starts: set[str] = set()
     seen_phase_orders: set[int] = set()
@@ -329,6 +338,7 @@ def build_integration_protocol_index(all_lines: list[str]) -> dict:
             stage_name = stage_match.group("stage").strip()
             if stage_name == "Integration Tests":
                 index["is_integration"] = True  # has_marker 仍 False，表示协议不完整
+                integration_stage_starts.add(idx + 1)
             current_stage = {"name": stage_name, "start_line": idx + 1, "end_line": None}
             continue
         if PIPELINE_STAGE_END_RE.match(clean):
@@ -336,6 +346,17 @@ def build_integration_protocol_index(all_lines: list[str]) -> dict:
                 current_stage["end_line"] = idx + 1
                 index["stage_ranges"].append(current_stage)
                 current_stage = None
+            continue
+
+        skipped_stage_match = PIPELINE_STAGE_SKIPPED_RE.match(clean)
+        if skipped_stage_match:
+            skipped_stage_name = skipped_stage_match.group("stage").strip()
+            if (
+                skipped_stage_name == "Integration Tests"
+                and current_stage is not None
+                and current_stage.get("name") == skipped_stage_name
+            ):
+                skipped_integration_stage_starts.add(current_stage["start_line"])
             continue
 
         fields = parse_integration_marker(clean)
@@ -532,8 +553,13 @@ def build_integration_protocol_index(all_lines: list[str]) -> dict:
                     f"summary not_started={index['summary']['not_started']} 与未执行 suite 数 {not_started_suites} 不一致"
                 )
     elif index["is_integration"]:
-        # 仅有 Integration stage 但无 V1 marker：协议不完整，标记为冲突。
-        index["conflicts"].append("Integration stage 存在但缺 V1 marker")
+        if integration_stage_starts.issubset(skipped_integration_stage_starts):
+            # Declarative Pipeline 会先声明 stage，再打印 when 条件跳过。此时集成
+            # runner 从未执行，按普通 Unit 构建处理，不生成幽灵协议责任项。
+            index["is_integration"] = False
+        else:
+            # 至少一个 Integration stage 实际进入但无 V1 marker：协议不完整。
+            index["conflicts"].append("Integration stage 存在但缺 V1 marker")
     return index
 
 

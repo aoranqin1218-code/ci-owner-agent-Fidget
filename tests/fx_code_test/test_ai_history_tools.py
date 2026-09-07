@@ -38,7 +38,7 @@ def _notice_for_fact(context, *, build: int, fact: FailureFact, owner_name: str 
     payload = high_confidence_payload(context)
     payload["buildNumber"] = build
     payload["buildUrl"] = f"local://services/fx-code-unittest/{build}"
-    payload["headCommit"] = f"commit-{build}"
+    payload["headCommit"] = context.head_commit
     if no_owner:
         payload["owner"] = {
             "type": "no_high_confidence_owner",
@@ -54,7 +54,7 @@ def _notice_for_fact(context, *, build: int, fact: FailureFact, owner_name: str 
             "type": "high_confidence",
             "name": owner_name,
             "email": owner_email,
-            "commit": f"commit-{build}",
+            "commit": context.head_commit,
             "confidence": 0.9,
         }
         payload["responsibilityItems"] = [
@@ -64,7 +64,7 @@ def _notice_for_fact(context, *, build: int, fact: FailureFact, owner_name: str 
                 failure_signature=fact.signatureKey,
                 owner_name=owner_name,
                 owner_email=owner_email,
-                owner_commit=f"commit-{build}",
+                owner_commit=context.head_commit,
             )
         ]
     return CiResponsibilityNotice.model_validate(payload)
@@ -79,9 +79,9 @@ def _save_fact(store, context, *, build: int = 7, fact: FailureFact | None = Non
         result="FAILURE",
         buildUrl=f"local://services/fx-code-unittest/{build}",
         branch=context.branch,
-        commit=f"commit-{build}",
+        commit=context.head_commit,
     )
-    store.save_analysis(build_info, notice, context.base_commit, f"commit-{build}", 6, context.base_commit, [])
+    store.save_analysis(build_info, notice, context.base_commit, context.head_commit, 6, context.base_commit, [])
     store.save_failure_facts(build_info=build_info, notice=notice, facts=[fact])
     return notice
 
@@ -106,6 +106,27 @@ def _different():
         differentPoints=["different inner root cause"],
         reason="different root cause",
     )
+
+
+class ContinuityGitClient:
+    def __init__(self, touched_paths=()):
+        self.touched_paths = list(touched_paths)
+
+    def check_ancestor(self, repo, base_commit, head_commit):
+        return {"ok": True, "isAncestor": True}
+
+    def get_commit_changed_paths(self, repo, commit):
+        return {"ok": True, "paths": ["server/workflow/service.ts"]}
+
+    def get_path_changes_between(self, repo, base_commit, head_commit, paths):
+        return {
+            "ok": True,
+            "changes": [
+                {"commit": "b" * 40, "path": path}
+                for path in self.touched_paths
+            ],
+            "touchedPaths": self.touched_paths,
+        }
 
 
 def test_ai_history_disabled_when_history_disabled(repo_cache, sample_repo, logs):
@@ -262,7 +283,7 @@ def test_ai_history_same_ts2305_compare_false_has_diagnostics(monkeypatch, repo_
     context = make_lc_context(repo_cache, sample_repo, logs)
     store = make_store()
     fact = make_fact()
-    _save_fact(store, context, build=7, fact=fact)
+    _save_fact(store, context, build=12, fact=fact)
     result = history_search_similar_failure_facts(_context(context, facts=[fact], build=13), store=store)
     assert result["candidates"] == []
     assert result["currentFacts"][0]["inheritedOwner"]["found"] is False
@@ -280,7 +301,7 @@ def test_ai_history_same_ts2305_inherits_owner(monkeypatch, repo_cache, sample_r
     store = make_store()
     fact = make_fact()
     _save_fact(store, context, build=7, fact=fact, owner_name="test")
-    result = history_search_similar_failure_facts(_context(context, facts=[fact], build=9), store=store)
+    result = history_search_similar_failure_facts(_context(context, facts=[fact], build=8), store=store)
     assert len(result["candidates"]) == 1
     inherited = result["currentFacts"][0]["inheritedOwner"]
     assert inherited["found"] is True
@@ -289,6 +310,57 @@ def test_ai_history_same_ts2305_inherits_owner(monkeypatch, repo_cache, sample_r
     assert inherited["matchType"] == "ai_fact_semantic"
     assert inherited["relationship"] == "same_root_cause"
     assert result["diagnostics"]["acceptedCandidatesCount"] == 1
+
+
+def test_ai_history_inherits_across_intermediate_build_without_same_fact_when_code_untouched(
+    monkeypatch,
+    repo_cache,
+    sample_repo,
+    logs,
+):
+    monkeypatch.setattr("ci_owner_agent.services.ai_history_search.compare_failure_facts_with_ai", lambda **kwargs: _same())
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    store = make_store()
+    fact = make_fact()
+    _save_fact(store, context, build=7, fact=fact, owner_name="test")
+
+    current_context = replace(
+        _context(context, facts=[fact], build=9),
+        head_commit="c" * 40,
+        git_client=ContinuityGitClient(),
+    )
+    result = history_search_similar_failure_facts(current_context, store=store)
+
+    assert result["previousBuildNumber"] == 8
+    assert result["candidates"][0]["continuityEligible"] is True
+    assert result["currentFacts"][0]["inheritedOwner"]["found"] is True
+    assert result["currentFacts"][0]["inheritedOwner"]["sourceBuildNumber"] == 7
+    assert result["diagnostics"]["skipped"]["continuityBroken"] == 0
+
+
+def test_ai_history_does_not_inherit_when_failure_path_was_touched(
+    monkeypatch,
+    repo_cache,
+    sample_repo,
+    logs,
+):
+    monkeypatch.setattr("ci_owner_agent.services.ai_history_search.compare_failure_facts_with_ai", lambda **kwargs: _same())
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    store = make_store()
+    fact = make_fact()
+    _save_fact(store, context, build=7, fact=fact, owner_name="test")
+    current_context = replace(
+        _context(context, facts=[fact], build=9),
+        head_commit="c" * 40,
+        git_client=ContinuityGitClient(["src/index.ts"]),
+    )
+
+    result = history_search_similar_failure_facts(current_context, store=store)
+
+    assert result["candidates"] == []
+    assert result["currentFacts"][0]["inheritedOwner"]["found"] is False
+    assert result["diagnostics"]["skipped"]["continuityBroken"] == 1
+    assert result["diagnostics"]["compareResults"][0]["skipReason"] == "continuity_broken"
 
 
 def test_ai_history_compare_below_threshold_not_inherited(monkeypatch, repo_cache, sample_repo, logs):
@@ -420,8 +492,17 @@ def test_ai_history_limits_compare_calls(monkeypatch, repo_cache, sample_repo, l
     context = make_lc_context(repo_cache, sample_repo, logs)
     context = _context(context, build=10, facts=[make_fact()], settings=_settings(context, ai_history_max_compare_calls=2))
     store = make_store()
-    for build in [7, 8, 9]:
-        _save_fact(store, context, build=build, fact=make_fact(signatureKey=f"sig-{build}"))
+    historical_facts = [make_fact(signatureKey=f"sig-{index}") for index in range(3)]
+    notice = _save_fact(store, context, build=9, fact=historical_facts[0])
+    build_info = BuildInfo(
+        job=context.job,
+        buildNumber=9,
+        result="FAILURE",
+        buildUrl="local://services/fx-code-unittest/9",
+        branch=context.branch,
+        commit="commit-9",
+    )
+    store.save_failure_facts(build_info=build_info, notice=notice, facts=historical_facts)
     result = history_search_similar_failure_facts(context, store=store)
     assert result["ok"] is True
     assert len(calls) == 2

@@ -711,11 +711,14 @@ def test_prompt_requires_final_json_after_sufficient_evidence_or_budget_exhausti
         assert text in LANGCHAIN_RESPONSIBILITY_AGENT_SYSTEM_PROMPT
 
 
-def test_prompt_pre_existing_failure_keeps_schema_owner_type():
+def test_prompt_continuing_failure_requires_verified_unchanged_failure_paths():
     for text in [
         "history_search_similar_failures",
-        "pre-existing failure",
-        "pre-existing failure 不代表没有责任人",
+        "中间构建没有该失败不自动切断责任链",
+        "continuityEligible=true",
+        "相关致因或测试文件是否被修改",
+        "Git 连续性无法可信验证",
+        "不能继承旧责任",
         "responsibilityType=inherited_failure_owner",
         "多个 failure item 可以有多个不同 owner",
         "不要输出 pre_existing_failure",
@@ -1014,6 +1017,7 @@ def test_initial_input_includes_compact_history_precheck(repo_cache, sample_repo
             "ok": True,
             "historyEnabled": True,
             "currentBuild": 5077,
+            "previousBuildNumber": 5076,
             "lastSuccessfulBuildNumber": 5068,
             "currentChunks": [{"chunkIndex": 0, "normalizedHash": "abc", "signature": {"testName": "t"}}],
             "candidates": [
@@ -1022,6 +1026,10 @@ def test_initial_input_includes_compact_history_precheck(repo_cache, sample_repo
                     "similarity": 1.0,
                     "relationship": "very_likely_same_failure",
                     "matchType": "signature_exact",
+                    "continuityEligible": True,
+                    "continuityReason": "no failure-related path was modified after the historical failure",
+                    "continuityRelevantPaths": ["packages/fidget-core/test/ExampleTest.ts"],
+                    "continuityTouchedPaths": [],
                     "matchedHistoricalChunk": long_text,
                     "matchedCurrentChunk": long_text,
                     "notice": {"large": long_text},
@@ -1051,6 +1059,10 @@ def test_initial_input_includes_compact_history_precheck(repo_cache, sample_repo
     assert candidate["buildNumber"] == 5076
     assert candidate["matchType"] == "signature_exact"
     assert candidate["relationship"] == "very_likely_same_failure"
+    assert candidate["continuityEligible"] is True
+    assert candidate["continuityRelevantPaths"] == ["packages/fidget-core/test/ExampleTest.ts"]
+    assert candidate["continuityTouchedPaths"] == []
+    assert payload["historyPrecheck"]["previousBuildNumber"] == 5076
     assert candidate["inheritedOwner"]["found"] is True
     assert candidate["inheritedOwner"]["sourceBuildNumber"] == 5104
     assert candidate["inheritedOwner"]["ownerName"] == "Tang.Tangerine-唐嘉伟"
@@ -1117,6 +1129,7 @@ def _ai_history_precheck_payload(count: int = 1) -> dict:
     return {
         "ok": True,
         "mode": "ai_failure_facts",
+        "previousBuildNumber": 7,
         "threshold": 0.9,
         "warning": None,
         "diagnostics": {
@@ -1212,6 +1225,7 @@ def test_initial_input_includes_ai_history_precheck(repo_cache, sample_repo, log
 
     precheck = payload["aiHistoryPrecheck"]
     assert precheck["mode"] == "ai_failure_facts"
+    assert precheck["previousBuildNumber"] == 7
     assert precheck["currentFacts"][0]["inheritedOwner"]["found"] is True
     assert precheck["currentFacts"][0]["inheritedOwner"]["matchType"] == "ai_fact_semantic"
     assert precheck["candidates"][0]["matchType"] == "ai_fact_semantic"

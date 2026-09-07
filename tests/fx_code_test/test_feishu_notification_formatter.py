@@ -6,6 +6,7 @@ import re
 from ci_owner_agent.schemas import CiResponsibilityNotice
 from ci_owner_agent.services.feishu_notification_formatter import (
     FEISHU_POST_MAX_JSON_BYTES,
+    FeishuMaintainerRoute,
     format_feishu_notice_payload,
 )
 
@@ -35,7 +36,7 @@ def current_item(name="张三", email="zs@example.com", title="F-100: group by f
         "failureTitle": title,
         "failureSignature": None,
         "failureSummary": None,
-        "testFilePath": None,
+        "testFilePath": "packages/fidget-core/test/F100Test.ts",
         "failureFilePath": None,
         "owner": {"type": "medium_confidence" if medium else "high_confidence", "name": name, "email": email, "commit": "abc", "confidence": 0.8 if medium else 0.9},
         "responsibilityType": "current_build_owner",
@@ -97,8 +98,7 @@ def format_payload(notice, **kwargs):
         jenkins_link=notice.buildUrl,
         owner_open_ids={},
         maintainer_open_ids={},
-        item_maintainer_names=[],
-        build_maintainer_names=[],
+        maintainer_routes=[],
     )
     defaults.update(kwargs)
     return format_feishu_notice_payload(notice, **defaults)
@@ -171,11 +171,18 @@ def test_no_owner_maintainer_is_not_written_as_causal_owner():
     payload, _ = format_payload(
         notice,
         maintainer_open_ids={"李四": "ou_maint456"},
-        item_maintainer_names=["李四"],
+        maintainer_routes=[
+            FeishuMaintainerRoute(
+                names=("李四",),
+                reason="匹配测试文件维护规则：packages/core/test/**",
+            )
+        ],
     )
     text = all_text(payload)
-    assert "待确认维护者：李四" in text
+    assert "责任人：无高可信责任人" in text
+    assert "待确认维护人：李四" in text
     assert "责任人：李四" not in text
+    assert "路由说明：匹配测试文件维护规则" in text
     assert mention_ids(payload) == ["ou_maint456"]
 
 
@@ -209,6 +216,18 @@ def test_coverage_item_rendered_as_coverage_label():
     assert "**单元测试：**" not in text
     assert "**集成测试：**" not in text
     assert "责任人（中等置信）：秦奥然" in text
+    item_section = next(
+        element["content"]
+        for element in payload["card"]["body"]["elements"]
+        if "**🔥 当前引入｜覆盖率未达标" in element.get("content", "")
+    )
+    suggestion_section = next(
+        element["content"]
+        for element in payload["card"]["body"]["elements"]
+        if element.get("content", "").startswith("**🛠️ 修复建议**")
+    )
+    assert "建议：" not in item_section
+    assert "补充 src/generator/SqlUtils.ts 中未覆盖分支的测试" in suggestion_section
 
 
 def test_payload_is_official_interactive_card_with_bold_sections_and_spacing():
@@ -424,6 +443,121 @@ def test_failure_reason_groups_unit_integration_and_coverage_without_total_summa
     assert "本 build 含 4 个独立失败项" not in reason_section
 
 
+def test_failure_reason_separates_build_and_other_failures():
+    build = current_item(title="TS2552: Cannot find name 'value1'")
+    build.update(
+        {
+            "failureId": "failure-build",
+            "failureSignature": "typescript_compile_error|ts2552|packages/fidget-postgres/src/data/conversion/pgfieldvalueconverter.ts|value1",
+            "failureSummary": "error TS2552: Cannot find name 'value1'",
+            "failureFilePath": "packages/fidget-postgres/src/data/conversion/PgFieldValueConverter.ts",
+        }
+    )
+    other = no_owner_item(title="未分类的 Jenkins 失败", reason="现有证据无法归入已知失败类型。")
+    other.update(
+        {
+            "failureId": "failure-other",
+            "failureSignature": "unclassified_failure|jenkins",
+            "failureSummary": "无法确认具体失败阶段",
+            "testFilePath": None,
+        }
+    )
+    notice = CiResponsibilityNotice.model_validate(notice_payload([build, other]))
+
+    payload, _ = format_payload(notice)
+    reason_section = next(
+        element["content"]
+        for element in payload["card"]["body"]["elements"]
+        if element.get("content", "").startswith("**🔎 失败原因**")
+    )
+    text = all_text(payload)
+
+    assert "**构建失败：**" in text
+    assert "TS2552: Cannot find name 'value1'：error TS2552" in text
+    assert "**其他失败：**" in text
+    assert "未分类的 Jenkins 失败：无法确认具体失败阶段" in text
+    assert "**单元测试：**" not in reason_section
+    assert "**集成测试：**" not in reason_section
+
+
+def test_integration_failure_heading_exposes_raw_occurrences_after_suite_aggregation():
+    first = no_owner_item(title="集成测试数据库不可达（delete-integration）")
+    first.update(
+        {
+            "failureId": "integration-a",
+            "failureSignature": "integration_connection|delete-integration",
+            "failureSummary": "集成测试数据库不可达（delete-integration）",
+            "evidenceIds": ["IE1"],
+        }
+    )
+    second = dict(first)
+    second.update(
+        {
+            "failureId": "integration-b",
+            "failureSignature": "integration_connection|insert-integration",
+            "failureTitle": "集成测试数据库不可达（insert-integration）",
+            "failureSummary": "集成测试数据库不可达（insert-integration）",
+            "evidenceIds": ["IE2"],
+        }
+    )
+    notice = CiResponsibilityNotice.model_validate(
+        notice_payload(
+            [first, second],
+            evidence=[
+                {"id": "IE1", "type": "log", "summary": "delete", "detail": "suite=delete, occurrences=500, lines 1-500", "source": "integration_classifier"},
+                {"id": "IE2", "type": "log", "summary": "insert", "detail": "suite=insert, occurrences=269, lines 501-769", "source": "integration_classifier"},
+            ],
+        )
+    )
+
+    payload, _ = format_payload(notice)
+
+    assert "**集成测试（共 769 项原始失败，聚合为 2 组）：**" in all_text(payload)
+
+
+def test_build_reason_without_items_still_uses_build_failure_category():
+    notice = CiResponsibilityNotice.model_validate(
+        notice_payload(
+            [],
+            failureReason="TypeScript 编译失败：error TS2552: Cannot find name 'value1'.",
+        )
+    )
+
+    payload, _ = format_payload(notice)
+    text = all_text(payload)
+
+    assert "**构建失败：**" in text
+    assert "**其他失败：**" not in text
+
+
+def test_coverage_fix_section_filters_stale_non_assignment_claim():
+    coverage = current_item(
+        title="coverage branches below threshold for src/SqlUtils.ts",
+        medium=True,
+    )
+    coverage.update(
+        {
+            "failureId": "failure-coverage",
+            "failureSignature": "coverage_threshold_failure|packages/fidget-sql/src/sqlutils.ts",
+            "failureFilePath": "packages/fidget-sql/src/SqlUtils.ts",
+        }
+    )
+    notice = CiResponsibilityNotice.model_validate(
+        notice_payload(
+            [coverage],
+            suggestions=[
+                "c8 覆盖率阈值失败由确定性 reconciler 单独处理，本通知不为其分配责任人。"
+            ],
+        )
+    )
+
+    payload, _ = format_payload(notice)
+    text = all_text(payload)
+
+    assert "补充 src/SqlUtils.ts 中未覆盖分支的测试" in text
+    assert "本通知不为其分配责任人" not in text
+
+
 def test_long_point_uses_explicit_jenkins_hint_instead_of_truncation_ellipsis():
     notice = CiResponsibilityNotice.model_validate(
         notice_payload(
@@ -453,11 +587,45 @@ def test_fallback_used_only_when_no_one_reachable():
     notice = CiResponsibilityNotice.model_validate(notice_payload([no_owner_item()]))
     payload, summary = format_payload(
         notice,
-        item_maintainer_names=["李四"],
+        maintainer_routes=[
+            FeishuMaintainerRoute(
+                used_fallback=True,
+                reason="未识别失败测试文件，使用默认兜底人",
+            )
+        ],
         fallback_open_ids=("ou_fb",),
     )
     assert summary.at_open_ids == ("ou_fb",)
-    assert "兜底通知" in all_text(payload)
+    text = all_text(payload)
+    assert "责任人：无高可信责任人" in text
+    assert "待确认维护人：<at id=ou_fb></at>" in text
+    assert "路由说明：未识别失败测试文件，使用默认兜底人" in text
+    assert "兜底通知" not in text
+
+
+def test_mixed_failure_routes_fallback_on_unresolved_item_even_when_owner_reachable():
+    notice = CiResponsibilityNotice.model_validate(
+        notice_payload([current_item(name="张三"), no_owner_item(title="cleanup marker failed")])
+    )
+    payload, summary = format_payload(
+        notice,
+        owner_open_ids={"张三": "ou_owner"},
+        maintainer_routes=[
+            None,
+            FeishuMaintainerRoute(
+                used_fallback=True,
+                reason="未识别失败测试文件，使用默认兜底人",
+            ),
+        ],
+        fallback_open_ids=("ou_fb",),
+    )
+
+    text = all_text(payload)
+    assert summary.at_open_ids == ("ou_fb", "ou_owner")
+    assert "责任人：张三" in text
+    assert "责任人：无高可信责任人" in text
+    assert "待确认维护人：<at id=ou_fb></at>" in text
+    assert "路由说明：未识别失败测试文件，使用默认兜底人" in text
 
 
 def test_inherited_failure_rendered_as_historical():
@@ -474,7 +642,8 @@ def test_integration_env_failure_not_rewritten_as_code_owner():
     payload, _ = format_payload(notice)
     text = all_text(payload)
     assert "待确认" in text
-    assert "责任人：" not in text
+    assert "责任人：无高可信责任人" in text
+    assert "责任人：张三" not in text
 
 
 def test_mixed_failure_distinguishes_categories_in_stats():

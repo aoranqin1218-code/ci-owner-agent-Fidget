@@ -15,12 +15,15 @@ from dataclasses import dataclass, field
 from ci_owner_agent.constants import NO_OWNER_NAME
 from ci_owner_agent.schemas import CiResponsibilityNotice, ResponsibilityItem
 from ci_owner_agent.services.notification_formatter import (
-    format_coverage_item_suggestion,
+    collect_notice_suggestions,
+    failure_category,
+    failure_reason_category,
     format_item_evidence,
     format_item_owner_label,
     format_item_title,
     is_continuing_coverage_item,
     is_coverage_failure_item,
+    integration_failure_group_label,
     public_single_line,
     responsibility_item_icon,
     responsibility_item_label,
@@ -48,11 +51,13 @@ _REASON_POINT_BREAK_RE = re.compile(
     r"(?:\r?\n)+|[；;。]+|[:：](?=[A-Za-z][A-Za-z0-9]*-\d+\b)"
 )
 _FAILURE_TITLE_RE = re.compile(r"^(?P<id>[A-Za-z][A-Za-z0-9]*-\d+)\s*[:：]\s*(?P<title>.+)$")
-_FAILURE_CATEGORY_ORDER = ("unit", "integration", "coverage")
+_FAILURE_CATEGORY_ORDER = ("build", "unit", "integration", "coverage", "other")
 _FAILURE_CATEGORY_LABELS = {
+    "build": "构建失败",
     "unit": "单元测试",
     "integration": "集成测试",
     "coverage": "覆盖率",
+    "other": "其他失败",
 }
 
 
@@ -65,6 +70,15 @@ class FeishuFormatSummary:
     omitted_item_count: int
     at_open_ids: tuple[str, ...] = field(default_factory=tuple)
     unmapped_owner_names: tuple[str, ...] = field(default_factory=tuple)
+
+
+@dataclass(frozen=True)
+class FeishuMaintainerRoute:
+    """Feishu-safe view of one unresolved item's maintainer route."""
+
+    names: tuple[str, ...] = field(default_factory=tuple)
+    used_fallback: bool = False
+    reason: str = ""
 
 
 def _markdown(content: str, *, margin: str = FEISHU_CARD_SECTION_MARGIN) -> dict:
@@ -191,29 +205,6 @@ def _suggestion_points(values: list[str]) -> list[str]:
     return points
 
 
-def _failure_category(item: ResponsibilityItem) -> str:
-    if is_coverage_failure_item(item):
-        return "coverage"
-    identity = " ".join(
-        str(value or "")
-        for value in (
-            item.failureSignature,
-            item.testFilePath,
-            item.failureFilePath,
-            item.failureTitle,
-        )
-    ).replace("\\", "/").lower()
-    integration_markers = (
-        "test/integration/",
-        "integration_",
-        "integration-",
-        "select-integration",
-        "integration tests",
-        "集成测试",
-    )
-    return "integration" if any(marker in identity for marker in integration_markers) else "unit"
-
-
 def _failure_cause_point(item: ResponsibilityItem, category: str) -> str:
     if category == "coverage":
         return _semantic_clip(format_item_title(item, FEISHU_REASON_POINT_MAX_CHARS), FEISHU_REASON_POINT_MAX_CHARS)
@@ -237,7 +228,7 @@ def _failure_cause_point(item: ResponsibilityItem, category: str) -> str:
 def _grouped_failure_causes(notice: CiResponsibilityNotice) -> list[tuple[str, list[str]]]:
     grouped: dict[str, list[ResponsibilityItem]] = {key: [] for key in _FAILURE_CATEGORY_ORDER}
     for item in notice.responsibilityItems:
-        grouped[_failure_category(item)].append(item)
+        grouped[failure_category(item)].append(item)
 
     result: list[tuple[str, list[str]]] = []
     for category in _FAILURE_CATEGORY_ORDER:
@@ -248,7 +239,10 @@ def _grouped_failure_causes(notice: CiResponsibilityNotice) -> list[tuple[str, l
         omitted = len(items) - len(points)
         if omitted > 0:
             points.append(f"另有 {omitted} 项，详见责任明细")
-        result.append((_FAILURE_CATEGORY_LABELS[category], points))
+        label = _FAILURE_CATEGORY_LABELS[category]
+        if category == "integration":
+            label = integration_failure_group_label(notice, items, label)
+        result.append((label, points))
     return result
 
 
@@ -258,8 +252,7 @@ def format_feishu_notice_payload(
     jenkins_link: str,
     owner_open_ids: dict[str, str],
     maintainer_open_ids: dict[str, str],
-    item_maintainer_names: list[str | None] | None = None,
-    build_maintainer_names: list[str] | None = None,
+    maintainer_routes: list[FeishuMaintainerRoute | None] | None = None,
     fallback_open_ids: tuple[str, ...] = (),
     max_item_details: int = FEISHU_MAX_ITEM_DETAILS,
 ) -> tuple[dict, FeishuFormatSummary]:
@@ -278,8 +271,7 @@ def format_feishu_notice_payload(
             jenkins_link=jenkins_link,
             owner_open_ids=owner_open_ids,
             maintainer_open_ids=maintainer_open_ids,
-            item_maintainer_names=item_maintainer_names or [],
-            build_maintainer_names=build_maintainer_names or [],
+            maintainer_routes=maintainer_routes or [],
             fallback_open_ids=fallback_open_ids,
         )
         if _payload_json_bytes(payload) <= FEISHU_POST_MAX_JSON_BYTES or shown <= 1:
@@ -294,8 +286,7 @@ def _build_payload(
     jenkins_link: str,
     owner_open_ids: dict[str, str],
     maintainer_open_ids: dict[str, str],
-    item_maintainer_names: list[str | None],
-    build_maintainer_names: list[str],
+    maintainer_routes: list[FeishuMaintainerRoute | None],
     fallback_open_ids: tuple[str, ...],
 ) -> tuple[dict, FeishuFormatSummary]:
     rendered_at: set[str] = set()
@@ -337,22 +328,33 @@ def _build_payload(
                 max_chars=FEISHU_REASON_POINT_MAX_CHARS,
                 split_before_failure_id=True,
             )
-            reason_lines.extend(f"• {_markdown_text(point)}" for point in reason_points)
+            if reason_points:
+                fallback_category = failure_reason_category(notice.failureReason)
+                reason_lines.append(f"**{_FAILURE_CATEGORY_LABELS[fallback_category]}：**")
+                reason_lines.extend(f"• {_markdown_text(point)}" for point in reason_points)
         elements.append(_markdown("\n".join(reason_lines)))
 
     items = notice.responsibilityItems
     omitted = max(0, len(items) - shown)
     if not items:
-        for index, name in enumerate(build_maintainer_names):
-            line = _maintainer_person_line(name, maintainer_open_ids, rendered_at)
-            if line:
-                # 名单的最后一行承担区块间距，其余行用责任项间距。
-                margin = (
-                    FEISHU_CARD_SECTION_MARGIN
-                    if index == len(build_maintainer_names) - 1
-                    else FEISHU_CARD_ITEM_MARGIN
+        if notice.owner.type == "no_high_confidence_owner":
+            item_lines = [
+                "**👥 责任明细**",
+                "**❓ 待确认｜未识别到独立责任项**",
+                f"👤 责任人：{_markdown_text(NO_OWNER_NAME)}",
+                "• 来源：-",
+                "• 依据：证据不足，详见分析结果 JSON。",
+            ]
+            route = maintainer_routes[0] if maintainer_routes else None
+            item_lines.extend(
+                _maintainer_route_lines(
+                    route,
+                    maintainer_open_ids=maintainer_open_ids,
+                    fallback_open_ids=fallback_open_ids,
+                    rendered_at=rendered_at,
                 )
-                elements.append(_markdown(line, margin=margin))
+            )
+            elements.append(_markdown("\n".join(item_lines), margin=FEISHU_CARD_SECTION_MARGIN))
     else:
         shown_items = items[:shown]
         last_shown_index = len(shown_items) - 1
@@ -369,15 +371,15 @@ def _build_payload(
                 )
                 + "**"
             )
-            line = _item_person_line(
+            person_lines = _item_person_lines(
                 item,
                 owner_open_ids=owner_open_ids,
                 maintainer_open_ids=maintainer_open_ids,
-                maintainer_name=item_maintainer_names[index] if index < len(item_maintainer_names) else None,
+                maintainer_route=maintainer_routes[index] if index < len(maintainer_routes) else None,
+                fallback_open_ids=fallback_open_ids,
                 rendered_at=rendered_at,
             )
-            if line:
-                item_lines.append(line)
+            item_lines.extend(person_lines)
             evidence = format_item_evidence(
                 item,
                 {e.id: e for e in notice.evidence},
@@ -385,12 +387,6 @@ def _build_payload(
             )
             if evidence:
                 item_lines.extend(f"• {_markdown_text(point)}" for point in _evidence_points(evidence))
-            suggestion = format_coverage_item_suggestion(item)
-            if suggestion:
-                item_lines.append(
-                    "• 建议："
-                    + _markdown_text(_semantic_clip(suggestion, FEISHU_SUGGESTION_POINT_MAX_CHARS))
-                )
             # 区块最后一个内容元素承担区块间距；非末尾责任项用责任项间距。
             item_margin = (
                 FEISHU_CARD_SECTION_MARGIN if omitted == 0 and index == last_shown_index else FEISHU_CARD_ITEM_MARGIN
@@ -405,19 +401,12 @@ def _build_payload(
             )
         )
 
-    suggestions = _suggestion_points(notice.suggestions)
+    suggestions = _suggestion_points(collect_notice_suggestions(notice))
     if suggestions:
         suggestion_lines = ["**🛠️ 修复建议**"]
         suggestion_lines.extend(f"• {_markdown_text(suggestion)}" for suggestion in suggestions)
         elements.append(_markdown("\n".join(suggestion_lines)))
 
-    # 兜底仅在无人可触达时启用：任何责任人或维护者已可靠 @ 时，不再追加兜底，避免误触达无关人员。
-    if not rendered_at:
-        for open_id in fallback_open_ids:
-            elements.append(
-                _markdown(f"📢 兜底通知：<at id={open_id}></at>", margin=FEISHU_CARD_ITEM_MARGIN)
-            )
-            rendered_at.add(open_id)
     elements.append(_markdown(_jenkins_link(notice, jenkins_link), margin="0px"))
     return _package(title, elements, notice, shown, rendered_at, unmapped_owners)
 
@@ -485,14 +474,15 @@ def _unmapped_owner_names(notice: CiResponsibilityNotice, owner_open_ids: dict[s
     return tuple(names)
 
 
-def _item_person_line(
+def _item_person_lines(
     item: ResponsibilityItem,
     *,
     owner_open_ids: dict[str, str],
     maintainer_open_ids: dict[str, str],
-    maintainer_name: str | None,
+    maintainer_route: FeishuMaintainerRoute | None,
+    fallback_open_ids: tuple[str, ...],
     rendered_at: set[str],
-) -> str | None:
+) -> list[str]:
     owner = item.owner
     if item.responsibilityType != "no_high_confidence_owner" and owner.name and owner.name != NO_OWNER_NAME:
         role = format_item_owner_label(item)
@@ -500,25 +490,70 @@ def _item_person_line(
         person = f"👤 {role}：{_markdown_text(owner.name)}"
         if open_id and open_id not in rendered_at:
             rendered_at.add(open_id)
-            return f"{person} <at id={open_id}></at>"
+            return [f"{person} <at id={open_id}></at>"]
         if open_id:
-            return person
-        return f"{person}（未完成身份映射）"
-    if maintainer_name:
-        return _maintainer_person_line(maintainer_name, maintainer_open_ids, rendered_at)
-    return None
+            return [person]
+        return [f"{person}（未完成身份映射）"]
+    return [
+        f"👤 责任人：{_markdown_text(NO_OWNER_NAME)}",
+        *_maintainer_route_lines(
+            maintainer_route,
+            maintainer_open_ids=maintainer_open_ids,
+            fallback_open_ids=fallback_open_ids,
+            rendered_at=rendered_at,
+        ),
+    ]
 
 
-def _maintainer_person_line(name: str, maintainer_open_ids: dict[str, str], rendered_at: set[str]) -> str | None:
-    role = "待确认维护者"
-    open_id = maintainer_open_ids.get(name)
-    person = f"👤 {role}：{_markdown_text(name)}"
-    if open_id and open_id not in rendered_at:
+def _maintainer_route_lines(
+    route: FeishuMaintainerRoute | None,
+    *,
+    maintainer_open_ids: dict[str, str],
+    fallback_open_ids: tuple[str, ...],
+    rendered_at: set[str],
+) -> list[str]:
+    names = route.names if route else ()
+    reason = route.reason if route and route.reason else "未生成维护人路由，使用默认兜底人"
+    if names:
+        people: list[str] = []
+        has_reachable_maintainer = False
+        for name in names:
+            open_id = maintainer_open_ids.get(name)
+            person = _markdown_text(name)
+            if open_id:
+                has_reachable_maintainer = True
+                if open_id not in rendered_at:
+                    rendered_at.add(open_id)
+                    person += f" <at id={open_id}></at>"
+            else:
+                person += "（未完成身份映射）"
+            people.append(person)
+        lines = [f"📣 待确认维护人：{'、'.join(people)}"]
+        if not has_reachable_maintainer and fallback_open_ids:
+            lines.append(f"📣 兜底维护人：{_fallback_mentions(fallback_open_ids, rendered_at)}")
+            reason = f"{reason}；维护人无法在飞书中 @，已使用默认兜底人"
+        elif not has_reachable_maintainer:
+            reason = f"{reason}；维护人无法在飞书中 @，且未配置默认兜底人"
+        if reason:
+            lines.append(f"• ℹ️ 路由说明：{_markdown_text(_semantic_clip(reason, FEISHU_EVIDENCE_POINT_MAX_CHARS))}")
+        return lines
+
+    fallback_mentions = _fallback_mentions(fallback_open_ids, rendered_at)
+    lines = [f"📣 待确认维护人：{fallback_mentions or '未配置'}"]
+    if not fallback_mentions:
+        reason = reason.replace("使用默认兜底人", "但未配置默认兜底人")
+    lines.append(f"• ℹ️ 路由说明：{_markdown_text(_semantic_clip(reason, FEISHU_EVIDENCE_POINT_MAX_CHARS))}")
+    return lines
+
+
+def _fallback_mentions(open_ids: tuple[str, ...], rendered_at: set[str]) -> str:
+    mentions: list[str] = []
+    for open_id in open_ids:
+        if not open_id:
+            continue
         rendered_at.add(open_id)
-        return f"{person} <at id={open_id}></at>"
-    if open_id:
-        return person
-    return f"{person}（未完成身份映射）"
+        mentions.append(f"<at id={open_id}></at>")
+    return "、".join(mentions)
 
 
 def _stats_line(notice: CiResponsibilityNotice) -> str:

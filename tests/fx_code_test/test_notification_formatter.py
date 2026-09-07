@@ -11,6 +11,7 @@ from ci_owner_agent.main import main
 from ci_owner_agent.services.notification_formatter import (
     WECOM_SECTION_SPACERS,
     WECOM_VISUAL_SPACER,
+    failure_category,
     format_wecom_markdown_notice,
     result_icon,
     responsibility_type_icon,
@@ -123,6 +124,131 @@ def test_failure_reasons_are_grouped_by_unit_and_integration_tests():
     assert "• O-0503：AssertionError: actual OID does not match expected object_id" in reason_section
 
 
+def test_failure_reasons_separate_build_and_other_failures():
+    build = item(
+        "AoranQin-秦奥然",
+        "high_confidence",
+        "current_build_owner",
+        "TypeScript 编译错误由当前改动直接引入。",
+        "aoran@example.com",
+        failure_file_path="packages/fidget-postgres/src/data/conversion/PgFieldValueConverter.ts",
+    )
+    build.update(
+        {
+            "failureTitle": "TS2552: Cannot find name 'value1'",
+            "failureSignature": "typescript_compile_error|ts2552|packages/fidget-postgres/src/data/conversion/pgfieldvalueconverter.ts|value1",
+            "failureSummary": "error TS2552: Cannot find name 'value1'",
+        }
+    )
+    other = item(
+        "无高可信责任人",
+        "no_high_confidence_owner",
+        "no_high_confidence_owner",
+        "现有证据无法归入已知失败类型。",
+        None,
+    )
+    other.update(
+        {
+            "failureTitle": "未分类的 Jenkins 失败",
+            "failureSignature": "unclassified_failure|jenkins",
+            "failureSummary": "无法确认具体失败阶段",
+        }
+    )
+
+    markdown = format_wecom_markdown_notice(
+        CiResponsibilityNotice.model_validate(notice_payload([build, other]))
+    )
+    reason_section = markdown.split("**🔎 失败原因**", maxsplit=1)[1].split("**👥 责任明细**", maxsplit=1)[0]
+
+    assert "**构建失败：**" in reason_section
+    assert "• TS2552: Cannot find name 'value1'：error TS2552" in reason_section
+    assert "**其他失败：**" in reason_section
+    assert "• 未分类的 Jenkins 失败：无法确认具体失败阶段" in reason_section
+    assert "**单元测试：**" not in reason_section
+    assert "**集成测试：**" not in reason_section
+
+
+@pytest.mark.parametrize(
+    ("signature", "title", "summary", "path"),
+    [
+        ("generic_wrapper|jenkins", "Jenkins agent offline", "节点已离线", None),
+        ("scm_checkout_failure|git", "Git checkout failed", "无法拉取代码", None),
+        ("infrastructure|disk", "No space left on device", "工作节点磁盘已满", None),
+        ("permission_failure|workspace", "Permission denied", "工作区没有写权限", None),
+        ("shell_wrapper|exit_2", "script returned exit code 2", "仅有外层退出码", None),
+        ("environment|timeout", "Environment readiness timeout", "环境未就绪", None),
+    ],
+)
+def test_unknown_non_test_failures_conservatively_use_other_category(
+    signature: str,
+    title: str,
+    summary: str,
+    path: str | None,
+):
+    candidate = item(
+        "无高可信责任人",
+        "no_high_confidence_owner",
+        "no_high_confidence_owner",
+        "现有证据不足。",
+        None,
+        failure_file_path=path,
+    )
+    candidate.update(
+        {
+            "failureSignature": signature,
+            "failureTitle": title,
+            "failureSummary": summary,
+        }
+    )
+    parsed = CiResponsibilityNotice.model_validate(notice_payload([candidate]))
+
+    assert failure_category(parsed.responsibilityItems[0]) == "other"
+    markdown = format_wecom_markdown_notice(parsed)
+    assert "**其他失败：**" in markdown
+    assert "**单元测试：**" not in markdown
+    assert "**集成测试：**" not in markdown
+
+
+def test_integration_failure_heading_exposes_raw_occurrences_after_suite_aggregation():
+    first = item(
+        "无高可信责任人",
+        "no_high_confidence_owner",
+        "no_high_confidence_owner",
+        "数据库不可达。",
+        None,
+    )
+    first.update(
+        {
+            "failureId": "integration-a",
+            "failureSignature": "integration_connection|delete-integration",
+            "failureTitle": "集成测试数据库不可达（delete-integration）",
+            "failureSummary": "集成测试数据库不可达（delete-integration）",
+            "evidenceIds": ["IE1"],
+        }
+    )
+    second = dict(first)
+    second.update(
+        {
+            "failureId": "integration-b",
+            "failureSignature": "integration_connection|insert-integration",
+            "failureTitle": "集成测试数据库不可达（insert-integration）",
+            "failureSummary": "集成测试数据库不可达（insert-integration）",
+            "evidenceIds": ["IE2"],
+        }
+    )
+    payload = notice_payload([first, second])
+    payload["evidence"].extend(
+        [
+            {"id": "IE1", "type": "log", "summary": "delete", "detail": "suite=delete, occurrences=500, lines 1-500", "source": "integration_classifier"},
+            {"id": "IE2", "type": "log", "summary": "insert", "detail": "suite=insert, occurrences=269, lines 501-769", "source": "integration_classifier"},
+        ]
+    )
+
+    markdown = format_wecom_markdown_notice(CiResponsibilityNotice.model_validate(payload))
+
+    assert "**集成测试（共 769 项原始失败，聚合为 2 组）：**" in markdown
+
+
 def test_failure_notice_uses_wecom_compatible_responsibility_icons():
     no_owner = item(
         "无高可信责任人",
@@ -158,10 +284,22 @@ def test_failure_notice_without_items_uses_compatible_unknown_fallback():
 
     markdown = format_wecom_markdown_notice(notice)
 
+    assert "**其他失败：**" in markdown
     assert "**❓ 待确认｜未识别到独立责任项**" in markdown
     assert "• 来源：-" in markdown
     assert "🧩" not in markdown
     assert "🧷" not in markdown
+
+
+def test_build_reason_without_items_still_uses_build_failure_category():
+    payload = notice_payload([])
+    payload["failureReason"] = "TypeScript 编译失败：error TS2552: Cannot find name 'value1'."
+    notice = CiResponsibilityNotice.model_validate(payload)
+
+    markdown = format_wecom_markdown_notice(notice)
+
+    assert "**构建失败：**" in markdown
+    assert "**其他失败：**" not in markdown
 
 
 def test_responsibility_type_icon_unknown_fallback_is_compatible():
@@ -249,7 +387,12 @@ def test_coverage_item_is_rendered_in_chinese_without_changing_its_schema_data()
             "sourceCommit": "h",
         }
     )
-    notice = CiResponsibilityNotice.model_validate(notice_payload([coverage]))
+    payload = notice_payload([coverage])
+    payload["suggestions"] = [
+        "补充 SqlUtils.ts 中未覆盖分支的测试。",
+        "c8 覆盖率阈值失败由确定性 reconciler 单独处理，本通知不为其分配责任人。",
+    ]
+    notice = CiResponsibilityNotice.model_validate(payload)
 
     markdown = format_wecom_markdown_notice(notice)
 
@@ -258,6 +401,7 @@ def test_coverage_item_is_rendered_in_chinese_without_changing_its_schema_data()
     assert "在本次责任排查范围内，仅 AoranQin-秦奥然 修改了 packages/fidget-sql/src/generator/SqlUtils.ts。" in markdown
     assert "coverage branches,lines,statements below threshold" not in markdown
     assert "single author AoranQin-秦奥然 modified" not in markdown
+    assert "本通知不为其分配责任人" not in markdown
 
 
 def test_mixed_failure_notice_distinguishes_continuing_coverage_and_includes_its_fix():
@@ -291,7 +435,10 @@ def test_mixed_failure_notice_distinguishes_continuing_coverage_and_includes_its
     assert "其他 1" not in markdown
     assert "**🔥 当前引入｜EtlUtils - getInputEntryInfo**" in markdown
     assert "**♻️ 覆盖率持续｜覆盖率未达标：src/generator/SqlUtils.ts（分支、行、语句）**" in markdown
-    assert "• 🛠️ 建议：补充 src/generator/SqlUtils.ts 中未覆盖分支的测试，使 分支、行、语句 达到配置阈值。" in markdown
+    assert "• 🛠️ 建议：" not in markdown
+    assert "**🛠️ 修复建议**" in markdown
+    assert "• 补充 src/generator/SqlUtils.ts 中未覆盖分支的测试，使 分支、行、语句 达到配置阈值。" in markdown
+    assert markdown.index("**🛠️ 修复建议**") > markdown.index("**♻️ 覆盖率持续｜")
     assert len(markdown.encode("utf-8")) <= 4096
 
 

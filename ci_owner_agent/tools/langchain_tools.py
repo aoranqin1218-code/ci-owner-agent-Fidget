@@ -339,7 +339,7 @@ def build_langchain_tools(context: AgentRuntimeContext) -> list[Any]:
         )
 
     def history_search_similar_failures(maxCandidates: int = 5, lookbackBuilds: int = 20) -> dict:
-        """Search MongoDB history for previous failed builds with similar normalized error chunks. Use this early to detect pre-existing failures."""
+        """Search history and verify that matching failures have no intervening failure-path changes."""
         blocked = _guard_tool_call("history_search_similar_failures", {"maxCandidates": maxCandidates, "lookbackBuilds": lookbackBuilds})
         if blocked:
             return blocked

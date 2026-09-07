@@ -324,8 +324,17 @@ def test_reconciler_uses_complete_coverage_files_and_promotes_single_medium_owne
         ],
     }
 
+    input_notice = _notice()
+    input_notice.failureReason = (
+        "单元测试断言失败。"
+        "日志中的 c8 Coverage threshold 错误按规则不生成责任项。"
+    )
+    input_notice.suggestions = [
+        "修复必然失败的单元测试断言。",
+        "c8 覆盖率阈值失败由确定性 reconciler 单独处理，本通知不为其分配责任人。",
+    ]
     notice = reconcile_coverage_responsibilities(
-        _notice(),
+        input_notice,
         failure_summaries=summaries,
         repo="fxp-fidget",
         head_commit=_HEAD,
@@ -342,6 +351,8 @@ def test_reconciler_uses_complete_coverage_files_and_promotes_single_medium_owne
     assert notice.owner.type == "medium_confidence"
     assert notice.owner.name == "Zhang San"
     assert notice.hasHighConfidenceOwner is False
+    assert notice.failureReason == "单元测试断言失败。"
+    assert notice.suggestions == ["修复必然失败的单元测试断言。"]
     assert {evidence.type for evidence in notice.evidence if evidence.id in item.evidenceIds} == {"log", "diff"}
 
 

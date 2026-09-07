@@ -5,8 +5,11 @@ from dataclasses import replace
 from ci_owner_agent.schemas import BuildInfo, CiResponsibilityNotice, FailureFact
 from ci_owner_agent.services.history_store import MongoHistoryStore, notice_hash
 from ci_owner_agent.services.integration_baseline import FIDGET_INTEGRATION_ENVIRONMENT_PROFILE
-from ci_owner_agent.services.history_inheritance import is_no_owner_decision_item
-from ci_owner_agent.services.history_inheritance import find_feedback_override_for_failure_signature
+from ci_owner_agent.services.history_inheritance import (
+    assess_failure_chain_continuity,
+    find_feedback_override_for_failure_signature,
+    is_no_owner_decision_item,
+)
 from ci_owner_agent.services.failure_identity import build_failure_summary_signature
 from ci_owner_agent.services.history_search import history_search_similar_failures
 from tests.fx_code_test.test_langchain_agent import high_confidence_payload, make_lc_context
@@ -623,6 +626,188 @@ def test_history_search_traces_inherited_owner_back_to_first_high_confidence(rep
     assert inherited_owner["ownerName"] == "Tang.Tangerine-唐嘉伟"
     assert inherited_owner["ownerType"] == "high_confidence"
     assert result["candidates"][0]["inheritedOwner"]["sourceBuildNumber"] == 5104
+
+
+def test_history_search_inherits_across_intermediate_build_without_same_failure_when_code_untouched(
+    repo_cache,
+    sample_repo,
+    logs,
+):
+    failure_path = "test/server/services/integrate/integrate.service.test.ts"
+
+    class ContinuityGitClient:
+        def check_ancestor(self, repo, base_commit, head_commit):
+            return {"ok": True, "isAncestor": True}
+
+        def get_commit_changed_paths(self, repo, commit):
+            return {"ok": True, "paths": [failure_path]}
+
+        def get_path_changes_between(self, repo, base_commit, head_commit, paths):
+            return {"ok": True, "changes": [], "touchedPaths": []}
+
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    settings = replace(context.settings, history_enabled=True)
+    current_chunk = "FAIL getJsSdkConfig dingtalk ua\nError: UNKNOWN\nExpected: dingtalk\nActual: unknown"
+    context = replace(
+        context,
+        settings=settings,
+        build_number=5106,
+        last_successful_build_number=5103,
+        head_commit="c" * 40,
+        git_client=ContinuityGitClient(),
+        log_provider=FocusedProvider(current_chunk),
+    )
+    store = make_store()
+    from ci_owner_agent.schemas import CiResponsibilityNotice
+
+    first_notice = CiResponsibilityNotice.model_validate(high_confidence_payload(context))
+    intermediate_notice = CiResponsibilityNotice.model_validate(high_confidence_payload(context))
+    build_5104 = BuildInfo(
+        job=context.job,
+        buildNumber=5104,
+        result="FAILURE",
+        buildUrl="local://services/fx-code-unittest/5104",
+        branch=context.branch,
+        commit="a" * 40,
+    )
+    build_5105 = BuildInfo(
+        job=context.job,
+        buildNumber=5105,
+        result="FAILURE",
+        buildUrl="local://services/fx-code-unittest/5105",
+        branch=context.branch,
+        commit="b" * 40,
+    )
+    store.save_analysis(
+        build_5104,
+        first_notice,
+        context.base_commit,
+        "a" * 40,
+        5103,
+        context.base_commit,
+        [focused_chunk(current_chunk)],
+    )
+    store.save_analysis(
+        build_5105,
+        intermediate_notice,
+        context.base_commit,
+        "b" * 40,
+        5103,
+        context.base_commit,
+        [],
+    )
+
+    result = history_search_similar_failures(context, store=store)
+
+    assert result["previousBuildNumber"] == 5105
+    assert result["candidates"][0]["buildNumber"] == 5104
+    assert result["candidates"][0]["continuityEligible"] is True
+    assert result["candidates"][0]["continuityTouchedPaths"] == []
+    assert result["candidates"][0]["inheritedOwner"]["found"] is True
+    assert result["currentChunks"][0]["inheritedOwner"]["sourceBuildNumber"] == 5104
+
+
+def test_failure_continuity_ignores_unrelated_file_from_source_commit():
+    """#49: one introducing commit can contain both the failed test and an unrelated CI script."""
+
+    class MixedCommitGitClient:
+        def check_ancestor(self, repo, base_commit, head_commit):
+            return {"ok": True, "isAncestor": True}
+
+        def get_commit_changed_paths(self, repo, commit):
+            return {
+                "ok": True,
+                "paths": [
+                    "packages/fidget-core/test/CiOwnerAgentControlledFailureTest.ts",
+                    "ci/run-integration-tests.v2.sh",
+                ],
+            }
+
+        def get_path_changes_between(self, repo, base_commit, head_commit, paths):
+            return {
+                "ok": True,
+                "changes": [{"commit": "current", "path": "ci/run-integration-tests.v2.sh"}],
+                "touchedPaths": [],
+            }
+
+    result = assess_failure_chain_continuity(
+        git_client=MixedCommitGitClient(),
+        repo="fidget-xiaoqin",
+        current_build_number=49,
+        previous_build_number=48,
+        current_head_commit="current",
+        historical_build_number=48,
+        historical_head_commit="historical",
+        source_commit="first-failure",
+        relevant_paths=["test/CiOwnerAgentControlledFailureTest.ts"],
+    )
+
+    assert result["continuityEligible"] is True
+    assert result["continuityTouchedPaths"] == []
+    assert "packages/fidget-core/test/CiOwnerAgentControlledFailureTest.ts" in result["continuityRelevantPaths"]
+    assert "ci/run-integration-tests.v2.sh" not in result["continuityRelevantPaths"]
+
+
+def test_history_search_does_not_inherit_when_failure_path_was_touched_after_last_failure(
+    repo_cache,
+    sample_repo,
+    logs,
+):
+    failure_path = "test/server/services/integrate/integrate.service.test.ts"
+
+    class TouchedPathGitClient:
+        def check_ancestor(self, repo, base_commit, head_commit):
+            return {"ok": True, "isAncestor": True}
+
+        def get_commit_changed_paths(self, repo, commit):
+            return {"ok": True, "paths": [failure_path]}
+
+        def get_path_changes_between(self, repo, base_commit, head_commit, paths):
+            return {
+                "ok": True,
+                "changes": [{"commit": "b" * 40, "path": failure_path}],
+                "touchedPaths": [failure_path],
+            }
+
+    context = make_lc_context(repo_cache, sample_repo, logs)
+    context = replace(
+        context,
+        settings=replace(context.settings, history_enabled=True),
+        build_number=5106,
+        last_successful_build_number=5103,
+        head_commit="c" * 40,
+        git_client=TouchedPathGitClient(),
+        log_provider=FocusedProvider(
+            "FAIL getJsSdkConfig dingtalk ua\nError: UNKNOWN\nExpected: dingtalk\nActual: unknown"
+        ),
+    )
+    store = make_store()
+    first_notice = CiResponsibilityNotice.model_validate(high_confidence_payload(context))
+    build_5104 = BuildInfo(
+        job=context.job,
+        buildNumber=5104,
+        result="FAILURE",
+        buildUrl="local://services/fx-code-unittest/5104",
+        branch=context.branch,
+        commit="a" * 40,
+    )
+    current_chunk = "FAIL getJsSdkConfig dingtalk ua\nError: UNKNOWN\nExpected: dingtalk\nActual: unknown"
+    store.save_analysis(
+        build_5104,
+        first_notice,
+        context.base_commit,
+        "a" * 40,
+        5103,
+        context.base_commit,
+        [focused_chunk(current_chunk)],
+    )
+
+    result = history_search_similar_failures(context, store=store)
+
+    assert result["candidates"][0]["continuityEligible"] is False
+    assert result["candidates"][0]["continuityTouchedPaths"] == [failure_path]
+    assert result["candidates"][0]["inheritedOwner"]["found"] is False
+    assert result["currentChunks"][0]["inheritedOwner"]["found"] is False
 
 
 def test_history_search_does_not_inherit_unrelated_owner_from_multi_failure_notice(repo_cache, sample_repo, logs):
