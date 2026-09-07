@@ -4,24 +4,29 @@ CI Owner Agent 是一个面向 Jenkins / CI 构建失败的分析与责任判断
 
 项目的核心原则是：**只在证据足够时找到正确的人**。它不会简单把失败归给最后提交者；遇到环境问题、流水线问题、偶发失败或证据冲突时，会明确输出“无高可信责任人”。
 
-## 当前范围
+## 二期定位：相比一期改变了什么
 
-当前代码支持以下 CI 失败分析能力：
+本仓库是一期 `ci-owner-agent` 的增量迁移版本，不是重新实现一套通用平台。二期保留已有的 Jenkins 日志分析、可信 Git 定责、MongoDB 历史、企业微信通知和人工反馈能力，重点适配 Fidget 工程与飞书通知。
 
-- 解析 Japa 单元测试失败块，提取测试、错误和代码路径；
-- 识别 c8 `check-coverage` 门槛失败，并展示实际覆盖率和阈值；
-- 解析 `FIDGET_INTEGRATION_V1` 集成测试协议，区分代码断言与数据库/基础设施失败；
-- 使用 Jenkins 实际 checkout SHA 和可信 Git 区间调查责任人；
-- 通过 MongoDB 复用可信历史结论、人工反馈和测试失败统计；
-- 支持企业微信通知、群内反馈闭环和每周报告；
-- 支持飞书测试群 Webhook 单向通知、人员映射、消息预算和去重。
+| 维度 | 一期 | Fidget 二期（本仓库） |
+| --- | --- | --- |
+| 分析对象 | 原有工程及其测试日志 | Fidget npm workspace 多包工程 |
+| 单元测试 | 复用原有失败分析流程 | 新增 Japa `✖` 失败块、workspace/package 路径识别 |
+| 覆盖率 | 没有 Fidget c8 专用规则 | 识别 c8 门槛错误，按文件和可信 diff 确定性处理 |
+| 集成测试 | 没有 Fidget suite 协议 | 新增 `FIDGET_INTEGRATION_V1`，区分断言、环境、Pipeline 与 cleanup 失败 |
+| 责任基线 | 以构建责任窗口为主 | 集成测试按失败 suite 查最近可信成功点，必要时回退上一稳定版本 |
+| 历史继承 | 可查询并复用历史失败结论 | 增加相关文件 Git 连续性校验；文件变更或证据不足时重新调查 |
+| 通知渠道 | 企业微信通知及反馈闭环 | 保留企业微信，并新增飞书 Interactive 卡片、人员映射、预算和去重 |
+| 交付策略 | 一期既有能力 | 面向 Fidget 增量适配，暂不抽象为任意项目通用平台 |
 
-尚未完成或不属于当前交付的内容：
+当前已经覆盖构建失败、Japa 单元测试失败、c8 覆盖率不足、集成测试代码失败、集成环境故障、混合失败和成功构建等主要场景。责任判断仍遵循同一原则：证据充分时定位责任人；证据不足、环境或 Pipeline 问题明确输出“无高可信责任人”。
 
-- 飞书群内反馈和历史修正闭环尚未实现；
+当前边界：
+
+- 飞书目前是测试群单向通知，群内反馈和历史修正闭环尚未实现；
 - Connection Tests 未接入当前交付；
-- 正式 Jenkins Job、目标群和生产部署尚需单独评审与验收；
-- 本项目不是面向任意仓库、测试框架和通知渠道的通用平台。
+- 正式 Jenkins Job、目标群和生产部署仍需单独评审与验收；
+- 自动关闭高频失败测试和面向任意项目的通用化不属于本期交付。
 
 ## 工作流程
 
@@ -198,6 +203,8 @@ ERROR: Coverage for <metric> (<pct>%) does not meet [global] threshold (<thresho
 - 环境失败不进入历史继承，也不会清空同一构建中的代码责任；
 - marker 冲突、缺失或状态机不完整时 fail closed。
 
+集成测试不保证每次构建都执行，因此不能直接把“上一次整体成功构建”当作所有 suite 的责任起点。系统会为失败 suite 优先查找最近一次可信成功记录；没有可用历史时，再根据当前 SDK 版本定位上一稳定版本。只有基线提交是当前 checkout 的可信祖先时才进入 Git 调查，否则保守输出 no-owner。
+
 协议与脱敏样本见 [`samples/fidget_log/integration/PROTOCOL.md`](samples/fidget_log/integration/PROTOCOL.md)。
 
 ### 责任类型
@@ -216,6 +223,8 @@ Maintainer 只负责问题处置和通知路由，不等于根因责任人。
 ## 历史、反馈与通知
 
 启用 `CI_AGENT_HISTORY_ENABLED=true` 后，MongoDB 用于保存构建、notice、失败事实、人工反馈、通知去重、统计和 Bot Outbox。历史只能在规范化后的 `repo + job + branch` 范围内复用，并须通过失败签名、来源构建和 Git 连续性校验。
+
+二期的连续性校验会检查从历史失败到当前构建之间，测试文件或已确认的致因文件是否发生变化。相关文件一直未修改时可以继承原结论；发生修改、删除后重建，或 Git 证据不完整时，系统会重新调查，避免把旧责任人错误带到当前构建。
 
 企业微信支持：
 
@@ -303,6 +312,9 @@ GitHub Actions 会在推送到 `main`、面向 `main` 的 Pull Request 和手工
 
 部署与维护以 [`docs/ubuntu_scheduled_analysis.md`](docs/ubuntu_scheduled_analysis.md) 及组织内部的授权维护手册为准。仓库内文档示例均不应替代现场配置确认。
 
-## 内部资料
+## 参考
+
+- [一期代码基线（本仓库第一阶段提交）](https://github.com/aoranqin1218-code/ci-owner-agent-Fidget/tree/bb518fb851bf5d8b4996bf4fb03b585498c47b08)
+- [Fidget 二期仓库](https://github.com/aoranqin1218-code/ci-owner-agent-Fidget)
 
 项目需求、部署手册和生产环境信息仅保存在组织内部的授权知识库中，不在公开 README 中提供链接或标识。
