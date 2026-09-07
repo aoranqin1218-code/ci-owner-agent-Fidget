@@ -1,195 +1,56 @@
 # CI Owner Agent
 
-CI Owner Agent 是一个用于分析 Jenkins / CI 构建失败并生成结构化责任判断通知的 Python 项目。
+CI Owner Agent 是一个面向 Jenkins / CI 构建失败的分析与责任判断系统。它综合可信的构建版本、Git 变更、测试日志、历史失败和人工反馈，输出可审计的结构化 `notice`（构建分析结果），并可按配置发送到企业微信或飞书。
 
-它在接收 Jenkins / 本地 console log 时，按失败类型识别结构化失败块并生成指纹：以 Japa（`✖` 失败符号）测试运行器输出定位测试用例失败（Fidget 二期），并识别 c8 `check-coverage` 100% 门槛不足的覆盖率失败（`Coverage for <metric> (<pct>%) does not meet threshold ... for <file>`），同时清洗 Docker/BuildKit 行前缀与 ANSI 色码，使同一套失败定位逻辑同时适用于本地测试与 Jenkins BuildKit 合并单流输出。
+项目的核心原则是：**只在证据足够时找到正确的人**。它不会简单把失败归给最后提交者；遇到环境问题、流水线问题、偶发失败或证据冲突时，会明确输出“无高可信责任人”。
 
-覆盖率失败（Fidget 二期）由确定性 reconciler 负责定责：同一文件的多个 coverage 指标先合并为一个责任项；Japa 与 coverage 混合失败时两类事实同时保留，展示预算不足也会完整记录 coverage 文件与遗漏数量。随后按 Nx task 输出块归属包名，必要时在候选包完整路径上唯一消歧，再在可信 `base..head` diff 内找唯一作者 → 中等置信责任人；多作者 / 无 diff / 路径不可验证 → 诚实输出无高可信责任人。Agent 不参与 coverage 责任项生成。企业微信与飞书通知会在“覆盖率未达标”后展示各指标的实际覆盖率及配置阈值。
+## 当前范围
 
-它不会简单地把失败归给“最后一次提交人”，而是综合构建状态、可信 checkout SHA、Git 提交与 diff、失败日志、历史失败、人工反馈和可选 LLM 工具调用，判断失败属于：
+当前代码同时保留一期 `fx-code` 能力，并重点支持 Fidget 二期：
 
-- 当前构建新引入的问题；
-- 历史相同失败是否持续以 Git 代码连续性判断：中间构建未执行该测试不会自动断链；历史失败后的相关致因或测试文件只要被修改过（含删除后重加），本次就重新定责，否则继承历史责任结论；
-- 偶发、环境或 Pipeline 问题；
-- 证据不足，无法高可信定责。
+- 解析 Fidget/Japa 单元测试失败块，提取测试、错误和代码路径；
+- 识别 c8 `check-coverage` 门槛失败，并展示实际覆盖率和阈值；
+- 解析 `FIDGET_INTEGRATION_V1` 集成测试协议，区分代码断言与数据库/基础设施失败；
+- 使用 Jenkins 实际 checkout SHA 和可信 Git 区间调查责任人；
+- 通过 MongoDB 复用可信历史结论、人工反馈和测试失败统计；
+- 支持企业微信通知、群内反馈闭环和每周报告；
+- 支持飞书测试群 Webhook 单向通知、人员映射、消息预算和去重。
 
-当证据不足时，系统必须输出 `无高可信责任人`，避免为了给出结果而误报。
+尚未完成或不属于当前交付的内容：
 
-本文档以当前代码为准。项目统一通过以下模块入口运行：
+- 飞书群内反馈和历史修正闭环尚未实现；
+- Fidget Connection Tests 未接入当前交付；
+- 正式 Jenkins Job、目标群和生产部署尚需单独评审与验收；
+- 本项目不是面向任意仓库、测试框架和通知渠道的通用平台。
 
-```powershell
-python -m ci_owner_agent <command> [options]
-```
-
----
-
-## 1. 项目工作流程
-
-### 1.1 总体流程
+## 工作流程
 
 ```text
-Jenkins 在线构建 / 本地 console log
-  -> 解析构建状态、逻辑分支和可信 checkout commit
-  -> SUCCESS / ABORTED 状态门控
-  -> FAILURE / UNSTABLE / UNKNOWN 进入失败分析
-  -> 同步专用 Git repo cache
-  -> 校验 baseCommit 是 headCommit 的祖先
-  -> 读取 focusRange 或 fullRange 的 commits / changed files
-  -> 提取结构化 failure summaries
-  -> 必要时调用 LLM 提取 AI failure facts
-  -> 查询 MongoDB 历史失败、责任结论和人工反馈
-  -> 可选复用可信的历史 no-owner 结论
-  -> LangChain Agent 调用日志、Git、TypeScript、历史工具补充证据
+Jenkins 构建 / 本地日志
+  -> 校验构建状态、逻辑分支和可信 checkout SHA
+  -> 建立上次成功提交到当前提交的责任窗口
+  -> 同步 Agent 专用 Git repo cache，并校验 ancestry
+  -> 提取 Japa、coverage 和 Integration 失败事实
+  -> 查询历史失败、责任结论和人工反馈
+  -> 确定性规则或 Agent 调查
+  -> 本地复核并保守降级弱证据
   -> 生成 CiResponsibilityNotice
-  -> 本地校验、补充 failure signature / path，并降级弱证据
-  -> 可选保存 MongoDB 历史、测试文件失败事件和 metrics
-  -> 按配置通过群机器人 Webhook 直发，或写入 MongoDB Outbox
-  -> Bot transport 由 serve-wecom-bot 长连接 Worker 投递；机器人在两种 transport 下都处理群内反馈
+  -> 可选保存 MongoDB、记录 metrics、发送通知
 ```
 
-### 1.2 三种主要分析入口
+几个关键边界：
 
-| 入口              | 数据来源                           | 适用场景                         |
-| ----------------- | ---------------------------------- | -------------------------------- |
-| `analyze`       | Jenkins API + 本地 Git cache       | Jenkins 可访问时分析指定构建。   |
-| `analyze-local` | 本地 console log + 本地 Git cache  | 离线回放、调试、批量分析。       |
-| `scripts/*.py`  | 本地日志目录、构建号或重复运行参数 | 批量验证、回归测试、稳定性测试。 |
+- `SUCCESS` 直接生成成功 notice；`ABORTED` 默认无责任人；失败状态才进入调查。
+- 只信任 Jenkins 实际 checkout SHA 或等价构建证据，不信任普通日志中的任意 SHA。
+- Git diff 前必须确认 `baseCommit` 是 `headCommit` 的祖先，否则停止高可信定责。
+- Docker、Jenkins、shell 等外层 wrapper 不能覆盖更内层的测试或编译错误。
+- 通知是 notice 的下游副作用；通知失败不会破坏已经生成的分析结果。
 
-### 1.3 构建状态门控
+## 快速开始
 
-| 构建结果                                 | 行为                                                                       |
-| ---------------------------------------- | -------------------------------------------------------------------------- |
-| `SUCCESS`                              | 直接生成成功 notice，不进入 Agent 定责。                                   |
-| `ABORTED`                              | 生成无责任人 notice，提示优先检查 Pipeline、节点、环境或人工中止。         |
-| `FAILURE` / `UNSTABLE` / `UNKNOWN` | 进入失败分析。                                                             |
-| `NOT_BUILT`                            | 主 CLI 不接受该本地覆盖值；批处理和 rerun 脚本会将其作为不可分析状态处理。 |
+### 1. 安装
 
-### 1.4 Git 调查范围
-
-系统始终保留完整责任窗口：
-
-```text
-fullRange = last successful commit -> current head commit
-```
-
-如果显式传入 `--previous-commit`，或 MongoDB 中存在同一 `repo + job + branch` 的上一构建 `headCommit`，则优先建立较窄范围：
-
-```text
-focusRange = previous build head commit -> current head commit
-```
-
-Agent 应先调查 `focusRange`。只有证据不足或窄范围读取失败时，才扩大到 `fullRange`。最终 notice 的 `baseCommit` / `headCommit` 仍表示完整责任窗口。
-
-在读取 diff 前会执行 ancestry 校验。若 `baseCommit` 不是 `headCommit` 的祖先，系统不会输出高可信代码责任结论。
-
-### 1.5 失败证据层级
-
-1. **可信构建信息**：状态、逻辑分支、构建号、构建链接和 checkout SHA。
-2. **Git 上下文**：commit 区间、changed files、文件 diff 和作者信息。
-3. **确定性失败摘要**：在清洗后日志中定位结构化失败块——Japa `✖` 失败行——并生成稳定指纹；同时识别 c8 覆盖率门槛失败（`Coverage for ... does not meet ...`）；Make / Docker 测试失败、TypeScript 编译错误等聚焦片段。
-4. **集成测试分类**：对 `FIDGET_INTEGRATION_V1` runner marker 日志做协议解析与逐块分类——代码断言失败（含 AssertionError）进入定责；数据库/基础设施失败（preflight/cleanup 失败、ECONNREFUSED 等连接错误）与 unknown 确定性 no-owner、不进历史；协议冲突 fail-closed。详见 `samples/fidget_log/integration/PROTOCOL.md`。
-5. **AI failure facts**：确定性摘要不足时，从非结构化日志提取真实内层失败事实。
-6. **历史失败查询**：按签名、结构和可选 AI semantic comparison 查找历史相似失败。
-7. **人工反馈**：确认、修正、标记偶发或标记无责任人的 active feedback。
-8. **本地校验**：验证责任项证据、责任类型、来源构建和 owner 一致性。
-
-### 1.6 责任类型
-
-`responsibilityItems` 中每个失败项可以使用以下类型：
-
-| 类型                         | 含义                                              |
-| ---------------------------- | ------------------------------------------------- |
-| `current_build_owner`      | 当前构建引入的新失败，具有当前 diff、日志等证据。 |
-| `inherited_failure_owner`  | 当前仍失败，但可信根因来自更早的历史构建。        |
-| `no_high_confidence_owner` | 证据不足、环境问题、偶发问题或无法可靠归责。      |
-| `unknown`                  | 模型未稳定判断，通常会在本地校验中降级。          |
-
-顶层 `owner` 是构建级摘要。多失败构建可能包含多个不同责任项，此时顶层 owner 可以保持 `无高可信责任人`，应优先查看 `responsibilityItems`。
-
-### 1.7 历史 no-owner 短路
-
-开启历史后，如果当前所有失败项都能被可信历史 no-owner 结论覆盖，并且：
-
-- 没有可继承责任人；
-- 历史来源构建早于当前构建；
-- 匹配类型属于允许的可信集合；
-- 当前 changed files、错误码、路径等没有出现新的强证据；
-
-系统可以直接继承 no-owner 结论，跳过完整 Agent 分析。该行为由 `CI_AGENT_HISTORY_INHERIT_NO_OWNER_ENABLED` 控制。
-
----
-
-## 2. 目录结构
-
-```text
-ci_owner_agent/
-  agents/                         # Agent 上下文、工厂、LangChain Agent、提示词
-    services/                       # Jenkins、Git、日志来源/纯解析、Mongo、历史、企微渲染/路由、反馈、metrics 等服务
-  tools/                          # Agent 可调用的日志、Git、TypeScript、历史工具
-  __main__.py                     # python -m ci_owner_agent 入口
-  cli/                            # 子命令执行与 CLI 输出边界
-  main.py                         # CLI 参数与稳定入口
-  config.py                       # 环境变量读取与 Settings
-  orchestrator.py                 # analyze / analyze-local 核心编排
-  schemas.py                      # Pydantic 输入输出模型
-  server.py                       # FastAPI 反馈服务
-
-scripts/
-  _runtime.py                     # 脚本共享路径、进程超时和 resume marker 逻辑
-  _batch_common.py                # 批处理与重复运行共用的环境、产物和序列化工具
-  _langsmith_trace.py             # 批处理与重复运行共用的 LangSmith 查询、trace 落盘与统计
-  batch_analyze_company_logs.py   # 批量分析本地 Jenkins 日志
-  batch_analyze_jenkins_builds.py # 批量分析 Jenkins 构建号
-  rerun_analyze_local.py          # 同一日志重复运行并汇总稳定性
-  backfill_test_file_failures.py  # 从已有历史回填测试文件失败事件
-  clear_history_failure_chunks.py # 手工清空 ci_failure_chunks
-
-config/
-  weekly-test-report.yml          # 每周测试失败报告阈值
-  test-maintainers.example.yml    # 测试文件维护人路由示例
-
-ts-analyzer/                      # TypeScript 静态分析 Node.js 脚本
-tests/
-  fx_code_test/                   # 一期（company/企业微信版）测试：单元 + 真实子进程集成，扁平
-  fidget_test/                    # 二期（Fidget）测试：unit / integration / coverage 分类
-samples/                          # 可存放脱敏日志样例
-.github/workflows/ci.yml          # GitHub Actions 测试工作流
-.env.example                      # 配置模板
-pyproject.toml                    # Python 依赖和可选 extras
-```
-
-### 2.1 核心模块职责
-
-| 模块                                      | 职责                                                                           |
-| ----------------------------------------- | ------------------------------------------------------------------------------ |
-| `main.py`                               | CLI 参数解析与稳定入口。                                                        |
-| `cli/commands.py`                       | 子命令执行、输出边界、CLI 错误码与服务启动。                                   |
-| `orchestrator.py`                       | 状态门控、Git 范围、失败摘要、历史预检、Agent 调用和历史保存。                 |
-| `schemas.py`                            | `BuildInfo`、`CiResponsibilityNotice`、`ResponsibilityItem` 等严格模型。 |
-| `services/history_store.py`             | MongoDB 集合、索引、构建历史、notice、失败事实和测试文件事件。                 |
-| `services/history_search.py`            | 基于稳定失败摘要的确定性历史查询与责任继承决策。                               |
-| `services/ai_history_search.py`         | 基于 AI failure facts 的保守历史语义比对与继承预检。                           |
-| `services/history_no_owner.py`          | 历史无责任人结论的选择、信任校验、强证据回退与严格 notice 构造。              |
-| `services/log_parsing.py`              | 失败定位与摘要提取：清洗 BuildKit/ANSI 前缀后按 Japa `✖` 识别失败块，并识别 c8 覆盖率门槛失败，均生成指纹。 |
-| `services/coverage_responsibility.py`  | Fidget 二期：覆盖率门槛失败的确定性定责——包名归属（Nx 块 / 候选包唯一消歧）→ 可信 diff 内找唯一作者 → 中等置信或无责任人；reconciler 为 coverage 责任项的唯一生产者。 |
-| `services/integration_responsibility.py` | Fidget 二期：集成测试环境/unknown 失败的责任保护 guard——写 canonical no-owner、移除 Agent 误生成的环境 owner，环境失败不进历史继承。 |
-| `agents/initial_input.py`              | 构造发给 LangChain Agent 的纯首轮输入 payload。                                |
-| `agents/notice_parser.py`              | 对模型输出进行严格、无副作用的 notice 解析与修复。                             |
-| `services/wecom_notice_service.py`      | CI notice 的格式化、去重、投递与通知失败隔离。                                 |
-| `services/wecom_feedback_service.py`    | 企业微信反馈的权限、确认状态机、幂等和反馈落库。                               |
-| `services/wecom_feedback_cards.py`      | 企业微信确认/状态卡片的纯渲染、字段限制和状态文案。                             |
-| `services/wecom_notification_outbox.py` | 通知入队、去重、租约、重试和 dead 状态。                                       |
-| `services/wecom_bot_worker.py`          | 企业微信长连接、Outbox 消费和反馈消息处理。                                    |
-| `services/weekly_test_report_*`         | 周期计算、阈值配置、统计和周报通知。                                           |
-| `scripts/_runtime.py`                   | 任意 cwd 路径解析、有界进程终止、严格 success marker 校验。                    |
-
----
-
-## 3. 安装
-
-### 3.1 Python 环境
-
-要求 Python `>=3.11`。GitHub Actions 当前使用 Python 3.12。
+要求 Python 3.11+。GitHub Actions 当前使用 Python 3.12。
 
 Windows PowerShell：
 
@@ -197,6 +58,7 @@ Windows PowerShell：
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
+python -m pip install -e ".[dev]"
 ```
 
 Linux / macOS：
@@ -205,1177 +67,286 @@ Linux / macOS：
 python -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
-```
-
-### 3.2 安装依赖
-
-仅安装运行时依赖：
-
-```powershell
-python -m pip install -e .
-```
-
-开发、pytest 和反馈 Web 服务：
-
-```powershell
 python -m pip install -e ".[dev]"
 ```
 
-企业微信 API 模式机器人长连接：
+如需企业微信长连接机器人，再安装：
 
 ```powershell
 python -m pip install -e ".[wecom-bot]"
 ```
 
-同时需要测试、反馈服务和机器人：
-
-```powershell
-python -m pip install -e ".[dev,wecom-bot]"
-```
-
-核心依赖包括 Pydantic 2、LangChain / LangGraph、LangSmith、PyMongo、Requests、PyYAML 和 `tzdata`。FastAPI / Uvicorn 属于 `dev` 或 `server` extra；企业微信 SDK 属于 `wecom-bot` extra。
-
-项目未在 `pyproject.toml` 中声明独立 console script，文档统一使用：
-
-```powershell
-python -m ci_owner_agent ...
-```
-
-### 3.3 创建配置文件
-
-Windows：
+### 2. 创建配置
 
 ```powershell
 Copy-Item .env.example .env
 ```
 
-Linux / macOS：
+首次本地验证建议保持无外部副作用：
 
-```bash
-cp .env.example .env
+```env
+CI_AGENT_MODEL_PROVIDER=fake
+CI_AGENT_HISTORY_ENABLED=false
+CI_AGENT_WECOM_NOTIFY_ENABLED=false
+CI_AGENT_FEISHU_NOTIFY_ENABLED=false
 ```
 
-`.env` 默认使用 `override=False` 加载，不会覆盖进程中已经存在的环境变量。批处理脚本可通过 `--env-override` 显式允许 env 文件覆盖当前环境。
+完整配置及默认值见 [`.env.example`](.env.example)。不要把 `.env`、API Key、Jenkins Token、Webhook、Bot Secret、chatid、反馈 Token 或数据库凭据提交到仓库。
 
-### 3.4 准备专用 Git repo cache
+### 3. 准备 Git repo cache
 
-`CI_AGENT_REPO_CACHE_DIR` 支持：
+`CI_AGENT_REPO_CACHE_DIR` 必须指向 Agent 专用 clone 或 mirror，例如：
 
 ```text
-{CI_AGENT_REPO_CACHE_DIR}/{repo}
-{CI_AGENT_REPO_CACHE_DIR}/{repo}.git
+E:/ci-agent-cache
+└── fidget-xiaoqin
 ```
 
-例如：
+不要使用日常开发工作区。Git 服务可能执行 fetch、读取指定 commit 或进入 detached checkout。
 
-```text
-E:/ci-agent-cache/fx-code
-```
-
-不要把它指向人工日常开发目录。Git 同步和 TypeScript 工具可能执行 fetch、detached checkout 或读取指定 commit，应使用 Agent 专用 clone / mirror。
-
-### 3.5 准备 TypeScript Analyzer
-
-需要 `ts_find_definitions`、`ts_find_callers` 等工具时：
+如需 TypeScript 调用关系分析，再安装 `ts-analyzer` 依赖：
 
 ```powershell
-cd ts-analyzer
-npm install
+Set-Location ts-analyzer
+npm ci
 ```
 
-目标业务仓库也应安装自身依赖：
+## 常用命令
+
+稳定入口统一为：
 
 ```powershell
-cd E:/ci-agent-cache/fx-code
-npm install
+python -m ci_owner_agent <command> [options]
 ```
 
-### 3.6 可选基础设施
+| 命令 | 用途 |
+| --- | --- |
+| `analyze` | 在线读取并分析一个 Jenkins 构建 |
+| `analyze-local` | 使用本地 console log 离线回放 |
+| `notify-notice` | 预览或发送已有 notice |
+| `feedback apply/list` | 提交或查询人工反馈 |
+| `serve-feedback` | 启动反馈 Web 服务 |
+| `test-failure-stats` | 查询测试文件失败统计 |
+| `weekly-test-report` | 生成或发送每周失败报告 |
+| `serve-wecom-bot` | 启动企业微信长连接 Worker |
 
-| 组件                    | 何时需要                                                                                    |
-| ----------------------- | ------------------------------------------------------------------------------------------- |
-| Jenkins                 | 使用`analyze` 或 Jenkins 构建号批处理时。                                                 |
-| MongoDB                 | 历史继承、反馈、测试文件统计、周报、Bot Outbox 和长连接机器人必需；Webhook 直发本身不要求。 |
-| LangSmith               | 需要 trace 或批处理`--fetch-trace` 时。                                                   |
-| 企业微信 API 模式机器人 | 使用 Bot transport 主动通知或处理群内反馈时。                                               |
-
----
-
-## 4. `.env.example` 配置说明
-
-### 4.1 Jenkins、仓库和 Agent 限制
-
-| 配置                                             | 默认值                           | 说明                                                                           |
-| ------------------------------------------------ | -------------------------------- | ------------------------------------------------------------------------------ |
-| `JENKINS_URL`                                  | 空                               | Jenkins 地址。为空时`analyze` 返回结构化 no-owner notice，不会访问 Jenkins。 |
-| `JENKINS_USER`                                 | 空                               | Jenkins 用户名。                                                               |
-| `JENKINS_TOKEN`                                | 空                               | Jenkins API token 或密码。                                                     |
-| `CI_AGENT_REPO_CACHE_DIR`                      | `repos`                        | 专用 Git repo cache。                                                          |
-| `CI_AGENT_DEFAULT_LOG_TAIL_LINES`              | `500`                          | 默认日志尾部行数。                                                             |
-| `CI_AGENT_JENKINS_SUCCESSFUL_BUILD_SCAN_LIMIT` | `100`                          | 在线模式向前扫描同分支成功构建的上限。代码支持该变量，未配置时使用 100。       |
-| `CI_AGENT_MAX_TOOL_STEPS`                      | `12`                           | Agent 工具调用预算参考值。                                                     |
-| `CI_AGENT_MAX_TOOL_OUTPUT_CHARS`               | `20000`                        | 单次工具输出字符上限。                                                         |
-| `CI_AGENT_RECURSION_LIMIT`                     | `max(MAX_TOOL_STEPS × 4, 40)` | LangGraph recursion limit；默认步骤数下为 48。                                 |
-
-### 4.2 LLM 配置
-
-| 配置                               | 默认值   | 说明                                                                    |
-| ---------------------------------- | -------- | ----------------------------------------------------------------------- |
-| `CI_AGENT_MODEL_PROVIDER`        | `fake` | `fake`、`openai`、`deepseek`、`doubao`、`openai-compatible`。 |
-| `CI_AGENT_MODEL_BASE_URL`        | 空       | DeepSeek、豆包和 OpenAI-compatible provider 必填。                      |
-| `CI_AGENT_MODEL_NAME`            | 空       | 非 fake provider 必填。                                                 |
-| `CI_AGENT_API_KEY`               | 空       | 非 fake provider 必填。                                                 |
-| `CI_AGENT_MODEL_TIMEOUT_SECONDS` | `90`   | 单次模型请求超时。                                                      |
-| `CI_AGENT_MODEL_MAX_RETRIES`     | `1`    | 模型请求重试次数。非法值会回退默认值。                                  |
-| `CI_AGENT_RESPONSE_FORMAT`       | `tool` | `tool` 或 `json_text`；非法值回退 `tool`。                        |
-
-`fake` provider 用于离线测试，只返回固定 no-owner 结果，不用于正式责任判断。
-
-豆包示例：
-
-```env
-CI_AGENT_MODEL_PROVIDER=doubao
-CI_AGENT_MODEL_BASE_URL=https://ark.cn-beijing.volces.com/api/v3
-CI_AGENT_MODEL_NAME=your-model
-CI_AGENT_API_KEY=your-api-key
-```
-
-OpenAI-compatible 示例：
-
-```env
-CI_AGENT_MODEL_PROVIDER=openai-compatible
-CI_AGENT_MODEL_BASE_URL=https://your-endpoint.example/v1
-CI_AGENT_MODEL_NAME=your-model
-CI_AGENT_API_KEY=your-api-key
-```
-
-### 4.3 TypeScript Analyzer 与 LangSmith
-
-| 配置                   | 默认值                              | 说明                         |
-| ---------------------- | ----------------------------------- | ---------------------------- |
-| `TS_ANALYZER_DIR`    | `./ts-analyzer`                   | TypeScript Analyzer 目录。   |
-| `LANGSMITH_TRACING`  | `false`                           | 是否启用 LangSmith tracing。 |
-| `LANGSMITH_API_KEY`  | 空                                  | LangSmith API key。          |
-| `LANGSMITH_PROJECT`  | `ci-owner-agent-dev`              | 默认项目名。                 |
-| `LANGSMITH_ENDPOINT` | `https://api.smith.langchain.com` | LangSmith endpoint。         |
-
-实际 tracing 还要求存在有效 API key。批处理脚本可以通过 `--langsmith-project` 覆盖项目名。
-
-### 4.4 MongoDB 历史与测试周报
-
-| 配置                                          | 默认值                            | 说明                                                        |
-| --------------------------------------------- | --------------------------------- | ----------------------------------------------------------- |
-| `CI_AGENT_HISTORY_ENABLED`                  | `false`                         | 启用 MongoDB 历史、反馈、统计和 Outbox。                    |
-| `CI_AGENT_HISTORY_MONGO_URI`                | `mongodb://localhost:27017`     | MongoDB URI。                                               |
-| `CI_AGENT_HISTORY_MONGO_DB`                 | `ci_owner_agent`                | 数据库名。                                                  |
-| `CI_AGENT_WEEKLY_TEST_REPORT_CONFIG_FILE`   | `config/weekly-test-report.yml` | 周报阈值配置。                                              |
-| `CI_AGENT_HISTORY_MAX_CANDIDATES`           | `5`                             | 历史相似失败候选上限。                                      |
-| `CI_AGENT_HISTORY_INHERIT_NO_OWNER_ENABLED` | `true`                          | 是否允许可信历史 no-owner 短路。                            |
-| `CI_AGENT_FAILURE_CHUNK_TAIL_LINES`         | `500`                           | 提取 failure summary 的日志尾部行数；低于 50 会回退默认值。 |
-
-### 4.5 AI failure facts 与 AI history comparison
-
-| 配置                                        | 默认值    | 说明                                        |
-| ------------------------------------------- | --------- | ------------------------------------------- |
-| `CI_AGENT_AI_FAILURE_FACTS_ENABLED`       | `false` | 确定性失败摘要不足时启用 AI failure facts。 |
-| `CI_AGENT_AI_FAILURE_FACT_MIN_CONFIDENCE` | `0.70`  | AI fact 最低置信度，限制在 0～1。           |
-| `CI_AGENT_AI_FAILURE_FACT_MAX_LOG_CHARS`  | `12000` | 送入 fact extractor 的最大日志字符数。      |
-| `CI_AGENT_AI_HISTORY_COMPARE_ENABLED`     | `false` | 对 AI facts 启用历史 semantic comparison。  |
-| `CI_AGENT_AI_HISTORY_COMPARE_THRESHOLD`   | `0.90`  | AI 历史匹配阈值，限制在 0～1。              |
-| `CI_AGENT_AI_HISTORY_MAX_FACT_CANDIDATES` | `20`    | 历史 fact 候选上限。                        |
-| `CI_AGENT_AI_HISTORY_MAX_COMPARE_CALLS`   | `20`    | 单次分析允许的 AI 比较调用上限。            |
-
-### 4.6 Metrics
-
-| 配置                         | 默认值                                       | 说明                   |
-| ---------------------------- | -------------------------------------------- | ---------------------- |
-| `CI_AGENT_METRICS_ENABLED` | `false`                                    | 是否记录分析 metrics。 |
-| `CI_AGENT_METRICS_FILE`    | `./runs/metrics/ci_analysis_metrics.jsonl` | JSONL 输出路径。       |
-
-metrics 包含总耗时、阶段耗时、LLM calls、provider 返回的 token usage、责任项数量、warning 和 error。metrics 写入失败只输出 warning，不改变分析 notice。
-
-### 4.7 企业微信通知与维护人路由
-
-| 配置                                      | 默认值      | 说明                                               |
-| ----------------------------------------- | ----------- | -------------------------------------------------- |
-| `CI_AGENT_WECOM_NOTIFY_ENABLED`         | `false`   | 分析命令是否默认触发通知流程。                     |
-| `CI_AGENT_WECOM_NOTIFY_TRANSPORT`       | `webhook` | CI 通知通道，只允许`webhook` 或 `bot`。        |
-| `CI_AGENT_WECOM_WEBHOOK_URL`            | 空          | 企业微信群机器人 Webhook；公开配置输出中脱敏。     |
-| `CI_AGENT_WECOM_NOTIFY_DRY_RUN`         | `true`    | 默认仅格式化，不调用 Webhook、也不向 Outbox 入队。 |
-| `CI_AGENT_WECOM_NOTIFY_ON_SUCCESS`      | `false`   | 是否通知成功构建。                                 |
-| `CI_AGENT_WECOM_NOTIFY_ON_NO_OWNER`     | `true`    | 无高可信责任人时是否仍通知。                       |
-| `CI_AGENT_WECOM_USER_MAPPING_FILE`      | 空          | Mongo 用户映射不可用时的 CSV fallback。            |
-| `CI_AGENT_TEST_MAINTAINER_MAPPING_FILE` | 空          | 测试文件维护人 YAML；仅用于通知路由，不参与定责。  |
-| `CI_AGENT_WECOM_MENTION_MODE`           | `userid`  | `userid` 或 `name`。                           |
-| `CI_AGENT_WECOM_FALLBACK_USERIDS`       | 空          | 逗号分隔的兜底 userid。                            |
-| `CI_AGENT_NOTIFICATION_DEDUP_ENABLED`   | `true`    | 是否按通知 digest 去重。                           |
-
-测试维护人不是失败责任人。no-owner 责任项仍保持 `no_high_confidence_owner / 无高可信责任人`，企业微信和飞书均按责任项在“待确认维护人”区域展示处理路由；未命中维护规则时使用各渠道显式配置的默认兜底人，并保留路由说明。两种通知的失败原因统一按“构建失败 / 单元测试 / 集成测试 / 覆盖率 / 其他失败”分栏，无法由明确签名或路径识别的内容进入“其他失败”，不再默认归为单元测试。覆盖率责任项中的确定性修复建议与其他建议合并到通知底部唯一的“修复建议”区域，不在责任明细中重复展示；Agent 阶段遗留的“覆盖率不分配责任人/不生成责任项”等流程说明会被移除，避免与最终确定性责任项冲突。
-
-CI 通知默认使用群机器人 Webhook。`userid` 映射成功时 Markdown 继续生成 `<@userid>`，Webhook 能在企业微信群中呈现蓝色真实成员 @。Webhook 对瞬时连接异常做最多 3 次有限重试；HTTP 响应、企业微信业务错误和可能已送达的读取超时不重试，避免无界重试或明显重复。最终失败仍不覆盖 notice，但会输出 WARNING、写入 metrics warnings，并在 MongoDB 可用时保存失败尝试，后续可用同一 notice 正常补发。智能机器人与通知 transport 相互独立：即使 CI 通知使用 Webhook，机器人仍可处理文本反馈、模板卡片、AI 解析和二次确认。需要保留原有主动 Bot 通知链路时设置 `CI_AGENT_WECOM_NOTIFY_TRANSPORT=bot`。
-
-验收通过的推荐部署方式是：群机器人 Webhook 负责 CI 主动通知，长连接智能机器人负责群内反馈。Webhook 模式可以在未启用 MongoDB 时直接发送；启用 MongoDB 后会额外保存 notice 快照、反馈码、去重状态和发送尝试记录。真实群聊验收应确认 `<@userid>` 被客户端渲染为蓝色成员 @，而不是只检查原始 Markdown 文本。
-
-生产 Webhook 示例：
-
-```env
-CI_AGENT_WECOM_NOTIFY_ENABLED=true
-CI_AGENT_WECOM_NOTIFY_TRANSPORT=webhook
-CI_AGENT_WECOM_WEBHOOK_URL=https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=***
-CI_AGENT_WECOM_NOTIFY_DRY_RUN=false
-CI_AGENT_WECOM_MENTION_MODE=userid
-
-CI_AGENT_HISTORY_ENABLED=true
-CI_AGENT_WECOM_BOT_ENABLED=true
-CI_AGENT_WECOM_BOT_ID=***
-CI_AGENT_WECOM_BOT_SECRET=***
-```
-
-`config/test-maintainers.example.yml` 示例：
-
-```yaml
-version: 1
-rules:
-  - repo: fx-code
-    job: services/fx-code-unittest
-    paths:
-      - "test/service/view/**"
-      - "test/**/ViewDataQueryServiceTest.ts"
-    maintainers:
-      - name: "Charlie.Guo"
-        wecomUserId: "charlie.guo"
-```
-
-规则按顺序匹配，第一条同时满足 `repo`、`job` 和任一 `paths` glob 的规则生效。示例 userid 仅为占位值。
-
-### 4.7.1 飞书测试群单向通知
-
-飞书渠道只做**单向通知**：分析完成后把 `CiResponsibilityNotice` 以飞书 `interactive` 展示卡片发送到测试群自定义机器人 Webhook。卡片使用蓝色 header、Markdown 粗体分区、显式 margin 留白和 `width_mode=fill` 自适应聊天窗口宽度；失败原因按“构建失败 / 单元测试 / 集成测试 / 覆盖率 / 其他失败”分栏，只有具备明确测试或构建身份的责任项才进入对应栏，无法可靠识别的项保守进入“其他失败”；只提供 Jenkins URL 跳转，不处理按钮回调，也不生成反馈码，反馈闭环留待后续独立任务。
-
-| 配置                                      | 默认值      | 说明                                               |
-| ----------------------------------------- | ----------- | -------------------------------------------------- |
-| `CI_AGENT_FEISHU_NOTIFY_ENABLED`        | `false`   | 分析命令是否自动触发飞书通知；默认关闭，`--notify` 不会触发飞书。 |
-| `CI_AGENT_FEISHU_WEBHOOK_URL`           | 空          | 飞书测试群自定义机器人 Webhook；公开配置输出中脱敏。 |
-| `CI_AGENT_FEISHU_WEBHOOK_SECRET`        | 空          | 仅当机器人开启「签名校验」时需要；签名按官方协议生成，签名值不记录。 |
-| `CI_AGENT_FEISHU_NOTIFY_DRY_RUN`        | `true`    | 默认只生成 payload，不访问网络。                    |
-| `CI_AGENT_FEISHU_NOTIFY_ON_SUCCESS`     | `false`   | 是否通知成功构建。                                 |
-| `CI_AGENT_FEISHU_NOTIFY_ON_NO_OWNER`    | `true`    | 无高可信责任人时是否仍通知。                       |
-| `CI_AGENT_FEISHU_USER_MAPPING_FILE`     | 空          | 飞书 open_id 映射 YAML（见下）；仅用于真实 `@`，无映射保守降级。 |
-| `CI_AGENT_FEISHU_FALLBACK_USER_IDS`     | 空          | 逗号分隔的兜底 open_id；映射文件存在 `fallback: true` 时由映射文件覆盖。 |
-
-安全与去重边界：
-
-- 飞书自定义机器人只能以 **open_id（`ou_` 开头）** `@` 群成员，且没有通讯录权限、无法自行查 open_id。可靠 open_id 必须来自受管控的映射文件；映射缺失/冲突时消息保守降级为姓名文本，绝不猜测身份，也不把维护者写成责任人。
-- 飞书对每个 no-owner 责任项独立展示“无高可信责任人”、待确认维护人和路由说明；即使同一构建的其他责任项已有可触达责任人，也不会吞掉该项的默认兜底路由。
-- 发送前对 notice 做明文敏感信息扫描，任何 MongoDB/网络副作用之前 fail closed。
-- Webhook 返回只保留 HTTP 状态、数值业务码和受控错误类别；不输出或持久化原始响应正文，防止网关回显 Webhook token、Secret 或签名。
-- 去重键为 `repo + job + branch + buildNumber + notice digest + channel=feishu`，与企微 `channel=wecom` 完全隔离。MongoDB 关闭时只有进程内行为，不声明跨进程去重。
-- 企微与飞书是两个独立下游副作用：一个渠道失败不影响另一个，也不改写 notice。
-
-真实发送前请确认：目标是**飞书测试群**、机器人安全设置与签名配置一致、Webhook/Secret 不写入仓库或文档。
-
-飞书 open_id 映射 YAML（`CI_AGENT_FEISHU_USER_MAPPING_FILE`）示例：
-
-```yaml
-users:
-  - name: "张三"
-    email: zhangsan@example.com
-    openId: "ou_xxxxxxxx"
-    fallback: true # 作为默认兜底维护人；该标记优先于环境变量中的旧兜底值
-  - name: "李四"
-    openId: "ou_yyyyyyyy"
-```
-
-分级验证（先 dry-run，再真实发送）：
+查看完整参数：
 
 ```powershell
-# 1. 本地 dry-run：生成飞书 interactive card payload，不访问网络
-python -m ci_owner_agent notify-notice --channel feishu --dry-run --notice-file .\runs\5064.notice.json
-
-# 2. 确认目标是测试群、机器人签名/关键词设置一致后，关闭 dry-run 真实发送
-python -m ci_owner_agent notify-notice --channel feishu --notice-file .\runs\5064.notice.json
+python -m ci_owner_agent --help
+python -m ci_owner_agent analyze-local --help
 ```
 
-回退：Webhook 泄露时立即在飞书群撤销/重建机器人并轮换 Secret，仓库无需存旧值；关闭 `CI_AGENT_FEISHU_NOTIFY_ENABLED` 即停止飞书副作用，不影响分析与企微通知。
+### Fidget 手工验证快捷入口
 
-### 4.8 企业微信长连接机器人
-
-| 配置                                        | 默认值    | 说明                                                                  |
-| ------------------------------------------- | --------- | --------------------------------------------------------------------- |
-| `CI_AGENT_WECOM_BOT_ENABLED`              | `false` | 启用 API 模式机器人 Worker。                                          |
-| `CI_AGENT_WECOM_BOT_ID`                   | 空        | Bot ID。                                                              |
-| `CI_AGENT_WECOM_BOT_SECRET`               | 空        | Bot Secret。                                                          |
-| `CI_AGENT_WECOM_BOT_DISCOVER_CHAT_ID`     | `false` | 临时发现目标群 chatid；正常运行必须关闭。                             |
-| `CI_AGENT_WECOM_BOT_NOTIFY_CHAT_ID`       | 空        | 仅`CI_AGENT_WECOM_NOTIFY_TRANSPORT=bot` 时使用的通知目标群 chatid。 |
-| `CI_AGENT_WECOM_BOT_NOTIFY_POLL_SECONDS`  | `2`     | Outbox 轮询间隔。                                                     |
-| `CI_AGENT_WECOM_BOT_NOTIFY_LEASE_SECONDS` | `30`    | 单条通知发送租约。                                                    |
-| `CI_AGENT_WECOM_BOT_NOTIFY_MAX_ATTEMPTS`  | `5`     | 最大投递次数。                                                        |
-| `CI_AGENT_WECOM_BOT_CONFIRM_TTL_SECONDS`  | `300`   | 群内反馈确认有效期。                                                  |
-| `CI_AGENT_WECOM_FEEDBACK_CODE_TTL_DAYS`   | `30`    | 构建反馈码 TTL。                                                      |
-| `CI_AGENT_WECOM_BOT_EVENT_TTL_DAYS`       | `7`     | 机器人事件幂等记录 TTL。                                              |
-| `CI_AGENT_WECOM_BOT_LLM_ENABLED`          | `false` | 启用可选自然语言反馈解析。                                            |
-| `CI_AGENT_WECOM_BOT_LLM_MAX_INPUT_CHARS`  | `2000`  | 自然语言解析最大输入字符数。                                          |
-
-固定反馈命令不依赖 LLM。正式使用自然语言解析时，应配置真实模型；fake parser 只适合测试。Bot 主动通知模式还需要常驻 Worker：
-
-```env
-CI_AGENT_WECOM_NOTIFY_ENABLED=true
-CI_AGENT_WECOM_NOTIFY_TRANSPORT=bot
-CI_AGENT_WECOM_NOTIFY_DRY_RUN=false
-CI_AGENT_WECOM_BOT_ENABLED=true
-CI_AGENT_WECOM_BOT_ID=***
-CI_AGENT_WECOM_BOT_SECRET=***
-CI_AGENT_WECOM_BOT_NOTIFY_CHAT_ID=***
-```
-
-### 4.9 反馈服务
-
-| 配置                               | 默认值        | 说明                                                     |
-| ---------------------------------- | ------------- | -------------------------------------------------------- |
-| `CI_AGENT_FEEDBACK_BASE_URL`     | 空            | 通知中反馈链接的基础 URL，也作为机器人卡片跳转地址。     |
-| `CI_AGENT_FEEDBACK_SERVER_HOST`  | `127.0.0.1` | FastAPI 监听地址。                                       |
-| `CI_AGENT_FEEDBACK_SERVER_PORT`  | `8765`      | FastAPI 端口。                                           |
-| `CI_AGENT_FEEDBACK_SHARED_TOKEN` | 空            | 可选共享 token；用于反馈页和用户搜索接口的简单访问保护。 |
-
-不要提交真实 API key、Bot Secret、Jenkins token、chatid 或共享 token。
-
----
-
-## 5. 启动与命令说明
-
-### 5.0 Fidget 手工测试快捷命令
-
-仓库根目录的 `package.json` 只把常用参数转发给现有 Python CLI，不会把本项目变成 Node.js / TypeScript 项目，也不需要执行 `npm install`。Windows 开发环境会直接使用项目的 `.venv\Scripts\python.exe`。
-
-真实 Jenkins 分析默认不传 `--notify`；但只有同时保持 `CI_AGENT_WECOM_NOTIFY_ENABLED=false` 和 `CI_AGENT_FEISHU_NOTIFY_ENABLED=false`，分析才不会自动发送通知。模型调用和历史 MongoDB 读写仍以当前 `.env` 配置为准：
+根目录 `package.json` 只包装现有 Python CLI，不需要执行 `npm install`：
 
 ```powershell
+# 分析个人 Fidget Jenkins Job，并保存 notice
 npm run analyze:jenkins -- 31
-```
 
-结果默认保存到 `runs/manual/jenkins-build-31.notice.json`。确认构建号、notice 内容、目标测试群、@ 人和敏感信息检查均无误后，才使用真实通知入口：
-
-```powershell
-npm run analyze:jenkins:notify -- 31
-```
-
-本地日志分析使用短位置参数 `<日志> <构建号> <base commit> <head commit>`：
-
-```powershell
+# 分析本地日志；base/head 必须来自可信构建事实
 npm run analyze:local -- .\path\to\console.log 31 <base-commit> <head-commit>
-```
 
-`base/head commit` 仍须显式输入，因为它们定义可信责任窗口，快捷脚本不会从不可信日志或当前分支猜测。结果默认保存到 `runs/manual/local-build-31.notice.json`。
-
-在终端预览已经生成的 notice，不产生通知副作用：
-
-```powershell
+# 在终端预览 notice，不发送
 npm run notice:preview -- .\runs\manual\jenkins-build-31.notice.json
 ```
 
-查看全部可选参数可运行 `npm run analyze:help`，或在具体命令后追加 `--help`。这些命令固定使用个人 Fidget 验证 Job `npm/fxp-fidget/fidget-xiaoqin-pipeline`、repo cache `fidget-xiaoqin` 和 `main` 分支；需要临时覆盖时可传 `--job`、`--repo` 或 `--branch`。底层稳定入口仍是 `python -m ci_owner_agent`。
+快捷命令默认使用个人验证环境：
 
-### 5.1 命令总览
-
-| 命令                    | 作用                          |
-| ----------------------- | ----------------------------- |
-| `analyze-local`       | 分析本地 console log。        |
-| `analyze`             | 在线读取并分析 Jenkins 构建。 |
-| `notify-notice`       | 发送或预览已有 notice。       |
-| `feedback apply/list` | 提交或查看人工反馈。          |
-| `serve-feedback`      | 启动反馈 Web 服务。           |
-| `test-failure-stats`  | 查询测试文件失败统计。        |
-| `weekly-test-report`  | 生成或发送测试失败周报。      |
-| `serve-wecom-bot`     | 启动企业微信长连接 Worker。   |
-
-### 5.2 本地日志分析：`analyze-local`
-
-```powershell
-python -m ci_owner_agent analyze-local `
-  --repo fx-code `
-  --job services/fx-code-unittest `
-  --build 5064 `
-  --branch dev `
-  --base-commit <last-success-commit> `
-  --head-commit <failed-build-commit> `
-  --console-file .\samples\company_log\company-unittest-5064.log `
-  --build-url local://services/fx-code-unittest/5064 `
-  --last-success-build 5060 `
-  --previous-build 5063 `
-  --previous-commit <previous-build-head-commit> `
-  --build-timestamp 2026-07-13T16:35:00+08:00 `
-  --output-file .\runs\5064.notice.json
+```text
+job:    npm/fxp-fidget/fidget-xiaoqin-pipeline
+repo:   fidget-xiaoqin
+branch: main
 ```
 
-| 参数                                         | 必填 | 说明                                                                           |
-| -------------------------------------------- | ---- | ------------------------------------------------------------------------------ |
-| `--repo`                                   | 是   | repo cache 中的仓库名。                                                        |
-| `--job`                                    | 是   | Jenkins job 名。                                                               |
-| `--build`                                  | 是   | 构建号。                                                                       |
-| `--base-commit`                            | 是   | 完整责任窗口起点。                                                             |
-| `--head-commit`                            | 是   | 当前构建可信 checkout commit。                                                 |
-| `--console-file`                           | 是   | 本地 console log。                                                             |
-| `--build-url`                              | 是   | 展示用 URL，可使用`local://...`。                                            |
-| `--branch`                                 | 否   | 逻辑分支名。                                                                   |
-| `--result`                                 | 否   | `SUCCESS`、`FAILURE`、`UNSTABLE`、`ABORTED`、`UNKNOWN`。             |
-| `--log-tail-lines`                         | 否   | 覆盖默认日志尾部行数。                                                         |
-| `--ignore-checkout-commit-mismatch`        | 否   | 忽略日志 checkout SHA 与`--head-commit` 不一致保护。仅限明确知道风险时使用。 |
-| `--last-success-build`                     | 否   | 上次成功构建号。                                                               |
-| `--previous-build` / `--previous-commit` | 否   | 显式提供 focusRange 来源。                                                     |
-| `--build-timestamp`                        | 否   | 带时区 ISO 8601 构建时间。无时区值会拒绝。                                     |
-| `--notify`                                 | 否   | 触发通知流程。                                                                 |
-| `--notify-dry-run`                         | 否   | 只格式化，不调用 Webhook、也不向 Outbox 入队。                                 |
-| `--force-notify`                           | 否   | 忽略通知去重。                                                                 |
-| `--output-file`                            | 否   | 原子写入 UTF-8 notice 文件。                                                   |
+注意：`npm run analyze:jenkins` 本身不传 `--notify`，但如果 `.env` 已启用企业微信或飞书自动通知，仍可能真实发送。要确保纯分析，必须同时保持：
 
-`analyze-local` 会从日志中解析可信 checkout 行，并校验其 SHA 与 `--head-commit`。不一致时默认返回输入错误，防止对错误 commit 定责。
-
-**集成测试 fixture 离线回放**：`samples/fidget_log/integration/` 下有三份脱敏真实样本（`failure-assertion.log`、`failure-pipeline-image-pull.log`、`failure-protonbase-unavailable.log`），配套 `manifest.json`（含 sha256）与 `PROTOCOL.md`。样本完整性由默认测试发现并校验：
-
-```powershell
-python -m pytest -q tests/fidget_test/integration/test_fidget_integration_log_fixtures.py tests/fidget_test/integration/test_fidget_integration_log_parsing.py tests/fidget_test/integration/test_fidget_integration_responsibility.py
+```env
+CI_AGENT_WECOM_NOTIFY_ENABLED=false
+CI_AGENT_FEISHU_NOTIFY_ENABLED=false
 ```
 
-三份样本的预期分类：断言样本走代码定责；image-pull / Protonbase 样本走环境 no-owner、不进历史。协议冲突、缺失 preflight/config、suite exit 非整数等非法日志会 fail-closed 为 no-owner。
-
-**Fidget 集成责任基线**：对协议完整、只含 Integration assertion 的失败，系统先按失败项所属 suite 查询同一 job、分支和非敏感环境别名下最近一次可信通过提交；该提交必须仍是当前 Jenkins checkout 的祖先。没有 suite 历史或历史库不可用时，才从 Agent 专用 Git cache 中解析 `fidget-sdk` 的上一稳定 minor 作为保守兜底。版本和 suite 检查点只限定调查范围，不能单独证明责任；每个 owner 仍必须有失败日志与相关 diff 证据，并通过自己 suite 的 `baseline..head` 范围校验。协议可信的运行会把受控的 suite 退出状态写入 `ci_builds.integrationRun`，不会写入数据库连接信息或凭据。
-
-### 5.3 Jenkins 在线分析：`analyze`
+### Jenkins 在线分析
 
 ```powershell
 python -m ci_owner_agent analyze `
-  --job services/fx-code-unittest `
-  --build 5064 `
-  --repo fx-code `
-  --log-tail-lines 500 `
-  --output-file .\runs\5064.notice.json
+  --job npm/fxp-fidget/fidget-xiaoqin-pipeline `
+  --build 31 `
+  --repo fidget-xiaoqin `
+  --output-file .\runs\manual\jenkins-build-31.notice.json
 ```
 
-在线模式会：
+系统会从 Jenkins 查找同分支的上次可信成功构建，并使用实际 checkout SHA 建立责任窗口。调用方必须检查 notice 内容，不能只看进程退出码；例如 Jenkins 配置缺失时，命令可能正常产出一份 no-owner notice。
 
-1. 读取指定 Jenkins 构建；
-2. 规范化逻辑分支；
-3. 查找早于当前构建、同一分支、状态为 `SUCCESS` 且具有可信 commit 的最近成功构建；
-4. 使用 Jenkins checkout SHA，而不是本地分支指针；
-5. 通过 ancestry 校验后进入分析。
+### 本地日志分析
 
-如果 `JENKINS_URL` 未配置，当前实现会输出结构化 no-owner notice，原因说明无法访问 Jenkins，并以命令成功状态结束；调用方应检查 notice 内容，而不是只看进程退出码。
+```powershell
+python -m ci_owner_agent analyze-local `
+  --repo fidget-xiaoqin `
+  --job npm/fxp-fidget/fidget-xiaoqin-pipeline `
+  --build 31 `
+  --branch main `
+  --base-commit <last-success-commit> `
+  --head-commit <failed-build-commit> `
+  --console-file .\path\to\console.log `
+  --build-url local://fidget/build-31 `
+  --result FAILURE `
+  --output-file .\runs\manual\local-build-31.notice.json
+```
 
-### 5.4 发送或预览已有 notice：`notify-notice`
+`analyze-local` 会校验日志中的 checkout SHA 与 `--head-commit`。两者不一致时默认拒绝分析，防止对错误版本定责。
+
+### 通知预览与发送
+
+先 dry-run 审阅内容：
 
 ```powershell
 python -m ci_owner_agent notify-notice `
-  --notice-file .\runs\5064.notice.json `
+  --notice-file .\runs\manual\jenkins-build-31.notice.json `
+  --channel wecom `
+  --dry-run
+
+python -m ci_owner_agent notify-notice `
+  --notice-file .\runs\manual\jenkins-build-31.notice.json `
+  --channel feishu `
   --dry-run
 ```
 
-| 参数                    | 说明                                                       |
-| ----------------------- | ---------------------------------------------------------- |
-| `--notice-file`       | `CiResponsibilityNotice` JSON，支持 UTF-8 和 UTF-8 BOM。 |
-| `--channel`           | `wecom`（默认）或 `feishu`。                              |
-| `--dry-run`           | `wecom` 打印 Markdown；`feishu` 打印飞书 interactive card payload JSON。均不调用 Webhook、也不向 Outbox 入队。 |
-| `--force`             | 忽略通知去重。                                             |
-| `--feedback-base-url` | 覆盖反馈 URL（仅 `wecom` 渠道使用）。                     |
+确认 notice、目标测试群、人员映射、敏感信息和消息长度后，移除 `--dry-run` 才会真实发送。使用 `--force` 可忽略通知去重；它只应用于本次指定渠道。
 
-`CI_AGENT_WECOM_NOTIFY_DRY_RUN=true` 也会使该命令进入 dry-run；`CI_AGENT_FEISHU_NOTIFY_DRY_RUN=true` 同理作用于 `--channel feishu`。
+## 失败分析与责任语义
 
-飞书手动发送示例（先 dry-run 审阅 payload，确认目标为测试群后再真实发送）：
+### Fidget 单元测试
 
-```powershell
-python -m ci_owner_agent notify-notice --channel feishu --dry-run --notice-file .\runs\5064.notice.json
-python -m ci_owner_agent notify-notice --channel feishu --notice-file .\runs\5064.notice.json
-```
+以 Japa `✖` 失败块为锚点，清理 ANSI 和 Docker/BuildKit 前缀后，提取测试名称、错误类型、代码路径和稳定签名。结构化签名可用于历史匹配；普通 wrapper 不会形成可继承的测试失败事实。
 
-`analyze` / `analyze-local` 的 `--notify-dry-run` 会执行格式化但不会打印 Markdown；需要人工预览时，先用 `--output-file` 保存 notice，再运行 `notify-notice --dry-run`。
+### 覆盖率
 
-Windows PowerShell 5.1 可能通过管道或 `Set-Content -Encoding utf8` 引入 BOM / 转码问题。推荐始终使用 `--output-file` 让 Python 原子写入 JSON。
-
-### 5.5 人工反馈：`feedback`
-
-提交反馈：
-
-```powershell
-python -m ci_owner_agent feedback apply `
-  --repo fx-code `
-  --job services/fx-code-unittest `
-  --branch dev `
-  --build 5064 `
-  --failure-id F1 `
-  --action correct_owner `
-  --owner-name "张三" `
-  --owner-email zhangsan@example.com `
-  --owner-type high_confidence `
-  --reviewer reviewer `
-  --note "修正责任人"
-```
-
-查看反馈：
-
-```powershell
-python -m ci_owner_agent feedback list `
-  --repo fx-code `
-  --job services/fx-code-unittest `
-  --branch dev `
-  --build 5064
-```
-
-支持的 action：
+只认 c8 的规范门槛错误：
 
 ```text
-confirm_owner
-correct_owner
-mark_flaky
-mark_no_owner
+ERROR: Coverage for <metric> (<pct>%) does not meet [global] threshold (<threshold>%) [for <file>]
 ```
 
-反馈命令要求 MongoDB history store 可用。可通过 `--failure-id` 或 `--failure-signature` 定位责任项；`correct_owner` 可补充 owner commit 和来源构建号。
+只有实际覆盖率低于阈值才算失败。文件级 coverage 会在可信 diff 中寻找唯一作者，最高为 `medium_confidence`；多作者、无 diff、路径无法验证或范围异常时输出 no-owner。coverage 责任项完全由确定性逻辑生成，不交给 Agent 猜测。
 
-### 5.6 启动反馈服务：`serve-feedback`
+### Fidget 集成测试
 
-```powershell
-python -m ci_owner_agent serve-feedback --host 0.0.0.0 --port 8765
-```
+集成日志以 `FIDGET_INTEGRATION_V1` marker 为协议锚点：
 
-需要安装 `dev` 或 `server` extra，并启用 MongoDB history。
+- AssertionError 等代码断言失败继续走可信 Git 定责；
+- preflight、cleanup、ECONNREFUSED、镜像拉取和数据库不可用等环境失败确定性 no-owner；
+- 环境失败不进入历史继承，也不会清空同一构建中的代码责任；
+- marker 冲突、缺失或状态机不完整时 fail closed。
 
-| 路径                                                              | 说明               |
-| ----------------------------------------------------------------- | ------------------ |
-| `GET /health`                                                   | 健康检查。         |
-| `GET /feedback?repo=...&job=...&branch=...&build=...&token=...` | 构建反馈页。       |
-| `POST /feedback`                                                | 提交反馈。         |
-| `GET /api/wecom-users/search?q=...&limit=...&token=...`         | 搜索企业微信用户。 |
+协议与脱敏样本见 [`samples/fidget_log/integration/PROTOCOL.md`](samples/fidget_log/integration/PROTOCOL.md)。
 
-配置 `CI_AGENT_FEEDBACK_SHARED_TOKEN` 后，上述反馈页和搜索接口必须携带相同 token。它是共享访问门槛，不是完整用户认证系统。
+### 责任类型
 
-### 5.7 测试文件失败统计：`test-failure-stats`
+每个 `responsibilityItem` 独立记录失败、责任人、来源构建、置信度、原因和证据：
 
-```powershell
-python -m ci_owner_agent test-failure-stats `
-  --repo fx-code `
-  --job services/fx-code-unittest `
-  --branch dev `
-  --period current-week `
-  --top 20 `
-  --format json
-```
+| 类型 | 含义 |
+| --- | --- |
+| `current_build_owner` | 当前责任窗口内的新引入问题 |
+| `inherited_failure_owner` | 从更早的可信同类失败继承 |
+| `no_high_confidence_owner` | 环境问题或证据不足，不能可靠定责 |
+| `unknown` | 未形成有效结论，最终校验通常会保守降级 |
 
-`--job` 和 `--branch` 可重复传入，也可在一个参数中使用英文逗号分隔。输出格式支持 `json`、`csv`、`markdown`。
+Maintainer 只负责问题处置和通知路由，不等于根因责任人。
 
-时间范围可使用：
+## 历史、反馈与通知
+
+启用 `CI_AGENT_HISTORY_ENABLED=true` 后，MongoDB 用于保存构建、notice、失败事实、人工反馈、通知去重、统计和 Bot Outbox。历史只能在规范化后的 `repo + job + branch` 范围内复用，并须通过失败签名、来源构建和 Git 连续性校验。
+
+企业微信支持：
+
+- Webhook 或 Bot Outbox 主动通知；
+- userid 映射、维护人路由和兜底通知；
+- 反馈码、确认卡片、人工修正和历史覆盖；
+- UTF-8 4096 字节预算、去重、有限重试和失败隔离。
+
+飞书当前支持测试群自定义机器人 Webhook 单向通知，包括 interactive card、open_id 映射、维护人路由、消息预算、去重和失败审计；群内反馈闭环仍待实现。
+
+详细接入说明见：
+
+- [`docs/jenkins_notification_integration.md`](docs/jenkins_notification_integration.md)
+- [`docs/history_failure_summary.md`](docs/history_failure_summary.md)
+- [`docs/ai_failure_facts.md`](docs/ai_failure_facts.md)
+- [`docs/ubuntu_scheduled_analysis.md`](docs/ubuntu_scheduled_analysis.md)
+
+## 目录结构
 
 ```text
---period current-week
---period previous-week
+ci_owner_agent/
+  main.py, cli/        CLI 参数与命令分发
+  orchestrator.py      状态门控和核心编排
+  schemas.py           严格 notice / evidence / owner 模型
+  agents/              Agent 上下文、提示词和实现
+  tools/               Agent 可见的薄适配层
+  services/            Git、Jenkins、日志、历史、通知和反馈领域服务
+scripts/               手工、轮询、批处理、回填和周报入口
+tests/
+  fx_code_test/        一期兼容与共享能力测试
+  fidget_test/         Fidget unit / integration / coverage 测试
+samples/fidget_log/    Fidget 离线回放样本
+config/                维护人和周报配置
+deploy/systemd/        Linux 定时任务模板
+ts-analyzer/           TypeScript compiler API 辅助工具
 ```
 
-也可同时提供带时区的：
+完整代码链路与模块职责见 [`PROJECT_OVERVIEW.md`](PROJECT_OVERVIEW.md)。
 
-```text
---period-start <ISO-8601>
---period-end <ISO-8601>
-```
+## 配置分类
 
-自定义起止时间必须同时提供，且开始时间早于结束时间。
+全部配置均从环境变量或 `.env` 读取，详细字段见 [`.env.example`](.env.example)。常用分组如下：
 
-### 5.8 每周测试失败报告：`weekly-test-report`
+| 分组 | 关键配置 |
+| --- | --- |
+| Jenkins | `JENKINS_URL`、`JENKINS_USER`、`JENKINS_TOKEN` |
+| Git / Agent | `CI_AGENT_REPO_CACHE_DIR`、工具步数和输出预算 |
+| 模型 | `CI_AGENT_MODEL_PROVIDER`、`BASE_URL`、`MODEL_NAME`、`API_KEY` |
+| MongoDB | `CI_AGENT_HISTORY_ENABLED`、`MONGO_URI`、`MONGO_DB` |
+| 企业微信 | `CI_AGENT_WECOM_NOTIFY_*`、Webhook、Bot、人员映射 |
+| 飞书 | `CI_AGENT_FEISHU_NOTIFY_*`、Webhook、Secret、open_id 映射 |
+| 反馈 | `CI_AGENT_FEEDBACK_*` |
+| 可观测性 | `LANGSMITH_*`、`CI_AGENT_METRICS_*` |
 
-```powershell
-python -m ci_owner_agent weekly-test-report `
-  --repo fx-code `
-  --job services/fx-code-unittest `
-  --branch dev `
-  --period previous-week `
-  --notify
-```
+生产模型应使用获准的 OpenAI-compatible 服务边界，不能把供应商地址、模型名或密钥硬编码进业务逻辑。
 
-| 参数              | 说明                                                                     |
-| ----------------- | ------------------------------------------------------------------------ |
-| `--top`         | 覆盖配置中的 topN。必须为正整数。                                        |
-| `--config-file` | 覆盖`CI_AGENT_WEEKLY_TEST_REPORT_CONFIG_FILE`。                        |
-| `--notify`      | 按当前 transport 发送：Webhook 直发，Bot 写入 Outbox。                   |
-| `--dry-run`     | 输出并模拟通知，不调用 Webhook、也不向 Outbox 入队。                     |
-| `--force`       | 忽略当前 transport 的去重；Webhook 强制直发，Bot 生成新的 delivery key。 |
+## 测试与质量门禁
 
-Webhook 发送记录的顶层 `status` 表示“是否曾经成功发送”。成功后即使一次 `--force` 重发失败，历史 `status` 仍保持 `sent`，最近一次尝试结果记录在 `lastAttemptStatus`、`lastAttemptError` 和 `lastAttemptAt`；因此后续非 force 调用仍会正常去重。
-
-`config/weekly-test-report.yml` 使用严格 schema，支持：
-
-- `weeklyFailedBuildCount`；
-- `consecutiveFailureCount`；
-- `weeklyFailureRate`；
-- `totalFailedBuildCount`；
-- `minimumCompletedBuildCount`；
-- 规则级 `matchMode: all | any`。
-
-`topN` 只限制展示数量，不会把未达阈值的测试文件提升为重点项目。
-
-### 5.9 启动企业微信机器人：`serve-wecom-bot`
-
-```powershell
-python -m ci_owner_agent serve-wecom-bot
-```
-
-前置条件：
-
-- 安装 `wecom-bot` extra；
-- `CI_AGENT_HISTORY_ENABLED=true`；
-- MongoDB 可连接；
-- `CI_AGENT_WECOM_BOT_ENABLED=true`；
-- 配置 Bot ID 和 Secret；
-- 仅当 CI 通知使用 `bot` transport 时，还需配置目标群 chatid。
-
-命令行 `--bot-id` / `--secret` 优先于环境变量。
-
-获取目标群 chatid 时：
-
-1. 暂时设置 `CI_AGENT_WECOM_NOTIFY_ENABLED=false`；
-2. 设置 `CI_AGENT_WECOM_BOT_DISCOVER_CHAT_ID=true`；
-3. 启动 Worker；
-4. 在目标群 @机器人发送一条消息；
-5. 记录进程输出的第一次群聊 chatid；
-6. 停止 Worker，将 chatid 写入 `CI_AGENT_WECOM_BOT_NOTIFY_CHAT_ID`；
-7. 将 discovery 重新关闭后再启动常驻 Worker。
-
-固定反馈命令：
-
-```text
-@机器人 CI-XXXXXX 1 判断正确
-@机器人 CI-XXXXXX 1 责任人改为 @Lisi-李四
-@机器人 CI-XXXXXX 2 标记偶发
-@机器人 CI-XXXXXX 1 无法定责
-@机器人 查看 CI-XXXXXX
-@机器人 帮助
-```
-
-修改类反馈会先生成确认卡片。只有该反馈的发起人可以确认或取消；这是防误操作措施，不是业务管理员权限控制。
-
----
-
-## 6. 批量测试脚本说明
-
-### 6.1 批量分析本地日志：`batch_analyze_company_logs.py`
-
-```powershell
-python .\scripts\batch_analyze_company_logs.py `
-  --log-dir .\samples\company_log `
-  --log-glob "company-unittest-*.log" `
-  --repo fx-code `
-  --job services/fx-code-unittest `
-  --branch dev `
-  --initial-base-commit <known-success-commit> `
-  --build-from 5060 `
-  --build-to 5112 `
-  --timeout-seconds 900 `
-  --out-dir .\runs\company-log-batch
-```
-
-核心规则：
-
-- 只信任独立的 `Checking out Revision <40位SHA> (...)` 或 `git checkout -f <40位SHA>`；
-- 两个不同的可信 checkout SHA 会成为 validation failure；
-- `GIT_COMMIT`、`HEAD_COMMIT` 或普通文本 SHA 不作为 checkout 证据；
-- checkout ref 必须能规范化为业务分支，tag、pull ref、`HEAD`、未知 ref 会拒绝；
-- `SUCCESS` 仅更新同分支基线；
-- `FAILURE`、`UNSTABLE`、`UNKNOWN` 执行分析；
-- `ABORTED`、`NOT_BUILT` 正常跳过；
-- manifest-only 记录可补充历史和成功基线，但失败状态必须具有真实 console log 才能分析；
-- 每个构建自动启用独立 metrics 文件。
-
-常用参数：
-
-| 参数                              | 说明                                                   |
-| --------------------------------- | ------------------------------------------------------ |
-| `--log-dir`                     | 必填，本地日志目录。                                   |
-| `--log-glob`                    | 默认`*.log`。                                        |
-| `--repo`                        | 默认`fx-code`。                                      |
-| `--job`                         | 默认`services/fx-code-unittest`。                    |
-| `--branch`                      | 默认`dev`，必须是逻辑分支。                          |
-| `--python`                      | 子进程 Python，默认当前解释器。                        |
-| `--build-url-prefix`            | 本地 build URL 前缀。                                  |
-| `--initial-base-commit`         | 已知成功基线。                                         |
-| `--manifest-file`               | 可选 JSON 构建历史补充。                               |
-| `--build-from` / `--build-to` | 构建范围。                                             |
-| `--limit`                       | 最多执行的 runnable build 数量；0 表示不限。           |
-| `--timeout-seconds`             | 单构建超时，默认 900。                                 |
-| `--resume`                      | 仅复用 notice + 严格 success marker 均可信的历史结果。 |
-| `--dry-run`                     | 只写命令和记录，不启动分析函数。                       |
-| `--fetch-trace`                 | 拉取 LangSmith trace。                                 |
-
-输出结构：
-
-```text
-runs/company-log-batch-xxxx/
-  index.jsonl
-  summary.csv
-  notices/*.notice.json
-  notices/*.notice.json.success.json
-  stdout/*.stdout.txt
-  stderr/*.stderr.txt
-  traces/*.trace.json
-  metrics/*.metrics.jsonl
-```
-
-### 6.2 批量分析 Jenkins 构建号：`batch_analyze_jenkins_builds.py`
-
-范围模式：
-
-```powershell
-python .\scripts\batch_analyze_jenkins_builds.py `
-  --job services/fx-code-unittest `
-  --repo fx-code `
-  --build-from 5060 `
-  --build-to 5112 `
-  --timeout-seconds 900 `
-  --out-dir .\runs\jenkins-batch
-```
-
-离散构建号：
-
-```powershell
-python .\scripts\batch_analyze_jenkins_builds.py `
-  --job services/fx-code-unittest `
-  --repo fx-code `
-  --builds 5088,5094,5095
-```
-
-`--builds` 可与范围合并，最终去重排序。`--build-from` 和 `--build-to` 必须成对出现。脚本逐个执行：
-
-```text
-python -m ci_owner_agent analyze
-```
-
-输出包含 `index.jsonl`、`summary.csv`、notice、success marker、stdout、stderr 和可选 trace。
-
-### 6.3 重复运行本地分析：`rerun_analyze_local.py`
-
-```powershell
-python .\scripts\rerun_analyze_local.py `
-  --runs 5 `
-  --repo fx-code `
-  --job services/fx-code-unittest `
-  --build 5064 `
-  --branch dev `
-  --base-commit <base> `
-  --head-commit <head> `
-  --console-file .\samples\company_log\company-unittest-5064.log `
-  --result FAILURE `
-  --timeout-sec 900 `
-  --out-dir .\runs\rerun-5064
-```
-
-每次 run 单独创建：
-
-```text
-run-01/
-  notice.json
-  stdout.log
-  stderr.log
-  metrics.jsonl
-  command.txt
-  trace.json              # 可选
-  trace-summary.json      # 可选
-```
-
-根目录生成：
-
-```text
-summary.csv
-summary.json
-```
-
-每次运行独立完成 prepare、旧产物清理、执行、timeout 和 notice metadata 校验。单次失败形成独立 row，并继续后续运行。
-
-### 6.4 回填测试文件失败事件：`backfill_test_file_failures.py`
-
-```powershell
-python .\scripts\backfill_test_file_failures.py `
-  --repo fx-code `
-  --job services/fx-code-unittest `
-  --branch dev `
-  --dry-run
-```
-
-该脚本只读取已有 `ci_notices`、`ci_failure_chunks`、`ci_failure_facts` 和构建记录，不调用 LLM。确认 dry-run 结果后去掉 `--dry-run`；需要替换已有事件时使用 `--overwrite`。
-
-### 6.5 清空历史失败块：`clear_history_failure_chunks.py`
-
-```powershell
-python .\scripts\clear_history_failure_chunks.py
-```
-
-该脚本会删除当前数据库中 **全部** `ci_failure_chunks`。它是历史 schema 切换时的手工维护工具，不是日常清理命令，执行前应确认数据库和备份。
-
-### 6.6 共享路径、timeout 与 resume 语义
-
-三个批量 / rerun 脚本均可从任意 cwd 启动：
-
-- 显式传入的相对输入、输出、env 路径相对启动 cwd；
-- 未显式提供的 `.env` 和 `runs/...` 默认路径相对仓库根目录；
-- 子进程固定在仓库根目录运行；
-- `PYTHONPATH` 会将仓库根目录放在最前，同时保留原值。
-
-company 和 Jenkins batch 使用共享有界进程管理：
-
-- POSIX：独立 session + 终止整个进程组；
-- Windows：`taskkill /PID ... /T /F`，自身带 timeout，并有直接 kill fallback；
-- tree termination、grace reap、direct kill、final reap 异常不会把 timeout 改成 execution；
-- `terminationReaped` 表示是否确认回收，`terminationWarning` 保留诊断。
-
-旧产物清理失败采用 fail-closed：当前 build 不启动分析函数、不读取残留产物，记录 `errorKind=cleanup` 后继续其他 build。
-
-`--resume` 不会仅凭 notice 文件存在而跳过。只有以下全部满足时才允许复用：
-
-1. 子进程此前返回 `0`；
-2. notice schema 和 metadata 有效；
-3. 父进程成功写入 `schemaVersion=1` success marker；
-4. marker 使用严格 JSON schema，禁止未知字段和宽松类型转换；
-5. marker metadata 与当前任务一致；
-6. marker 中的 SHA-256 与当前 notice 内容一致。
-
-marker 文件名：
-
-```text
-<notice-file>.success.json
-```
-
-marker 只用于防止失败执行、残留文件和部分写入被错误 resume，不防御拥有同一输出目录写权限的恶意修改者。
-
-`executionSkipped` 的含义是“本次处理是否调用了 `run_analyze_local` / `run_analyze`”：
-
-- cleanup、validation、dry-run、合法 resume、非 runnable row：`true`；
-- 正常执行、非零、timeout、notice 错误、marker 创建错误：`false`。
-
----
-
-## 7. 输出结果说明
-
-### 7.1 `CiResponsibilityNotice`
-
-主 CLI 输出严格 JSON，当前 schema 的主要字段为：
-
-```text
-repo
-job
-buildNumber
-buildUrl
-result
-branch
-headCommit
-baseCommit
-owner
-failureReason
-evidence
-suggestions
-responsibilityItems
-hasHighConfidenceOwner
-```
-
-简化示例：
-
-```json
-{
-  "repo": "fx-code",
-  "job": "services/fx-code-unittest",
-  "buildNumber": 5064,
-  "buildUrl": "local://services/fx-code-unittest/5064",
-  "result": "FAILURE",
-  "branch": "dev",
-  "headCommit": "...",
-  "baseCommit": "...",
-  "owner": {
-    "type": "no_high_confidence_owner",
-    "name": "无高可信责任人",
-    "email": null,
-    "commit": null,
-    "confidence": 0
-  },
-  "failureReason": "证据不足，无法高可信定责。",
-  "evidence": [],
-  "suggestions": [],
-  "responsibilityItems": [],
-  "hasHighConfidenceOwner": false
-}
-```
-
-### 7.2 责任项字段
-
-每个 `responsibilityItems` 可以包含：
-
-- `failureId` / `failureSignature`；
-- `failureTitle` / `failureSummary`；
-- `testFilePath` / `failureFilePath`；
-- `owner`；
-- `responsibilityType`；
-- `sourceBuildNumber` / `sourceBuildUrl` / `sourceCommit`；
-- `matchType` / `relationship`；
-- `confidence`；
-- `reason`；
-- `evidenceIds`。
-
-历史来源字段由本地可信历史逻辑补充。普通模型输出的 no-owner 项不能自行声明历史来源，校验阶段会清理不可信字段。
-
-### 7.3 CLI 与脚本退出状态
-
-| 情况                                 | 常见退出状态 |
-| ------------------------------------ | ------------ |
-| 主 CLI 正常生成 notice               | `0`        |
-| 参数、输入、配置、反馈或服务启动错误 | `2`        |
-| batch / rerun 存在失败 row           | `1`        |
-| batch / rerun 全部成功或正常跳过     | `0`        |
-
-不要仅依赖 `analyze` 的退出码判断是否得到有效责任人。某些上下文不足场景会正常输出 no-owner notice。
-
-### 7.4 Batch 记录
-
-`index.jsonl` 保留每个 build 的完整记录；`summary.csv` 是便于筛选的扁平视图。常见诊断字段：
-
-```text
-returnCode
-errorKind
-error
-noticeValid
-noticeValidationError
-resumable
-successMarkerValid
-successMarkerError
-resumeValidated
-resumeInvalidReason
-executionSkipped
-cleanupWarning
-terminationReaped
-terminationWarning
-```
-
-主要错误类型包括：
-
-```text
-checkout_validation
-branch_validation
-status_validation
-manifest_validation
-cleanup
-execution
-timeout
-notice_missing
-notice_schema / notice_validation
-notice_metadata
-resume_marker
-```
-
-### 7.5 Metrics
-
-metrics JSONL 主要记录：
-
-```text
-durationMs
-stages
-llmCalls
-inputTokens
-outputTokens
-totalTokens
-tokenWarning
-responsibilityItemCount
-warnings
-errors
-```
-
-token 只累计 provider 实际返回的 usage，不估算缺失值。
-
-### 7.6 MongoDB 集合
-
-启用 history 后，当前代码初始化并使用以下主要集合：
-
-| 集合                             | 用途                                                   |
-| -------------------------------- | ------------------------------------------------------ |
-| `ci_builds`                    | 构建状态、commit、`buildTimestamp`、`analyzedAt`。 |
-| `ci_notices`                   | notice 快照和构建级责任摘要。                          |
-| `ci_failure_chunks`            | 结构化 failure summaries。                             |
-| `ci_failure_facts`             | AI failure facts。                                     |
-| `ci_test_file_failures`        | 每构建、每测试文件的失败事件。                         |
-| `ci_feedback`                  | 人工反馈和操作审计。                                   |
-| `ci_wecom_users`               | 企业微信 userid、邮箱和显示名映射。                    |
-| `ci_feedback_contexts`         | 构建反馈码及责任项上下文，带 TTL。                     |
-| `ci_wecom_pending_feedback`    | 等待确认的群内反馈，带 TTL 和租约。                    |
-| `ci_wecom_bot_events`          | 机器人消息幂等与处理租约。                             |
-| `ci_wecom_notification_outbox` | 待发送、发送中、已发送或 dead 的通知。                 |
-
-代码还初始化 `ci_notifications`、`ci_report_notifications` 等辅助集合；Webhook 模式用它们做可选发送记录和去重，Bot 模式使用 `ci_wecom_notification_outbox`。
-
-`buildTimestamp` 表示 Jenkins / 输入提供的真实构建时间；`analyzedAt` 表示 Agent 执行时间。没有 `buildTimestamp` 的历史仍可参与总量统计，但不能可靠归入自然周。
-
-### 7.7 企业微信通知链路
-
-真实通知有两条可选路径。默认 Webhook 路径不强制依赖 MongoDB；MongoDB 可用时仍保存通知快照、反馈码、去重和发送结果：
-
-```text
-analyze / notify-notice / weekly-test-report
-  -> 格式化同一份 Markdown（保留 <@userid>）
-  -> 可选 MongoDB 去重
-  -> 企业微信群机器人 Webhook 直发（连接异常最多 3 次有限重试）
-  -> 保存 sent / failed 结果（MongoDB 可用时）
-```
-
-Bot 路径完整保留 Outbox、租约、重试和 dead 状态：
-
-```text
-analyze / notify-notice / weekly-test-report
-  -> 格式化 Markdown
-  -> 写入 ci_wecom_notification_outbox
-  -> serve-wecom-bot 获取租约
-  -> 通过企业微信长连接主动投递
-  -> sent / pending retry / dead
-```
-
-Bot Outbox 使用稳定 `deliveryKey` 去重，`--force` / `--force-notify` 会生成新的投递键；失败重试使用指数退避，达到最大次数后进入 `dead`。
-
-Webhook 使用 `ci_notifications` / `ci_report_notifications` 做可选去重。`--force` 会绕过去重并立即重发，但本次重发失败不会抹掉历史成功状态：顶层 `status` 一旦为 `sent` 就保持 `sent`，最近一次尝试结果单独记录在 `lastAttemptStatus`、`lastAttemptError` 和 `lastAttemptAt`。
-
-### 7.8 测试文件统计
-
-统计按以下身份隔离：
-
-```text
-repo + job + branch + testFilePath
-```
-
-同一测试文件在同一构建只保存一条事件，`failureItemCount` 保留该文件实际责任项数量。
-
-周报分母仅包含 `SUCCESS`、`FAILURE`、`UNSTABLE`。完整构建序列用于计算连续失败；`ABORTED` / `NOT_BUILT` 跳过，其他没有该测试文件失败的有效构建会中断连续失败。
-
----
-
-## 8. 测试
-
-### 8.1 运行全部测试
-
-```powershell
-python -m pytest -q
-```
-
-### 8.2 语法检查
+标准验证命令：
 
 ```powershell
 python -m compileall ci_owner_agent scripts tests
-```
-
-### 8.3 常用聚焦测试
-
-```powershell
-python -m pytest tests/fx_code_test/test_batch_analyze_company_logs.py -q
-python -m pytest tests/fx_code_test/test_batch_analyze_jenkins_builds.py -q
-python -m pytest tests/fx_code_test/test_rerun_analyze_local.py -q
-python -m pytest tests/fx_code_test/test_script_runtime.py -q
-python -m pytest tests/fx_code_test/test_history_store.py -q
-python -m pytest tests/fx_code_test/test_weekly_test_report_service.py -q
-python -m pytest tests/fx_code_test/test_wecom_bot_cli.py -q
-python -m pytest tests/fx_code_test/test_batch_script_runtime.py tests/fx_code_test/test_company_batch_e2e.py -q
-```
-
-### 8.4 GitHub Actions
-
-`.github/workflows/ci.yml` 在以下情况运行：
-
-- push 到 `main`；
-- 面向 `main` 的 pull request；
-- 手工 `workflow_dispatch`。
-
-当前 CI 环境：
-
-```text
-ubuntu-latest
-Python 3.12
-pip install -e ".[dev]"
 python -m pytest -q
 ```
 
-Windows 专属进程终止分支通过平台无关 mock 单测验证；POSIX descendant 终止由 Ubuntu 真实子进程测试覆盖。生产 CLI 不包含测试模式环境变量，测试 launcher 完全位于 `tests/`。
+修改 `ts-analyzer` 时还要执行：
 
----
+```powershell
+node --check ts-analyzer/src/common.js
+node --check ts-analyzer/src/find_callers.js
+node --check ts-analyzer/src/find_definitions.js
+```
 
-## 9. 常见注意事项
+GitHub Actions 会在推送到 `main`、面向 `main` 的 Pull Request 和手工触发时，在 Ubuntu + Python 3.12 环境运行完整 pytest。
 
-1. **使用专用 repo cache**：不要指向人工开发工作区，TypeScript 和 Git 工具可能 detached checkout。
-2. **只信任真实 checkout 证据**：普通 SHA 文本、环境变量打印或分支指针不能替代 Jenkins 实际 checkout commit。
-3. **统一逻辑分支名**：`refs/remotes/origin/dev`、`*/dev` 等在输入边界规范化为 `dev`；Mongo 身份字段不保存原始 ref。
-4. **不要把 wrapper 当根因**：Docker、Jenkins、shell、Make 外层错误只有在没有更内层证据时才可作为结论。
-5. **fake provider 不做正式定责**：它用于验证流程和测试，结果固定保守。
-6. **history 关闭会禁用多项能力**：反馈、周报、测试文件统计、Outbox 和机器人均要求 MongoDB history store；Webhook 直发仍可使用，但不会持久化去重和反馈上下文。
-7. **默认通知是 dry-run**：`.env.example` 中 `CI_AGENT_WECOM_NOTIFY_DRY_RUN=true`。真实通知前必须显式关闭，并按 transport 配置 Webhook URL 或 Bot chatid。
-8. **分析通知失败不会覆盖 notice**：`analyze` / `analyze-local` 将通知异常降级为 stderr warning，并把脱敏原因写入 metrics warnings；独立 `notify-notice` 和 `weekly-test-report` 会以非零状态报告通知失败。Webhook 的连接异常会先做最多 3 次有限重试。
-9. **success marker 不是安全签名**：它保证失败执行和残留产物不会被误 resume，但不能防御有输出目录写权限的攻击者。
-10. **批处理默认 fail-closed**：旧 notice、marker、stdout、stderr、trace 或 metrics 无法清理时，不会启动当前子进程。
-11. **timeout 后产物不可信**：notice、owner、责任项、metrics 和 trace 都不作为成功结果。
-12. **共享 token 不是完整鉴权**：反馈 Web 服务的 shared token 只提供简单访问保护。
-13. **群内反馈没有管理员白名单**：群成员可以发起反馈；只有发起人可以确认或取消该次操作，所有写入均保留审计信息。
-14. **PowerShell 编码需谨慎**：优先使用 `--output-file`；已经发生中文乱码的 JSON 无法通过改编码恢复。
-15. **metrics token 不估算**：provider 不返回 usage 时保持缺失，不使用字符数推算。
-16. **清理脚本具有破坏性**：`clear_history_failure_chunks.py` 会删除整个集合。
-17. **路径基准不同**：显式相对路径相对启动 cwd，脚本默认 `.env` 和 `runs/...` 相对仓库根目录。
-18. **`JENKINS_URL` 缺失不一定返回非零**：在线 `analyze` 会生成 no-owner notice；自动化调用方必须校验 notice。
+## 安全与上线
 
----
+- 凭据只能来自授权环境配置或 Jenkins Credentials，不得进入源码、日志、notice、历史记录或提示词。
+- Git 定责必须使用 Agent 专用 repo cache，不能操作人工开发工作区。
+- 默认使用 fake provider、关闭 history 和通知，并保持通知 dry-run。
+- 外部验证按 local/fake → 真实模型无通知 → Jenkins 单构建 → MongoDB/通知 dry-run → 测试群真实发送逐级进行。
+- 正式群、生产定时任务和部署必须重新确认目标、人员映射、敏感信息、回退点和运行环境。
+- 批处理、超时和 resume 默认 fail closed；残留产物不能当作成功结果复用。
+- `scripts/clear_history_failure_chunks.py` 会删除整类历史数据，未经备份和明确授权不得执行。
 
-## 10. 推荐调试顺序
+部署与维护以 [`docs/ubuntu_scheduled_analysis.md`](docs/ubuntu_scheduled_analysis.md) 及内部部署维护手册为准。仓库内文档示例均不应替代现场配置确认。
 
-首次接入建议按以下顺序进行：
+## 项目资料
 
-1. **安装并运行全量测试**
-
-   ```powershell
-   python -m pip install -e ".[dev]"
-   python -m pytest -q
-   ```
-2. **准备专用 repo cache**
-
-   确认目标仓库可 fetch，并且 `baseCommit`、`headCommit` 均存在。
-3. **使用 fake provider 跑单个 `analyze-local`**
-
-   ```env
-   CI_AGENT_MODEL_PROVIDER=fake
-   CI_AGENT_HISTORY_ENABLED=false
-   CI_AGENT_WECOM_NOTIFY_ENABLED=false
-   ```
-   验证 checkout SHA、Git ancestry、JSON 输出和路径配置。
-4. **启用真实模型分析单个失败构建**
-
-   配置 provider、model、API key 和必要的 base URL，先不要开启通知。
-5. **启用 MongoDB history**
-
-   连续分析多个同分支构建，检查 `ci_builds`、`ci_notices`、failure chunks / facts 和历史继承。
-6. **启用 metrics 与可选 LangSmith**
-
-   观察阶段耗时、LLM calls、token usage 和 trace metadata。
-7. **验证本地批处理和 rerun**
-
-   先使用 `--dry-run`，再执行少量构建；检查 `index.jsonl`、`summary.csv`、notice、marker 和 timeout 诊断。
-8. **启动反馈 Web 服务**
-
-   配置 feedback URL 和可选 shared token，验证页面、用户搜索和反馈写入。
-9. **验证通知格式**
-
-   ```powershell
-   python -m ci_owner_agent notify-notice `
-     --notice-file .\runs\example.notice.json `
-     --dry-run
-   ```
-10. **验证 Webhook 主动通知**
-
-    设置 `CI_AGENT_WECOM_NOTIFY_TRANSPORT=webhook`，配置测试群 Webhook 和 userid 映射，关闭通知 dry-run；确认群内收到通知、真实成员 @ 被渲染为蓝色，并验证普通去重和 `--force`。
-11. **启动常驻 `serve-wecom-bot`**
-
-    Webhook transport 下 Worker 只负责群内反馈，不要求通知 chatid。需要验证旧 Bot 主动通知路径时，再发现 chatid、切换 `CI_AGENT_WECOM_NOTIFY_TRANSPORT=bot`，并确认 Outbox 最终进入 `sent`。
-12. **验证群内反馈确认流程**
-
-    测试固定命令、确认卡片、TTL、重复消息幂等和反馈审计。
-13. **验证测试文件统计与周报**
-
-    ```powershell
-    python -m ci_owner_agent test-failure-stats `
-      --repo fx-code --period current-week --format markdown
-
-    python -m ci_owner_agent weekly-test-report `
-      --repo fx-code --period previous-week --dry-run
-    ```
-14. **最后接入 Jenkins 在线分析或定时任务**
-
-    Jenkins 可在构建结束后调用 `analyze`，并由外部调度器每周运行 `weekly-test-report`。Python 进程本身不负责常驻周调度。
+- [项目介绍（飞书）](https://fanruan-x.feishu.cn/wiki/WynLw41XZiV8zykRwYwcrEJhnQb)
+- [部署维护手册（飞书）](https://fanruan-x.feishu.cn/wiki/SJwHwOOK3iTsmUkp7jac2xVenzc)
+- [Fidget 单元/集成测试通知优化（飞书）](https://fanruan-x.feishu.cn/wiki/N8rNwNR2dihxCzkEf8xclopsnng)
