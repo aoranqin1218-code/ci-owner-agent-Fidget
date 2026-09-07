@@ -200,7 +200,7 @@ def test_many_items_keep_totals_and_omission_note():
 
 
 def test_coverage_item_rendered_as_coverage_label():
-    coverage = current_item(name="秦奥然", email="aq@example.com", title="coverage branches,lines below threshold for src/generator/SqlUtils.ts", medium=True)
+    coverage = current_item(name="秦奥然", email="aq@example.com", title="coverage branches (80%/100%),lines (90%/100%) below threshold for src/generator/SqlUtils.ts", medium=True)
     coverage.update(
         {
             "failureSignature": "coverage_threshold_failure|packages/fidget-sql/src/generator/sqlutils.ts",
@@ -212,6 +212,7 @@ def test_coverage_item_rendered_as_coverage_label():
     payload, _ = format_payload(notice, owner_open_ids={"秦奥然": "ou_cov"})
     text = all_text(payload)
     assert "覆盖率未达标" in text
+    assert "分支 80% / 阈值 100%、行 90% / 阈值 100%" in text
     assert "**覆盖率：**" in text
     assert "**单元测试：**" not in text
     assert "**集成测试：**" not in text

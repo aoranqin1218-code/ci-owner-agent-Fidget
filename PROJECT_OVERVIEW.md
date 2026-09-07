@@ -210,7 +210,7 @@ python -m ci_owner_agent <command>
     - `_find_plaintext_secrets` 发送前敏感扫描（任何 MongoDB/网络副作用之前 fail closed）；
     - `FeishuUserMapper`（[feishu_user_mapping.py](ci_owner_agent/services/feishu_user_mapping.py)）解析 open_id `@`，无映射降级姓名文本，不猜身份；映射条目的 `fallback: true` 指定默认兜底维护人，并优先于环境变量中的旧兜底值；
     - 企微 Markdown 与飞书 `interactive` 卡片共用保守的失败原因分类：按“构建失败 / 单元测试 / 集成测试 / 覆盖率 / 其他失败”分栏，只有明确的失败签名或测试路径才进入专用栏，未知项进入“其他失败”，避免把普通 Jenkins/编译失败默认写成单元或集成测试；同一集成 suite 的大量环境失败被聚合为责任项时，栏目标题同时展示原始失败总数与聚合组数，避免把数百次失败误读成少量失败；
-    - `format_feishu_notice_payload`（[feishu_notification_formatter.py](ci_owner_agent/services/feishu_notification_formatter.py)）渲染飞书 `interactive` 展示卡片（蓝色 header、Markdown 粗体分区、显式区块 margin、`width_mode=fill` 自适应聊天窗口宽度）；no-owner 项逐项展示待确认维护人或默认兜底路由，覆盖率建议与其他建议统一进入底部“修复建议”，并过滤与最终 coverage 责任项冲突的 Agent 阶段流程说明；
+    - `format_feishu_notice_payload`（[feishu_notification_formatter.py](ci_owner_agent/services/feishu_notification_formatter.py)）渲染飞书 `interactive` 展示卡片（蓝色 header、Markdown 粗体分区、显式区块 margin、`width_mode=fill` 自适应聊天窗口宽度）；no-owner 项逐项展示待确认维护人或默认兜底路由，覆盖率标题展示各指标的实际百分比与配置阈值，覆盖率建议与其他建议统一进入底部“修复建议”，并过滤与最终 coverage 责任项冲突的 Agent 阶段流程说明；
     - `store.notification_sent`（`channel=feishu`）去重 → `send_feishu_payload`（[feishu_notifier.py](ci_owner_agent/services/feishu_notifier.py)，可选官方签名；返回仅保留 HTTP 状态、数值业务码和受控错误类别，不保留原始响应正文）POST 测试群 → `save_notification`（`channel=feishu`）；
     - 企微与飞书互不影响，任一失败只打 WARNING，不改写 notice；飞书卡片本期只做展示和 URL 跳转，**不生成反馈码、不处理卡片交互回调**（反馈闭环留待后续独立任务）。
 

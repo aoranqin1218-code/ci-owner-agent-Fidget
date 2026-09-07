@@ -16,8 +16,11 @@ from ci_owner_agent.services.wecom_user_mapping import WeComUserMapper
 
 COVERAGE_FAILURE_SIGNATURE_PREFIX = "coverage_threshold_failure|"
 COVERAGE_FAILURE_TITLE_RE = re.compile(
-    r"^coverage\s+(?P<metrics>.+?)\s+below threshold for\s+(?P<path>.+)$",
+    r"^coverage\s+(?P<metrics>.+?)\s+below threshold(?: for\s+(?P<path>.+))?$",
     re.IGNORECASE,
+)
+COVERAGE_METRIC_DETAIL_RE = re.compile(
+    r"^(?P<metric>[^()]+?)(?:\s*\(\s*(?P<pct>[\d.]+)%\s*/\s*(?P<threshold>[\d.]+)%\s*\))?$"
 )
 SINGLE_AUTHOR_COVERAGE_REASON_RE = re.compile(
     r"^single author (?P<name>.+?) modified (?P<path>.+?) in (?P<scope>focus|full) range$",
@@ -538,27 +541,44 @@ def responsibility_item_label(item: ResponsibilityItem, notice: CiResponsibility
     return responsibility_type_label(item.responsibilityType)
 
 
-def coverage_title_parts(item: ResponsibilityItem) -> tuple[str, tuple[str, ...]]:
+def coverage_title_parts(
+    item: ResponsibilityItem,
+) -> tuple[str, tuple[str, ...], tuple[str, ...]]:
     match = COVERAGE_FAILURE_TITLE_RE.match(str(item.failureTitle or "").strip())
     if not match:
-        return str(item.failureFilePath or "").strip(), ()
-    metrics = tuple(
-        COVERAGE_METRIC_LABELS.get(metric.strip().lower(), metric.strip())
-        for metric in match.group("metrics").split(",")
-        if metric.strip()
-    )
-    return match.group("path"), metrics
+        return str(item.failureFilePath or "").strip(), (), ()
+    metric_details: list[str] = []
+    metric_labels: list[str] = []
+    for raw_metric in match.group("metrics").split(","):
+        metric_match = COVERAGE_METRIC_DETAIL_RE.match(raw_metric.strip())
+        if not metric_match:
+            continue
+        metric = metric_match.group("metric").strip()
+        label = COVERAGE_METRIC_LABELS.get(metric.lower(), metric)
+        metric_labels.append(label)
+        if metric_match.group("pct") and metric_match.group("threshold"):
+            metric_details.append(
+                f"{label} {metric_match.group('pct')}% / 阈值 {metric_match.group('threshold')}%"
+            )
+        else:
+            metric_details.append(label)
+    return str(match.group("path") or "").strip(), tuple(metric_details), tuple(metric_labels)
 
 
 def format_item_title(item: ResponsibilityItem, max_chars: int) -> str:
     title = public_single_line(item.failureTitle, max_chars)
     if not is_coverage_failure_item(item):
         return title
-    path, metrics = coverage_title_parts(item)
+    path, metric_details, _ = coverage_title_parts(item)
     if not path:
+        if metric_details:
+            return truncate_single_line(
+                f"覆盖率未达标（{'、'.join(metric_details)}）",
+                max_chars,
+            )
         return f"覆盖率未达标：{title}"
     return truncate_single_line(
-        f"覆盖率未达标：{path}（{'、'.join(metrics) or '指标'}）",
+        f"覆盖率未达标：{path}（{'、'.join(metric_details) or '指标'}）",
         max_chars,
     )
 
@@ -578,9 +598,9 @@ def format_item_reason(item: ResponsibilityItem, max_chars: int) -> str:
 def format_coverage_item_suggestion(item: ResponsibilityItem) -> str | None:
     if not is_coverage_failure_item(item):
         return None
-    path, metrics = coverage_title_parts(item)
+    path, _, metric_labels = coverage_title_parts(item)
     target = path or "相关源码文件"
-    metric_text = "、".join(metrics) or "覆盖率"
+    metric_text = "、".join(metric_labels) or "覆盖率"
     return f"补充 {target} 中未覆盖分支的测试，使 {metric_text} 达到配置阈值。"
 
 

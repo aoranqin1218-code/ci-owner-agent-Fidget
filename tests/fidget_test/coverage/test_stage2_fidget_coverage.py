@@ -348,6 +348,9 @@ def test_reconciler_uses_complete_coverage_files_and_promotes_single_medium_owne
     assert item.failureSignature == f"coverage_threshold_failure|{path.lower()}"
     assert item.owner.type == "medium_confidence"
     assert item.failureFilePath == path
+    assert item.failureTitle == (
+        "coverage lines (90%/100%),statements (80%/100%) below threshold for src/X.ts"
+    )
     assert notice.owner.type == "medium_confidence"
     assert notice.owner.name == "Zhang San"
     assert notice.hasHighConfidenceOwner is False
@@ -381,6 +384,7 @@ def test_global_coverage_reconciles_to_no_owner_without_fake_path():
     assert item.failureFilePath is None
     assert item.owner.type == "no_high_confidence_owner"
     assert item.failureSignature == "coverage_threshold_failure|global|fidget-sql|branches"
+    assert item.failureTitle == "coverage branches (80%/100%) below threshold"
     assert item.evidenceIds and all(value.startswith("coverage-log-") for value in item.evidenceIds)
 
 

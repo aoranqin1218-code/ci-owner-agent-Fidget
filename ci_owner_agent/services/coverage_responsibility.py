@@ -301,6 +301,31 @@ def _coverage_stable_signature(
     return f"coverage_threshold_failure|{resolved_path or f'unresolved|{raw_path}'}"
 
 
+def _format_coverage_number(value: Any) -> str | None:
+    """把解析后的 coverage 数值格式化为适合 notice 标题的紧凑文本。"""
+    try:
+        return f"{float(value):g}"
+    except (TypeError, ValueError):
+        return None
+
+
+def _format_coverage_metrics(metrics: dict[str, Any]) -> str:
+    """保留指标名、实际覆盖率和阈值，同时兼容缺少详情的旧摘要。"""
+    parts: list[str] = []
+    for metric in sorted(str(name) for name in metrics):
+        detail = metrics.get(metric)
+        if not isinstance(detail, dict):
+            parts.append(metric)
+            continue
+        pct = _format_coverage_number(detail.get("pct"))
+        threshold = _format_coverage_number(detail.get("threshold"))
+        if pct is None or threshold is None:
+            parts.append(metric)
+            continue
+        parts.append(f"{metric} ({pct}%/{threshold}%)")
+    return ",".join(parts)
+
+
 def _is_coverage_item(item: ResponsibilityItem) -> bool:
     signature = item.failureSignature or ""
     return (
@@ -340,6 +365,7 @@ def reconcile_coverage_responsibilities(
         package_name = record.get("packageName")
         metrics = record.get("metrics") or {"coverage": {}}
         metric_names = sorted(str(metric) for metric in metrics)
+        metric_title = _format_coverage_metrics(metrics)
         if not raw_path:
             # global 覆盖率失败：无具体文件，直接 no-owner（无法定位责任文件）
             for metric in metric_names:
@@ -359,7 +385,10 @@ def reconcile_coverage_responsibilities(
                 notice.responsibilityItems.append(
                     _build_coverage_item(
                         failure_signature=tag,
-                        failure_title=f"coverage {metric} below threshold",
+                        failure_title=(
+                            f"coverage {_format_coverage_metrics({metric: metrics.get(metric) or {}})} "
+                            "below threshold"
+                        ),
                         file_path=None,
                         owner_type="no_high_confidence_owner",
                         owner=None,
@@ -396,7 +425,7 @@ def reconcile_coverage_responsibilities(
         notice.responsibilityItems.append(
             _build_coverage_item(
                 failure_signature=tag,
-                failure_title=f"coverage {','.join(metric_names)} below threshold for {raw_path}",
+                failure_title=f"coverage {metric_title} below threshold for {raw_path}",
                 file_path=resolution.resolved_path,
                 owner_type=resolution.owner_type,
                 owner=owner,

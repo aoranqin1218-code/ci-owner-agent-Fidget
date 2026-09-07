@@ -379,9 +379,9 @@ def test_coverage_item_is_rendered_in_chinese_without_changing_its_schema_data()
     )
     coverage.update(
         {
-            "failureTitle": "coverage branches,lines,statements below threshold for src/generator/SqlUtils.ts",
+            "failureTitle": "coverage branches (80%/100%),lines (90%/100%),statements (85.5%/100%) below threshold for src/generator/SqlUtils.ts",
             "failureSignature": "coverage_threshold_failure|packages/fidget-sql/src/generator/sqlutils.ts",
-            "failureSummary": "coverage branches,lines,statements below threshold for src/generator/SqlUtils.ts",
+            "failureSummary": "coverage branches (80%/100%),lines (90%/100%),statements (85.5%/100%) below threshold for src/generator/SqlUtils.ts",
             "failureFilePath": "packages/fidget-sql/src/generator/SqlUtils.ts",
             "confidence": 0.6,
             "sourceCommit": "h",
@@ -396,10 +396,14 @@ def test_coverage_item_is_rendered_in_chinese_without_changing_its_schema_data()
 
     markdown = format_wecom_markdown_notice(notice)
 
-    assert "覆盖率未达标：src/generator/SqlUtils.ts（分支、行、语句）" in markdown
+    assert (
+        "覆盖率未达标：src/generator/SqlUtils.ts"
+        "（分支 80% / 阈值 100%、行 90% / 阈值 100%、语句 85.5% / 阈值 100%）"
+        in markdown
+    )
     assert "**责任人（中等置信）**：@AoranQin-秦奥然" in markdown
     assert "在本次责任排查范围内，仅 AoranQin-秦奥然 修改了 packages/fidget-sql/src/generator/SqlUtils.ts。" in markdown
-    assert "coverage branches,lines,statements below threshold" not in markdown
+    assert "coverage branches (80%/100%),lines" not in markdown
     assert "single author AoranQin-秦奥然 modified" not in markdown
     assert "本通知不为其分配责任人" not in markdown
 
